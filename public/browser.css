@@ -1,0 +1,23 @@
+* { box-sizing: border-box; }
+:root { color-scheme: light dark; font: 13px Inter, ui-sans-serif, system-ui, sans-serif; color: #25232b; background: #f3f3f7; --chrome: #f3f3f7; --tab: #e7e7ed; --tab-active: #fff; --line: #d9d9e1; --text: #25232b; --muted: #777680; --control: #e8e8ef; --field: #fff; --accent: #7766ee; --hover: #dedee7; }
+@media (prefers-color-scheme: dark) { :root { color-scheme: dark; color: #e9e8ef; background: #17171c; --chrome: #202026; --tab: #292930; --tab-active: #17171c; --line: #35353f; --text: #e9e8ef; --muted: #a09fac; --control: #30303a; --field: #17171c; --accent: #a89aff; --hover: #393943; } }
+body { margin: 0; min-width: 620px; overflow: hidden; color: var(--text); background: var(--chrome); }
+.browser-chrome { height: 106px; display: grid; grid-template-rows: 45px 44px 17px; padding: 0 12px; background: var(--chrome); border-bottom: 1px solid var(--line); }
+.tab-strip { display: flex; align-items: end; gap: 5px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.tab { position: relative; display: flex; align-items: center; gap: 12px; width: 218px; min-width: 140px; max-width: 260px; height: 35px; padding: 0 10px 0 13px; border: 1px solid transparent; border-bottom: 0; border-radius: 9px 9px 0 0; background: var(--tab); color: var(--muted); cursor: pointer; }
+.tab.active { height: 38px; background: var(--tab-active); color: var(--text); border-color: var(--line); }
+.tab-title { flex: 1; min-width: 0; overflow: hidden; padding: 0; border: 0; background: transparent; color: inherit; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+button { font: inherit; color: inherit; cursor: pointer; }
+.tab-close { width: 23px; height: 23px; padding: 0; border: 0; border-radius: 6px; background: transparent; font-size: 17px; line-height: 20px; }
+.tab-close:hover, .toolbar > button:hover { background: var(--hover); }
+.toolbar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.toolbar > button { flex: 0 0 34px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: transparent; font-size: 20px; }
+.toolbar > button:disabled { opacity: .36; cursor: default; }
+#address-form { display: flex; align-items: center; flex: 1; height: 35px; min-width: 100px; padding: 0 7px 0 13px; gap: 9px; border: 1px solid var(--line); border-radius: 19px; background: var(--field); box-shadow: 0 1px 2px #0000000c; }
+#address-form:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+.secure-mark { color: var(--accent); font-size: 12px; }
+#address { flex: 1; width: 20px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; }
+.go { border: 0; border-radius: 14px; padding: 5px 12px; background: var(--control); color: var(--text); }
+.go:hover { background: var(--hover); }
+.new-tab { margin-left: 2px; }
+.status { overflow: hidden; padding-left: 8px; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

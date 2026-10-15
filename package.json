@@ -1,0 +1,108 @@
+{
+  "name": "orion-local-ai",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.4.3",
+  "description": "Local-first conversational AI workspace",
+  "author": {
+    "name": "Orion",
+    "email": "hello@orion.local"
+  },
+  "homepage": "https://orion.local",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "bun run build && bunx --bun electron .",
+    "build": "bun scripts/generate-highlight-languages.mjs && bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json && bun build src/main/main.ts src/main/ofsWorker.ts src/preload/preload.ts src/preload/browserPreload.ts --target=node --packages=external --external=electron --outdir=dist --root=src --format=cjs && bun scripts/build-renderer.mjs",
+    "test": "bun run build && bunx --bun tsc -p tsconfig.test-build.json && bun test && bun scripts/check-ofs.mjs",
+    "start": "bunx --bun electron .",
+    "typecheck": "bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json",
+    "dist": "bun run build && bunx --bun electron-builder && bun run checksums",
+    "checksums": "bun scripts/write-checksums.mjs"
+  },
+  "dependencies": {
+    "croner": "^10.0.1",
+    "cross-spawn": "^7.0.6",
+    "dompurify": "^3.4.16",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.18.9",
+    "marked": "^18.0.14",
+    "mermaid": "^12.0.0",
+    "officeparser": "^8.1.1",
+    "systeminformation": "^5.33.13"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^26.6.2",
+    "electron": "^44.4.5",
+    "electron-builder": "26.15.3",
+    "typescript": "^7.0.2"
+  },
+  "build": {
+    "appId": "com.orion.localai",
+    "productName": "Orion",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "build/icons/orion-32.png",
+        "to": "icons/orion-32.png"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      }
+    ],
+    "mac": {
+      "icon": "build/icons/orion.icns",
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "notarize": true,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "build/icons/orion.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "icon": "build/icons/orion-512x512.png",
+      "syncDesktopName": true,
+      "category": "Utility",
+      "maintainer": "Orion <hello@orion.local>",
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ]
+    }
+  },
+  "allowScripts": {
+    "electron": true,
+    "esbuild": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "engines": { "bun": ">=1.4.3" },
+  "overrides": {
+    "electron-winstaller": {
+      "temp": {
+        "rimraf": "^6.1.3"
+      }
+    }
+  },
+  "desktopName": "Orion",
+  "license": "MIT"
+}

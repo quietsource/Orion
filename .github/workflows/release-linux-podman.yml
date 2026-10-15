@@ -1,0 +1,31 @@
+name: Build Linux release packages
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Orion release version
+        required: true
+        default: 0.1.0
+        type: string
+permissions:
+  contents: write
+jobs:
+  linux-packages:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman version
+      - name: Build AppImage, deb, and rpm in Podman
+        env:
+          ORION_BUILDER_IMAGE: docker.io/electronuserland/builder:wine
+        run: bash build.sh
+      - name: Upload packages to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release upload "$VERSION" release/"$VERSION"/appimage/* release/"$VERSION"/deb/* release/"$VERSION"/rpm/* --clobber

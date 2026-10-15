@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self';">
+  <title>Orion Browser</title>
+  <link rel="stylesheet" href="./browser.css">
+</head>
+<body>
+  <header class="browser-chrome">
+    <nav class="tab-strip" id="tabs" aria-label="Browser tabs"></nav>
+    <div class="toolbar">
+      <button id="back" title="Back" aria-label="Back">←</button>
+      <button id="forward" title="Forward" aria-label="Forward">→</button>
+      <button id="reload" title="Reload" aria-label="Reload">↻</button>
+      <form id="address-form"><span class="secure-mark" aria-hidden="true">●</span><input id="address" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address" placeholder="Search or enter address"><button class="go" type="submit">Go</button></form>
+      <button id="new-tab" class="new-tab" title="New tab" aria-label="New tab">＋</button>
+    </div>
+    <div class="status" id="status" aria-live="polite">Ready · Ctrl/⌘+T new tab · Ctrl/⌘+L address bar</div>
+  </header>
+  <script src="./browser-ui.js"></script>
+</body>
+</html>
