@@ -80,7 +80,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "differentialPackage": false
     },
     "linux": {
       "icon": "build/icons/orion-512x512.png",

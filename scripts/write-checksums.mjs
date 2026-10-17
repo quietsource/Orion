@@ -16,7 +16,7 @@ async function sha256(path) {
 
 const entries = await readdir(directoryPath, { withFileTypes: true });
 const files = entries
-  .filter((entry) => entry.isFile() && entry.name.includes(version) && (entry.name.endsWith('.blockmap') || [...distributableExtensions].some((extension) => entry.name.endsWith(extension))))
+  .filter((entry) => entry.isFile() && entry.name.includes(version) && [...distributableExtensions].some((extension) => entry.name.endsWith(extension)))
   .map((entry) => entry.name)
   .sort((a, b) => a.localeCompare(b));
 
