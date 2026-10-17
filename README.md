@@ -4,6 +4,10 @@ Orion is a local-first desktop app for chatting with AI models, using research a
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
+## Demo
+
+https://github.com/user-attachments/assets/d7c1c74b-128a-4517-bbcf-be5ce9eeb2bc
+
 ## Platform support
 
 - **Windows x64:** supported. The release provides a setup installer and a portable executable.
