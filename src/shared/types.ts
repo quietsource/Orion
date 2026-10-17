@@ -21,12 +21,11 @@ export interface GitCheckpoint { id: string; label: string; ref: string; created
 export interface WorkspaceStatus { root: string; git: boolean; branch: string|null; changedFiles: number; additions: number; deletions: number; checkpoints: GitCheckpoint[]; }
 export interface ToolRequest { id: string; name: string; description: string; input: Record<string, unknown>; requiresApproval: boolean; conversationId?: string; }
 export interface UserQuestionRequest { id: string; conversationId: string; questions: Array<{ question: string; options: string[] }>; }
-export interface DiagramValidationRequest { id: string; source: string; }
-export interface DiagramValidationResult { valid: boolean; error?: string; }
 export type ScheduledJobStatus = 'scheduled'|'queued'|'running'|'completed'|'error';
 export interface ScheduledJob { id: string; name: string; cron: string; timezone: string; prompt: string; model: string; agent: boolean; createdBy: 'user'|'agent'; enabled: boolean; status: ScheduledJobStatus; nextRunAt: number|null; lastRunAt: number|null; lastOutput?: string; lastConversationId?: string; createdAt: number; updatedAt: number; }
 export type ModelCategory = 'conversational'|'image'|'video';
 export interface HubModel { id: string; author?: string; downloads?: number; likes?: number; pipelineTag?: string; description?: string; license?: string; }
+export interface HubSearchPage { models: HubModel[]; nextUrl: string | null; }
 export interface HubFile { name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string; relatedFiles?: Array<{ name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string }>; }
 export interface InstalledModel { id: string; repo: string; file: string; category: ModelCategory; path: string; files?: string[]; fileSha256?: Record<string,string>; bundleVersion?: number; size: number; downloadedAt: number; source?: string; invokeKey?: string; }
 export interface DownloadProgress { id: string; repo: string; file: string; received: number; total: number; phase: 'downloading'|'complete'|'cancelled'|'error'; error?: string; }
@@ -70,12 +69,10 @@ export interface OrionAPI {
   onToolRequest(callback: (tool: ToolRequest) => void): () => void;
   respondToQuestion(id: string, answer: string): Promise<void>;
   onUserQuestion(callback: (question: UserQuestionRequest) => void): () => void;
-  onDiagramValidationRequest(callback: (request: DiagramValidationRequest) => void): () => void;
-  respondToDiagramValidation(id: string, result: DiagramValidationResult): Promise<boolean>;
   getSystemInfo(): Promise<{ platform: string; ollama: boolean; cpuUsagePercent: number|null; usedRamMB: number; totalRamMB: number; gpuUsagePercent: number|null; usedVramMB: number | null; totalVramMB: number }>;
   listScheduledJobs(): Promise<ScheduledJob[]>; saveScheduledJob(job: Partial<ScheduledJob>): Promise<ScheduledJob>; deleteScheduledJob(id: string): Promise<void>;
   onScheduledJob(callback: (job: ScheduledJob) => void): () => void; onScheduledJobsChanged(callback: () => void): () => void; completeScheduledJob(id: string, status: 'completed'|'error', output: string, conversationId: string): Promise<void>;
-  searchHub(query: string, category: ModelCategory): Promise<HubModel[]>; getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
+  searchHub(query: string, category: ModelCategory, nextUrl?: string|null): Promise<HubSearchPage>; getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
   getHuggingFaceTokenConfigured(): Promise<boolean>;
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;

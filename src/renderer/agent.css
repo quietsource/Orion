@@ -14,7 +14,7 @@
 :root[data-theme] dialog{background:var(--surface);color:var(--text);border-color:var(--border);box-shadow:0 20px 80px #0005}
 :root[data-theme] input:not([type=checkbox]),:root[data-theme] dialog select,:root[data-theme] .model-selector,:root[data-theme] .context-selector,:root[data-theme] .create-model,:root[data-theme] .create-modes{background:var(--bg);color:var(--text)}
 :root[data-theme] .model-selector option{background:var(--surface);color:var(--text)}
-:root[data-theme] .code-block,:root[data-theme] .mermaid-render,:root[data-theme] #approval-detail{background:var(--code-bg);color:var(--message-text)}
+:root[data-theme] .code-block,:root[data-theme] #approval-detail{background:var(--code-bg);color:var(--message-text)}
 :root[data-theme="light"] input:not([type=checkbox]),:root[data-theme="light"] dialog select,:root[data-theme="light"] .model-selector,:root[data-theme="light"] .context-selector,:root[data-theme="light"] .create-model,:root[data-theme="light"] .create-modes,:root[data-theme="paper"] input:not([type=checkbox]),:root[data-theme="paper"] dialog select,:root[data-theme="paper"] .model-selector,:root[data-theme="paper"] .context-selector,:root[data-theme="paper"] .create-model,:root[data-theme="paper"] .create-modes{background:var(--surface);color:var(--text)}
 .composer-wrap{z-index:8}
 .command-palette{position:absolute;left:50%;right:auto;bottom:calc(100% - 20px);width:min(520px,calc(100vw - 36px));max-height:min(70vh,660px);padding:16px;overflow:auto;pointer-events:auto;border:1px solid var(--border);border-radius:16px;background:var(--surface);box-shadow:0 24px 70px #0009;opacity:0;transform:translate(-50%,16px) scale(.985);transform-origin:bottom center;transition:opacity .16s ease,transform .18s cubic-bezier(.2,.8,.2,1)}
@@ -149,19 +149,11 @@ body.sidebar-collapsed .history-new-chat{display:none!important}
 .context-selector:hover{border:0;background:var(--hover)}
 .context-selector:focus,.context-selector:focus-visible{border:0;outline:none;box-shadow:none}
 
-/* Keep streamed GFM tables legible and Mermaid source/rendering together. */
+/* Keep streamed GFM tables legible. */
 .message-body table{display:block;width:max-content;max-width:100%;margin:14px 0;overflow-x:auto;border-collapse:collapse;border-spacing:0;color:var(--message-text);font-size:13px;line-height:1.5}
 .message-body th,.message-body td{min-width:72px;padding:7px 10px;border:1px solid var(--border);text-align:left;vertical-align:top}
 .message-body th{background:var(--surface);color:var(--text);font-weight:600}
 .message-body tr:nth-child(even) td{background:color-mix(in srgb,var(--surface) 65%,transparent)}
-.mermaid-block{margin:14px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.mermaid-block .mermaid-render{border:0}
-.mermaid-source{border-bottom:1px solid var(--border-soft);color:var(--muted)}
-.mermaid-source summary{padding:7px 11px;font-size:11px;cursor:pointer}
-.mermaid-source pre{max-height:360px;margin:0;padding:10px 12px;overflow:auto;border-top:1px solid var(--border-soft);font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap}
-.mermaid-render-error{display:flex;align-items:flex-start;gap:12px;max-width:100%;padding:12px;color:var(--secondary);font-size:12px;line-height:1.5}
-.mermaid-render-error span{min-width:0;flex:1;overflow-wrap:anywhere}
-.mermaid-render-error button{flex:none;padding:4px 9px;font-size:11px}
 
 .tool-approval{display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:1px solid var(--border-soft);background:color-mix(in srgb,var(--accent) 5%,var(--bg));}
 .tool-approval[hidden]{display:none}

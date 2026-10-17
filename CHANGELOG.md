@@ -1,3 +1,12 @@
+# Orion 0.1.2 — Reliable updates and smoother model browsing
+
+- Moved update notices and download progress into the sidebar and hardened Windows update installation and relaunch so Orion verifies the installer handoff before showing release notes.
+- Fixed model download cancellation so active transfers stop and incomplete temporary files are removed.
+- Preserved model browser scroll position while choosing model files, split installed models into conversational and image/video sections, and added next-page browsing.
+- Improved chat follow behavior for reasoning and code/output panes, and added syntax highlighting while code streams.
+- Added a conversation-scoped plan/checklist card near the composer and instructed Orion to keep it current as work progresses.
+- Removed Mermaid diagram rendering and its tool.
+
 # Orion 0.1.1 — GPU inference and live resource monitoring
 
 - Added live CPU, RAM, GPU, and VRAM usage to the sidebar resource monitor, updated every second. NVIDIA utilization and memory are read directly from `nvidia-smi`; other supported GPUs use system information reported by their driver.

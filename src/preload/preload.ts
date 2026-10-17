@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, DiagramValidationRequest, DiagramValidationResult, AppUpdateState } from '../shared/types';
+import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, AppUpdateState } from '../shared/types';
 
 const api: OrionAPI = {
   listOFSMemories: offset => ipcRenderer.invoke('memory:ofs-list', offset),
@@ -45,8 +45,6 @@ const api: OrionAPI = {
   onToolRequest: (callback) => { const listener = (_: Electron.IpcRendererEvent, event: Parameters<typeof callback>[0]) => callback(event); ipcRenderer.on('tool:request', listener); return () => ipcRenderer.removeListener('tool:request', listener); },
   respondToQuestion: (id, answer) => ipcRenderer.invoke('question:respond', id, answer),
   onUserQuestion: (callback) => { const listener = (_: Electron.IpcRendererEvent, event: UserQuestionRequest) => callback(event); ipcRenderer.on('question:request', listener); return () => ipcRenderer.removeListener('question:request', listener); },
-  onDiagramValidationRequest: (callback) => { const listener = (_: Electron.IpcRendererEvent, event: DiagramValidationRequest) => callback(event); ipcRenderer.on('mermaid:validate-request', listener); return () => ipcRenderer.removeListener('mermaid:validate-request', listener); },
-  respondToDiagramValidation: (id, result: DiagramValidationResult) => ipcRenderer.invoke('mermaid:validation-result', id, result),
   getSystemInfo: () => ipcRenderer.invoke('system:info'),
   listScheduledJobs: () => ipcRenderer.invoke('schedule:list'),
   saveScheduledJob: (job) => ipcRenderer.invoke('schedule:save', job),
@@ -54,7 +52,7 @@ const api: OrionAPI = {
   onScheduledJob: (callback) => { const listener = (_: Electron.IpcRendererEvent, job: ScheduledJob) => callback(job); ipcRenderer.on('schedule:run', listener); return () => ipcRenderer.removeListener('schedule:run', listener); },
   onScheduledJobsChanged: (callback) => { const listener = () => callback(); ipcRenderer.on('schedule:changed', listener); return () => ipcRenderer.removeListener('schedule:changed', listener); },
   completeScheduledJob: (id, status, output, conversationId) => ipcRenderer.invoke('schedule:complete', id, status, output, conversationId),
-  searchHub: (query, category) => ipcRenderer.invoke('models:search', query, category),
+  searchHub: (query, category, nextUrl) => ipcRenderer.invoke('models:search', query, category, nextUrl),
   setHuggingFaceToken: (token) => ipcRenderer.invoke('models:hf-token', token),
   getHuggingFaceTokenConfigured: () => ipcRenderer.invoke('models:hf-token-configured'),
   getHubFiles: (repo, category) => ipcRenderer.invoke('models:files', repo, category),

@@ -1,6 +1,6 @@
 # Orion
 
-Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.1`.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.2`.
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the Node runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
@@ -16,7 +16,7 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 
 - Chat with models from a local Ollama server, Orion-managed GGUF models using llama.cpp, or a configured OpenAI-compatible API provider.
 - Streamed answers and model-provided reasoning when the selected model and provider support it.
-- Conversation history, per-conversation Canvas content, file attachments, Markdown rendering, syntax highlighting, and Mermaid diagrams.
+- Conversation history, per-conversation Canvas content, file attachments, Markdown rendering, and live syntax highlighting.
 - OrionFS (OFS) local memory. OFS stores attributed statements and their associations locally and recalls relevant memories without a separate embedding model or network service. Memory controls and saved memories are available in Settings.
 - General chat tools for web search and page reading, local application actions, questions, and Canvas. Tools run without per-action approval prompts. Project workspace tools are currently disabled.
 - Orion Browser controls for opening and reading HTTPS pages in Orion's browser.

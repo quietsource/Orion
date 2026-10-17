@@ -1,6 +1,6 @@
 {
   "name": "orion-local-ai",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "packageManager": "bun@1.4.3",
   "description": "Local-first conversational AI workspace",
@@ -26,7 +26,6 @@
     "highlight.js": "^11.12.0",
     "katex": "^0.18.9",
     "marked": "^18.0.14",
-    "mermaid": "^12.0.0",
     "officeparser": "^8.1.1",
     "systeminformation": "^5.33.13"
   },
@@ -89,15 +88,21 @@
         "rpm"
       ]
     },
-    "deb": { "compression": "gz" },
-    "rpm": { "compression": "gzip" }
+    "deb": {
+      "compression": "gz"
+    },
+    "rpm": {
+      "compression": "gzip"
+    }
   },
   "allowScripts": {
     "electron": true,
     "esbuild": true,
     "electron-winstaller@5.4.0": true
   },
-  "engines": { "bun": ">=1.4.3" },
+  "engines": {
+    "bun": ">=1.4.3"
+  },
   "overrides": {
     "electron-winstaller": {
       "temp": {
