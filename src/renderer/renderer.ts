@@ -1361,7 +1361,7 @@ window.orion.onScheduledJob(job => { void renderScheduledJobs(); void runSchedul
 function setupUpdaterUi() {
   const slot = document.getElementById('app-update-slot');
   if (!slot) return;
-  let dismissedVersion = '';
+  let dismissedVersion = '', visibleVersion = '';
   const banner = document.createElement('section'); banner.className = 'app-update-banner'; banner.hidden = true; banner.setAttribute('aria-live', 'polite');
   const copy = document.createElement('div'); copy.className = 'app-update-copy';
   const title = document.createElement('strong'); title.className = 'app-update-title';
@@ -1375,6 +1375,7 @@ function setupUpdaterUi() {
 
   const render = (state: AppUpdateState) => {
     if (state.phase === 'idle' || (state.version && state.version === dismissedVersion)) { banner.hidden = true; return; }
+    visibleVersion = state.version ?? '';
     banner.hidden = false; title.textContent = state.phase === 'available' ? `Orion ${state.version} is available` : state.phase === 'downloading' ? `Updating Orion to ${state.version}` : state.phase === 'installing' ? 'Installing Orion update' : 'Orion update failed';
     detail.textContent = state.detail ?? (state.phase === 'available' ? 'Download and install this release.' : state.phase === 'installing' ? 'Orion will restart when installation completes.' : '');
     progress.hidden = state.phase !== 'downloading';
@@ -1386,7 +1387,7 @@ function setupUpdaterUi() {
     else if (!actions.contains(install)) actions.append(install, later);
   };
   install.onclick = () => { install.disabled = true; void window.orion.startAppUpdate().catch(error => render({ phase: 'error', version: '', detail: error instanceof Error ? error.message : String(error) })); };
-  later.onclick = () => { dismissedVersion = title.textContent.match(/\d+\.\d+\.\d+/)?.[0] ?? ''; banner.hidden = true; };
+  later.onclick = () => { dismissedVersion = visibleVersion; banner.hidden = true; };
   window.orion.onAppUpdateState(render);
   void window.orion.getAppUpdateState().then(render).catch(() => undefined);
   void window.orion.consumeUpdateChangelog().then(update => {
