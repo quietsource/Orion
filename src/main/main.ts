@@ -28,6 +28,7 @@ import { runSubagentInference } from './subagentRuntime';
 import { initializeSecureStorage, readEncryptedText, writeEncryptedText, openEncryptedDatabase, sealEncryptedDatabase } from './secure-storage';
 import { downloadUpdateAsset, findLatestUpdate, isNewerVersion, type AppUpdate, type UpdateAsset } from './appUpdater';
 import { fetchWithLocalReconnect } from './localReconnect';
+import { openUpdatePackage } from './updateHandoff';
 
 // Desktop launchers can close the inherited output pipe while Orion is still running.
 // A later diagnostic write must not turn that closed pipe into an uncaught exception.
@@ -817,34 +818,6 @@ async function checkForAppUpdate() {
     publishAppUpdate({ phase: 'available', version: update.version, notes: update.notes, detail: 'A newer Orion release is ready to download.' });
   } catch (error) { console.info(`Orion release check was unavailable: ${error instanceof Error ? error.message : String(error)}`); }
 }
-function psQuote(value: string) { return `'${value.replace(/'/g, "''")}'`; }
-function shellQuote(value: string) { return `'${value.replace(/'/g, `'\\''`)}'`; }
-async function launchWindowsUpdate(installer: string, kind: 'windows-installer'|'windows-portable', version: string) {
-  const executable = kind === 'windows-portable' ? process.env.PORTABLE_EXECUTABLE_FILE! : app.getPath('exe');
-  const log = path.join(app.getPath('temp'), `orion-update-${version}-${Date.now()}.log`);
-  const script = kind === 'windows-portable'
-    ? `$ErrorActionPreference='Stop'\n$ownerPid=${process.pid}\n$exe=${psQuote(executable)}\n$download=${psQuote(installer)}\n$log=${psQuote(log)}\nSet-Content -LiteralPath $log -Value 'Orion portable update started'\ntry {\n  while (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }\n  $staged="$exe.update"; $backup="$exe.previous"\n  Copy-Item -LiteralPath $download -Destination $staged -Force\n  Move-Item -LiteralPath $exe -Destination $backup -Force\n  Move-Item -LiteralPath $staged -Destination $exe -Force\n  Remove-Item -LiteralPath $backup -Force\n  Start-Process -FilePath $exe\n  Add-Content -LiteralPath $log -Value 'Portable replacement launched.'\n} catch { Add-Content -LiteralPath $log -Value $_.ToString(); if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $exe -Force }; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe } }`
-    : `$ErrorActionPreference='Stop'\n$ownerPid=${process.pid}\n$exe=${psQuote(executable)}\n$installer=${psQuote(installer)}\n$expected=${psQuote(version)}\n$log=${psQuote(log)}\nSet-Content -LiteralPath $log -Value "Orion update to $expected started."\nfunction Find-UpdatedExecutable {\n  $candidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)\n  if (Test-Path -LiteralPath $exe) { [void]$candidates.Add($exe) }\n  $installRoot = Split-Path -Parent $exe\n  if (Test-Path -LiteralPath $installRoot) { Get-ChildItem -LiteralPath $installRoot -Filter 'Orion.exe' -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { [void]$candidates.Add($_.FullName) } }\n  $roots = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')\n  foreach ($root in $roots) { Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Orion*' } | ForEach-Object { if ($_.InstallLocation -and (Test-Path -LiteralPath $_.InstallLocation)) { Get-ChildItem -LiteralPath $_.InstallLocation -Filter 'Orion.exe' -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { [void]$candidates.Add($_.FullName) } }; if ($_.DisplayIcon) { $iconPath = ([string]$_.DisplayIcon -replace ',\\s*-?\\d+$','').Trim('"'); if (Test-Path -LiteralPath $iconPath) { [void]$candidates.Add($iconPath) } } } }\n  foreach ($candidate in $candidates) { try { $info = (Get-Item -LiteralPath $candidate).VersionInfo; $candidateVersion = if ($info.ProductVersion) { $info.ProductVersion } else { $info.FileVersion }; if ($candidateVersion -and $candidateVersion.StartsWith($expected,[System.StringComparison]::OrdinalIgnoreCase)) { return $candidate } } catch { } }\n  return $null\n}\ntry {\n  $exitDeadline = (Get-Date).AddMinutes(3)\n  while ((Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $exitDeadline) { Start-Sleep -Milliseconds 250 }\n  if (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) { throw 'Orion did not close within three minutes.' }\n  Add-Content -LiteralPath $log -Value "Launching silent installer: $installer"\n  $proc = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru\n  Add-Content -LiteralPath $log -Value "Installer exit code: $($proc.ExitCode)"\n  if ($proc.ExitCode -ne 0) { throw "The installer exited with code $($proc.ExitCode)." }\n  $deadline = (Get-Date).AddMinutes(2); $updated = $null\n  do { $updated = Find-UpdatedExecutable; if ($updated) { break }; Start-Sleep -Milliseconds 500 } while ((Get-Date) -lt $deadline)\n  if (-not $updated) { throw "The installer completed but Orion $expected could not be found. Original executable: $exe" }\n  Add-Content -LiteralPath $log -Value "Launching updated application: $updated"\n  Start-Process -FilePath $updated\n} catch {\n  Add-Content -LiteralPath $log -Value "UPDATE FAILED: $($_.Exception.Message)"\n  if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }\n}`;
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true });
-  await new Promise<void>((resolve, reject) => { child.once('spawn', () => resolve()); child.once('error', reject); });
-  child.unref();
-}
-async function launchLinuxUpdate(installer: string, kind: 'appimage'|'deb'|'rpm') {
-  const executable = kind === 'appimage' ? process.env.APPIMAGE! : app.getPath('exe');
-  const waitForExit = `while kill -0 ${process.pid} 2>/dev/null; do sleep 0.25; done`;
-  let script: string;
-  if (kind === 'appimage') {
-    script = `#!/bin/sh\nset -eu\n${waitForExit}\ntarget=${shellQuote(executable)}\ndownload=${shellQuote(installer)}\nstaged="$target.update"\nbackup="$target.previous"\ncp "$download" "$staged"\nchmod 755 "$staged"\nmv "$target" "$backup"\nif mv "$staged" "$target"; then rm -f "$backup"; exec "$target"; else mv "$backup" "$target"; exit 1; fi\n`;
-  } else {
-    const command = kind === 'deb' ? `pkexec dpkg -i ${shellQuote(installer)}` : `pkexec rpm -U --replacepkgs ${shellQuote(installer)}`;
-    script = `#!/bin/sh\n${waitForExit}\nif ${command}; then exec ${shellQuote(executable)}; else exec ${shellQuote(executable)}; fi\n`;
-  }
-  const helper = path.join(path.dirname(installer), `orion-update-${crypto.randomUUID()}.sh`);
-  await fs.writeFile(helper, script, { mode: 0o700 });
-  const child = spawn('sh', [helper], { detached: true, stdio: 'ignore' });
-  child.unref();
-}
 ipcMain.handle('app-update:state', () => appUpdateState);
 ipcMain.handle('app-update:start', async event => {
   if (!win || event.sender !== win.webContents) throw new Error('The application updater is unavailable.');
@@ -854,18 +827,27 @@ ipcMain.handle('app-update:start', async event => {
     const update = availableAppUpdate!;
     const target = await currentPlatformUpdateAsset(update);
     if (!target) throw new Error('No compatible update package was found for this installation.');
-    const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'orion-update-'));
+    // Keep the downloaded package available for manual installation and for
+    // subsequent launches of portable Windows / AppImage versions.
+    await fs.mkdir(app.getPath('downloads'), { recursive: true });
+    const folder = await fs.mkdtemp(path.join(app.getPath('downloads'), 'Orion-Update-'));
     const destination = path.join(folder, target.asset.name);
+    let downloaded = false;
     try {
       publishAppUpdate({ phase: 'downloading', version: update.version, notes: update.notes, received: 0, total: target.asset.size, detail: `Downloading ${target.asset.name}` });
       await downloadUpdateAsset(target.asset, destination, progress => publishAppUpdate({ ...progress, phase: 'downloading', version: update.version, notes: update.notes }));
+      downloaded = true;
       await writeEncryptedText(updateChangelogFile(), JSON.stringify({ version: update.version, notes: update.notes }));
-      publishAppUpdate({ phase: 'installing', version: update.version, notes: update.notes, detail: 'Restarting Orion to finish the update…' });
-      if (process.platform === 'win32') await launchWindowsUpdate(destination, target.kind as 'windows-installer'|'windows-portable', update.version);
-      else await launchLinuxUpdate(destination, target.kind as 'appimage'|'deb'|'rpm');
+      publishAppUpdate({ phase: 'installing', version: update.version, notes: update.notes, detail: target.kind === 'appimage' || target.kind === 'windows-portable' ? 'Opening the downloaded version…' : 'Opening the installer. Follow its steps to update Orion.' });
+      await openUpdatePackage(destination, target.kind, {
+        openPath: file => shell.openPath(file),
+        makeExecutable: file => fs.chmod(file, 0o755),
+        relaunch: file => app.relaunch({ execPath: file, args: [] })
+      });
       app.quit();
     } catch (error) {
-      await fs.rm(destination, { force: true }).catch(() => undefined);
+      if (!downloaded) await fs.rm(destination, { force: true }).catch(() => undefined);
+      else shell.showItemInFolder(destination);
       await fs.rm(updateChangelogFile(), { force: true }).catch(() => undefined);
       throw error;
     }

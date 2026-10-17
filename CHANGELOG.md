@@ -1,5 +1,6 @@
 # Orion 0.1.5 — Cleaner chat activity and consistent model restoration
 
+- Update downloads now open a visible Windows setup wizard or the Linux system package installer, then close Orion. Portable Windows and AppImage downloads launch as the new version after Orion exits. Downloaded packages remain in Downloads for manual use.
 - Redesigned tool calls and web searches as compact disclosure rows with outline icons, muted text, tight spacing, and expandable inputs.
 - Show tool results and web sources directly in chat. Image generation appears in its own live card beneath the tool row and transitions into the generated image or video.
 - Fixed follow-up inference using an obsolete llama.cpp port after the Create Image tool restored the chat model. Each request and reconnect attempt now resolves the current managed server address.

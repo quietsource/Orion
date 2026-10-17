@@ -77,6 +77,11 @@
         "portable"
       ]
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true
+    },
     "linux": {
       "icon": "build/icons/orion-512x512.png",
       "syncDesktopName": true,

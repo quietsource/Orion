@@ -23,7 +23,7 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 - Orion Create, which can install a compact Vulkan-accelerated `stable-diffusion.cpp` runtime for Stable Diffusion image generation and Wan video generation. The runtime and chosen model weights are downloaded on demand.
 - Live CPU, RAM, GPU, and VRAM usage in the sidebar resource monitor. Image and video diffusion weights are explicitly assigned to Vulkan GPU memory.
 - Settings for model behavior, appearance, memory, startup, and the active system prompt.
-- In-app release checks with an optional update download, progress, and release notes after restart.
+- In-app release checks with download progress. Updates open the visible Windows installer or Linux system package installer, then close Orion. Portable Windows and AppImage updates open the downloaded version after Orion closes. Packages stay in Downloads, and release notes appear when the updated version starts.
 
 ## Requirements
 
