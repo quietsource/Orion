@@ -1,3 +1,7 @@
+# Orion 0.1.6 — Clearer update status
+
+- Corrected update status messages to describe downloading and opening the installer, matching the visible installation flow.
+
 # Orion 0.1.5 — Cleaner chat activity and consistent model restoration
 
 - Update downloads now open a visible Windows setup wizard or the Linux system package installer, then close Orion. Portable Windows and AppImage downloads launch as the new version after Orion exits. Downloaded packages remain in Downloads for manual use.

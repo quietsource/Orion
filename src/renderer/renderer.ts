@@ -1352,8 +1352,8 @@ function setupUpdaterUi() {
   const render = (state: AppUpdateState) => {
     if (state.phase === 'idle' || (state.version && state.version === dismissedVersion)) { banner.hidden = true; return; }
     visibleVersion = state.version ?? '';
-    banner.hidden = false; title.textContent = state.phase === 'available' ? `Orion ${state.version} is available` : state.phase === 'downloading' ? `Updating Orion to ${state.version}` : state.phase === 'installing' ? 'Installing Orion update' : 'Orion update failed';
-    detail.textContent = state.detail ?? (state.phase === 'available' ? 'Download and install this release.' : state.phase === 'installing' ? 'Orion will restart when installation completes.' : '');
+    banner.hidden = false; title.textContent = state.phase === 'available' ? `Orion ${state.version} is available` : state.phase === 'downloading' ? `Downloading Orion ${state.version}` : state.phase === 'installing' ? 'Opening Orion update' : 'Orion update failed';
+    detail.textContent = state.detail ?? (state.phase === 'available' ? 'Download this release and open its installer.' : state.phase === 'installing' ? 'Complete the update in the installer that opens.' : '');
     progress.hidden = state.phase !== 'downloading';
     if (state.total && state.total > 0) { progress.removeAttribute('value'); progress.value = Math.min(100, Math.round((state.received ?? 0) / state.total * 100)); }
     else progress.removeAttribute('value');
