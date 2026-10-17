@@ -1,3 +1,13 @@
+# Orion 0.1.4 — Reliable Windows updates
+
+- Hardened the Windows update handoff: Orion now records installer diagnostics, verifies the installed version, locates the updated application, and only then relaunches it.
+- Fixed the updater silently reopening the previous executable when installation did not complete as expected.
+
+# Orion 0.1.4 — Reliable Windows updates
+
+- Hardened Windows update handoff with persistent installer diagnostics, installed-version verification, and executable discovery before relaunch.
+- Fixed the updater silently reopening the previous executable when installation did not complete as expected.
+
 # Orion 0.1.3 — Smoother media generation and chat activity
 
 - Matched image and video generation from chat to the Create tab, including live progress, generated media preview, and a clear model-restoration state.
