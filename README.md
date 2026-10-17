@@ -1,55 +1,66 @@
-# Orion 0.1.0
+# Orion
 
-Orion is a local-first desktop AI workspace for chat, research, document work, and agentic coding. Release features and platform support are listed in [CHANGELOG.md](CHANGELOG.md). The source is MIT licensed.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.1`.
 
-Orion is a local-first desktop application built with Electron, TypeScript, and Bun. Bun is the required JavaScript runtime and package manager for development and packaging; Electron supplies the desktop runtime. Orion supports OpenAI-compatible API providers, existing local Ollama models, and separately managed GGUF models served by Orion's llama.cpp runtime. Its optional Create page manages a local ComfyUI install for image and video generation. Conversations, downloaded models, generated media, and preferences are stored in the operating system's per-user application data directory.
+Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the Node runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
-Settings are organized into tabs, including a System prompt tab showing the active model's instructions. The collapsed left sidebar reveals conversation navigation on hover, with window-edge spacing matching the Canvas side of the app.
+## Platform support
+
+- **Windows x64:** supported. The release provides a setup installer and a portable executable.
+- **Linux x64:** supported. The release provides AppImage, Debian (`.deb`), and RPM packages.
+- **macOS:** not currently supported. Orion does not provide supported macOS builds or installers.
+
+Download the current packages from [GitHub Releases](https://github.com/quietsource/Orion/releases).
+
+## What Orion includes
+
+- Chat with models from a local Ollama server, Orion-managed GGUF models using llama.cpp, or a configured OpenAI-compatible API provider.
+- Streamed answers and model-provided reasoning when the selected model and provider support it.
+- Conversation history, per-conversation Canvas content, file attachments, Markdown rendering, syntax highlighting, and Mermaid diagrams.
+- OrionFS (OFS) local memory. OFS stores attributed statements and their associations locally and recalls relevant memories without a separate embedding model or network service. Memory controls and saved memories are available in Settings.
+- General chat tools for web search and page reading, local application actions, questions, and Canvas. Tools run without per-action approval prompts. Project workspace tools are currently disabled.
+- Orion Browser controls for opening and reading HTTPS pages in Orion's browser.
+- Orion Create, which can install a compact Vulkan-accelerated `stable-diffusion.cpp` runtime for Stable Diffusion image generation and Wan video generation. The runtime and chosen model weights are downloaded on demand.
+- Live CPU, RAM, GPU, and VRAM usage in the sidebar resource monitor. Image and video diffusion weights are explicitly assigned to Vulkan GPU memory.
+- Settings for model behavior, appearance, memory, startup, and the active system prompt.
+- In-app release checks with an optional update download, progress, and release notes after restart.
 
 ## Requirements
 
-- Bun 1.4.3 or later (Electron bundles the Node runtime it needs internally; a system Node.js installation is not required for Orion development or packaging)
-- Ollama running locally with at least one chat model installed, unless you use an Orion-managed GGUF model
-- Optional: an Ollama embedding model such as `embeddinggemma` for semantic memory search
-- Optional for Orion Create: a compatible GPU driver and several gigabytes of free disk space. Orion uses `uv` to install its own private Python 3.12 environment, PyTorch runtime, and headless ComfyUI; a system Python installation is not required. NVIDIA CUDA, Linux AMD ROCm, Apple Metal, and CPU execution are detected during setup.
-- Built-in ComfyUI workflows support checkpoint-based image models and the Wan 2.2 TI2V 5B video bundle from the model browser.
+For normal use, connect Orion to a local Ollama server with a chat model installed, install an Orion-managed GGUF model, or configure an API provider. API providers receive the prompts sent to them and relevant recalled memories.
 
-## Development and packaging
+Orion Create uses `stable-diffusion.cpp` directly, without a Python environment or node-graph server. The Models browser is limited to supported Stable Diffusion image checkpoints and Wan video bundles. Create downloads its native Vulkan runtime on first use; generation needs additional disk space for model weights and a working Vulkan-capable graphics driver.
+
+## Development
+
+Install [Bun](https://bun.sh/) 1.4.3 or later, then run:
 
 ```sh
 bun install --frozen-lockfile
 bun run dev
 ```
 
-`bun run test` builds the main, preload, renderer, and OFS worker with Bun and runs regression tests plus OFS persistence and managed-process cleanup checks on Electron's embedded runtime. The tests do not require an Ollama server or installed AI models. `bun run typecheck` checks the TypeScript sources without emitting files. `bun run build` bundles the app, and `bun run start` opens it. Run `bun run dist` to build and package for the current platform. To build Linux packages, run `./build.sh`; it uses Podman and writes AppImage, deb, and rpm files into `release/<version>/appimage`, `deb`, and `rpm`. On Windows, run `bun install --frozen-lockfile` followed by `bun run dist`; the generated installers are written under `release`. The `build-distributions.yml` workflow builds native platform packages on GitHub Actions.
+Useful commands:
 
-The GitHub Actions workflow `.github/workflows/build-distributions.yml` builds native packages on Linux, Windows, Intel macOS, and Apple Silicon macOS runners when a version tag is pushed or the workflow is started manually. On Windows, it silently installs the NSIS package on the runner and checks the installed executable and application archive before upload. Both triggers retain per-platform workflow artifacts; pushing a version tag also creates or updates a GitHub Release with the installers, archives, and a combined `SHA256SUMS` manifest. To sign Windows builds, configure the Actions secrets `WINDOWS_CSC_LINK` (base64 `.pfx`/`.p12`) and `WINDOWS_CSC_KEY_PASSWORD`. To sign and notarize macOS builds, configure `MACOS_CSC_LINK` (base64 Developer ID `.p12`), `MACOS_CSC_KEY_PASSWORD`, `APPLE_API_KEY` (base64 App Store Connect `.p8`; the workflow decodes it to a temporary key file), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `APPLE_TEAM_ID`. Without publisher credentials, native builds remain unsigned and macOS Gatekeeper may block or warn on first launch.
+```sh
+bun run typecheck
+bun run build
+bun run test
+bun run dist
+```
 
-The release directory includes `SHA256SUMS` for each packaged installer or archive. From that directory, verify copied artifacts with `sha256sum -c SHA256SUMS`.
+`bun run dist` packages for the current platform. The Linux `build.sh` script builds AppImage, `.deb`, and `.rpm` packages in a Podman container. Windows packaging uses `bun run dist`. Release checksums are provided in `SHA256SUMS`.
 
-## Features
+## Data and privacy
 
-- Discovers installed Ollama models dynamically and streams responses and model-provided thinking into formatted Markdown.
-- Browses public Hugging Face repositories in the Models page, lists checkpoint files and quantizations, downloads selected files with progress in the sidebar, and manages Orion and Ollama models separately. Orion-managed chat GGUFs use a separately installed llama.cpp server; Ollama models continue to use Ollama.
-- Opens Orion Create without installing extra components during normal startup. On first entry, Orion offers to install ComfyUI into a private Python environment, detects supported NVIDIA CUDA, Linux AMD ROCm, or Apple Metal acceleration, and falls back to CPU when supported acceleration is unavailable. Image and LTX video outputs show live progress and remain in the local Create gallery.
-- Lets chat models call `create_image` using the selected default image or video model. Tool approval follows the configured approval level, and chat and Create-page generations display progress cards.
-- Shows system RAM use, GPU memory capacity/use when the graphics driver reports them, and the active memory engine's stats in the sidebar. Ollama status is shown as text.
-- Saves and reloads conversations, settings, and rolling summaries locally.
-- Indexes saved messages in overlapping excerpts and writes them to the local index before optional embedding work. Its one-million-token archive cap reserves an opening excerpt from each conversation, prioritizes user-authored excerpts for up to 60% of the remaining budget, then samples assistant and tool history across the timeline. With a compatible embedding model, Orion measures each excerpt using Ollama's `prompt_eval_count`, then combines embedding similarity and lexical ranking; lexical evidence must match a phrase, a specific name or number, or at least two query terms when embeddings are available. Until indexing completes, unembedded excerpts use a character-based estimate. If semantic indexing is interrupted, Orion keeps lexical recall available and retries in the background once per minute. Without an embedding model, it falls back to lexical search. Automatic recall includes nearby user turns for follow-up references and excludes messages already present in the live prompt so archive excerpts use their budget for older context. Retrieved excerpts can use up to 40% of the configured model context, further reduced as needed to leave room for recent turns, the system prompt, a compact summary, tool activity, and generated output. The prompt builder can include up to 48 excerpts, subject to that token budget and per-message/conversation diversity limits. Agent and archive-search calls reserve up to 10% for recent tool results; each follow-up request compacts that history instead of replaying an unbounded tool transcript. Prompt costs use Orion's chat-side token estimate, including titles, roles, and timestamps, because embedding and chat models can use different tokenizers. When Ollama reports actual prompt token counts, Orion raises its per-model safety factor if its estimate was low and saves the calibration locally for later launches. Models advertising Ollama tool support can also search the local archive with `search_memory` outside Agent mode; Agent mode can search it as well. This is a searchable archive whose one-million-token cap is counted with the embedding model's tokenizer; it does not increase a chat model's native context window, and retrieval cannot guarantee perfect recall.
-- Keeps the existing Orion Memory engine and offers OrionFS (OFS) as an experimental, opt-in memory engine in Settings. OFS captures attributed conversation statements, encodes concepts, order, character shape and polarity into local distributed vectors, and recalls through vector similarity and its association graph. It requires no extraction model, embedding model, model server, download, or network call. SQLite and vector work run in a background worker. Memory & privacy shows paginated saved OFS statements when enabled and legacy archive statistics otherwise. The built-in concept vocabulary supports a limited set of paraphrases; this experimental algorithm does not provide the general semantic understanding of a trained model or guaranteed recall.
-- Shows a crisp accent border when the composer is focused and uses flat styling for popups and sidebars.
-- Supports fenced-code syntax highlighting across the bundled Highlight.js language catalog, line numbers, and copy controls. Explicit language tags use that language's grammar; untagged snippets use a curated common-language set for automatic detection.
-- Provides DuckDuckGo search, file attachments, workspace file operations, app launching, Orion browser controls, and desktop window listing/control. Linux desktop controls support Hyprland or X11/EWMH through `wmctrl`. macOS may require Accessibility access to control other applications' windows. Agent actions use one-time approval according to the configured approval level.
-- Provides local cron schedules with a five-field expression, device-timezone execution, persistent run status, and an optional Agent-tools switch. In Agent mode, Orion can create a schedule when recurring follow-up would clearly help; agent-created and user-created schedules are separated and editable in Schedules. Scheduled tasks run while Orion is running and save each run as a conversation. Enable “Keep Orion running in the system tray” in Settings to continue schedules after closing the window; choose Quit Orion from the tray menu to stop the app and its schedules.
+Orion stores conversations, settings, OrionFS memories, downloaded models, and generated media in the operating system's per-user application data directory. Conversations, settings, OrionFS memories, and provider API keys are encrypted at rest with AES-GCM. The encryption key is protected by the operating system's secure storage; Orion decrypts records while reading them and writes them back encrypted. The active OrionFS database is re-encrypted after it has been idle and when Orion exits cleanly. Existing conversation, settings, provider, and memory data is migrated as it is read. Linux requires a working desktop keyring such as GNOME Keyring, KWallet, or Secret Service.
 
-## Privacy and permissions
+Downloaded model files and generated media files are stored locally but are not encrypted at rest. Local Ollama, llama.cpp, and `stable-diffusion.cpp` inference run on the computer. If you choose a hosted API provider, that provider receives the prompts and relevant memory needed for the request. Web search, model downloads, and initial `stable-diffusion.cpp` or llama.cpp setup use the network.
 
-Electron runs with context isolation, a sandboxed preload, and Node integration disabled in the renderer. Conversation JSON, memory index, token calibrations, settings, models, ComfyUI, llama.cpp, and generated media are stored under `app.getPath('userData')/orion`. Hugging Face browsing and model downloads, and first-time ComfyUI/llama.cpp backend downloads, require internet access; local chat inference and media generation run against local services; selected API provider models receive chat prompts and relevant memory at their configured endpoint. File attachments are read only after user selection. Workspace operations are limited to the selected workspace. Agent instructions treat tool results and retrieved content as untrusted data, so instructions embedded in web pages or files cannot change Orion's role or permissions. Web searches and actions that open external destinations use the network or operating system as requested.
+API keys are stored in a separate local file with restricted file permissions and are encrypted at rest. File attachments are read after you select them. Orion's tools may access the web or local applications when used in chat.
 
-### OpenAI-compatible API providers
+Orion checks this repository's latest release to provide in-app updates. This check sends no user data and collects none. Orion does not collect telemetry about how the app is used. There are no accounts, fees, or paywalls, now or ever.
 
-In **Model browser → Providers**, enter a name, an API base URL (including `/v1` or your service’s API prefix), and an optional bearer API key. Discover models or enter comma-separated model IDs, then save. Select the provider model in the chat model selector or a scheduled task. Enable tools only for models that support Chat Completions tool calls. Orion supports streamed content and reasoning, cancellation, and token usage when supplied by the endpoint. The provider receives prompts and relevant memory. Keys are stored in a separate local file with owner-only permissions and are never returned to the renderer; they are not encrypted at rest. Local Ollama and GGUF models remain available.
+## License
 
-### Orion Browser tabs
-
-The AI browser opens from `browser_open` or `browser_control` and provides visible tabs, an address/search bar, back/forward/reload controls, and shortcuts for new tab (Ctrl/⌘+T), close tab (Ctrl/⌘+W), focus address (Ctrl/⌘+L), and switch tabs (Ctrl/⌘+1–9). Ask the model to list, open, focus, navigate, read, or close tabs by their tab IDs. Links opened by the model or another page open in a new tab; existing tabs remain available. Browser navigation is limited to HTTPS.
+Orion is distributed under the MIT License. See [LICENSE](LICENSE).

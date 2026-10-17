@@ -415,3 +415,9 @@ body.sidebar-collapsed .app:has(.canvas-sidebar:not([hidden])){grid-template-col
 @media(max-width:640px){.web-research-activity,.tool-activity{margin-left:0}.web-research-steps{padding-right:8px}}
 @media(prefers-reduced-motion:reduce){.web-research-status.searching:before,.web-research-status.reading:before{animation:none}}
 .composer{position:relative;isolation:isolate;transition:border-color .16s ease,box-shadow .16s ease}
+
+/* Keep the chat independently scrollable while streamed message heights change. */
+.chat{overflow-y:scroll;overscroll-behavior:contain;overflow-anchor:none;scrollbar-gutter:stable}
+#messages{min-height:100%;}
+
+.app-update-banner{display:flex;align-items:center;gap:16px;padding:9px 18px;border-bottom:1px solid var(--border-soft);background:color-mix(in srgb,var(--surface) 88%,transparent)}.app-update-banner[hidden]{display:none}.app-update-copy{min-width:0;display:flex;align-items:center;gap:10px;flex:1}.app-update-title{font-size:12px;font-weight:600}.app-update-detail{min-width:0;overflow:hidden;color:var(--muted);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.app-update-progress{width:130px;height:5px;accent-color:var(--accent)}.app-update-actions{display:flex;gap:6px}.app-update-actions button{padding:5px 9px;font-size:11px}.app-update-actions button[hidden]{display:none}.update-changelog-dialog{width:min(680px,calc(100vw - 36px));max-height:min(78vh,720px)}.update-changelog-dialog form{gap:12px}.update-changelog-content{min-height:0;max-height:60vh;overflow:auto;padding:12px 15px;border:1px solid var(--border-soft);border-radius:10px;background:var(--surface);color:var(--secondary);font-size:12px;line-height:1.65}.update-changelog-content h1,.update-changelog-content h2,.update-changelog-content h3{color:var(--text);font-size:14px}.update-changelog-content ul{padding-left:20px}.update-changelog-content p{margin:7px 0}

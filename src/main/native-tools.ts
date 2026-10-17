@@ -22,19 +22,118 @@ export const nativeWorkspaceTools: FunctionTool[] = [
 export function parseTextToolCalls(text: string, allowedTools: Array<{ function: { name: string } }>) {
   const allowed = new Set(allowedTools.map(tool => tool.function.name));
   const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
-  const visibleText = text.replace(/<orion_tool_call>\s*([\s\S]*?)\s*<\/orion_tool_call>/gi, (whole, body: string) => {
+  const parseArguments = (body: string): Record<string, unknown> | undefined => {
     try {
       const value: unknown = JSON.parse(body);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) return whole;
-      const request = value as { name?: unknown; arguments?: unknown; input?: unknown };
-      if (typeof request.name !== 'string' || !allowed.has(request.name)) return whole;
-      const args = request.arguments ?? request.input ?? {};
-      if (!args || typeof args !== 'object' || Array.isArray(args)) return whole;
-      calls.push({ name: request.name, arguments: args as Record<string, unknown> });
-      return '';
-    } catch { return whole; }
-  }).trim();
-  return { calls, visibleText };
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+      return value as Record<string, unknown>;
+    } catch {
+      // llama.cpp templates sometimes serialize arguments as a JavaScript-like
+      // object (for example, {query: "cats"}) instead of strict JSON.
+      let normalized = '', quote = '', escaped = false;
+      for (let index = 0; index < body.length;) {
+        const character = body[index] ?? '';
+        if (quote) {
+          normalized += character; index++;
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === quote) quote = '';
+          continue;
+        }
+        if (character === '"' || character === "'") { quote = character; normalized += character; index++; continue; }
+        if (/[A-Za-z_$]/.test(character)) {
+          const start = index++;
+          while (index < body.length && /[\w$-]/.test(body[index] ?? '')) index++;
+          const identifier = body.slice(start, index);
+          let lookahead = index;
+          while (/\s/.test(body[lookahead] ?? '')) lookahead++;
+          let previous = normalized.length - 1;
+          while (previous >= 0 && /\s/.test(normalized[previous] ?? '')) previous--;
+          normalized += body[lookahead] === ':' && (previous < 0 || normalized[previous] === '{' || normalized[previous] === ',')
+            ? JSON.stringify(identifier)
+            : identifier;
+          continue;
+        }
+        normalized += character; index++;
+      }
+      try {
+        const value: unknown = JSON.parse(normalized);
+        return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+      } catch { return undefined; }
+    }
+  };
+  // Local models may stop the wrapper after the JSON object (`...}}>`),
+  // omitting the documented `</orion_tool_call>` closing tag. Find the JSON
+  // object by balancing braces so `>` inside an argument string is harmless,
+  // then accept either closing form. Invalid or unavailable requests stay
+  // visible as ordinary assistant text instead of being silently discarded.
+  const orionMarker = /<orion_tool_call>/gi;
+  let visibleText = '', sourceCursor = 0, markerMatch: RegExpExecArray | null;
+  while ((markerMatch = orionMarker.exec(text))) {
+    const openBrace = markerMatch.index + markerMatch[0].length + (text.slice(markerMatch.index + markerMatch[0].length).match(/^\s*/)?.[0].length ?? 0);
+    if (text[openBrace] !== '{') continue;
+    let depth = 0, quote = '', escaped = false, end = -1;
+    for (let index = openBrace; index < text.length; index++) {
+      const character = text[index] ?? '';
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === quote) quote = '';
+        continue;
+      }
+      if (character === '"') { quote = character; continue; }
+      if (character === '{') depth++;
+      else if (character === '}' && --depth === 0) { end = index + 1; break; }
+    }
+    if (end < 0) continue;
+    const closing = /^\s*(?:<\/orion_tool_call>|>)/i.exec(text.slice(end));
+    if (!closing) continue;
+    const request = parseArguments(text.slice(openBrace, end)) as { name?: unknown; arguments?: unknown; input?: unknown } | undefined;
+    if (!request || typeof request.name !== 'string' || !allowed.has(request.name)) continue;
+    const args = request.arguments ?? request.input ?? {};
+    if (!args || typeof args !== 'object' || Array.isArray(args)) continue;
+    visibleText += text.slice(sourceCursor, markerMatch.index);
+    calls.push({ name: request.name, arguments: args as Record<string, unknown> });
+    sourceCursor = end + closing[0].length;
+    orionMarker.lastIndex = sourceCursor;
+  }
+  if (sourceCursor) visibleText += text.slice(sourceCursor);
+  else visibleText = text;
+  visibleText = visibleText.trim();
+
+  // Some local chat templates render calls in llama.cpp's compact textual
+  // form rather than returning a structured tool_calls field:
+  // <|tool_call>call:search_web{query: "cats"}<tool_call|>
+  const marker = /<\|tool_call>\s*call:([A-Za-z_][\w.-]*)\s*\{/gi;
+  let output = '', cursor = 0, match: RegExpExecArray | null;
+  while ((match = marker.exec(visibleText))) {
+    const openBrace = marker.lastIndex - 1;
+    let depth = 0, quote = '', escaped = false, end = -1;
+    for (let index = openBrace; index < visibleText.length; index++) {
+      const character = visibleText[index] ?? '';
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === quote) quote = '';
+        continue;
+      }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === '{') depth++;
+      else if (character === '}' && --depth === 0) { end = index + 1; break; }
+    }
+    const close = end >= 0 ? /^\s*(?:<tool_call\|>|<\|tool_call\|>)/i.exec(visibleText.slice(end)) : null;
+    if (end < 0 || !close) continue;
+    const originalEnd = end + close[0].length;
+    const args = parseArguments(visibleText.slice(openBrace, end));
+    const name = match[1] ?? '';
+    if (!args || !allowed.has(name)) continue;
+    output += visibleText.slice(cursor, match.index);
+    calls.push({ name, arguments: args });
+    cursor = originalEnd;
+    marker.lastIndex = originalEnd;
+  }
+  if (cursor) visibleText = output + visibleText.slice(cursor);
+  return { calls, visibleText: visibleText.trim() };
 }
 
 function inside(root: string, candidate: string) {

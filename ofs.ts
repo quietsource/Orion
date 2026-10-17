@@ -792,6 +792,8 @@ export class OrionFS {
   public close(): void {
     if (this.closed) return;
     this.closed = true;
+    // Seal the encrypted memory snapshot from a fully checkpointed database.
+    try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* Close still releases the connection; any WAL is sealed by storage recovery. */ }
     this.db.close();
   }
 }

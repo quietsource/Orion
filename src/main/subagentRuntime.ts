@@ -22,7 +22,7 @@ export async function runSubagentInference(input: {
   const userContent = [
     roleTask + input.task.slice(0, 3000),
     input.workspace ? 'Workspace root: ' + input.workspace : '',
-    input.memoryText ? 'Relevant Orion memory excerpts:\n' + input.memoryText.slice(0, 5000) : '',
+    input.memoryText ? 'Relevant OrionFS memory excerpts:\n' + input.memoryText.slice(0, 5000) : '',
     input.role === 'quality_control' ? 'Current private workspace diff:\n' + (input.diffText || 'No staged changes are available.') : '',
     'Use read-only tools selectively. Ground claims in evidence. Return a concise result.'
   ].filter(Boolean).join('\n\n');
@@ -70,7 +70,7 @@ export async function runSubagentInference(input: {
       const result = await input.executeReadTool(name, args);
       messages.push({ role: 'tool', tool_call_id: call.id ?? crypto.randomUUID(), content: result.slice(0, 4000) });
     }
-    input.onProgress((input.role === 'research' ? 'Researching project evidence' : 'Reviewing workspace changes') + ' · step ' + (round + 1));
+    input.onProgress((input.role === 'research' ? 'Researching conversation context' : 'Reviewing supplied material') + ' · step ' + (round + 1));
   }
   return finalText.trim() || 'The subagent reached its eight-step research limit. Review the evidence it gathered.';
 }

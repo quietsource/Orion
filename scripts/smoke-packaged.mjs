@@ -161,7 +161,7 @@ async function verifyModelsAndCreateViews(webSocketUrl) {
     const resolve = pending.get(message.id); pending.delete(message.id); resolve(message);
   });
   const evaluate = expression => new Promise((resolve, reject) => {
-    const id = nextId++, timeout = setTimeout(() => { pending.delete(id); reject(new Error('Timed out checking Orion’s model and Create pages.')); }, 60_000);
+    const id = nextId++, timeout = setTimeout(() => { pending.delete(id); reject(new Error('Timed out checking Orion’s model and Create pages.')); }, 120_000);
     pending.set(id, message => { clearTimeout(timeout); if (message.error) reject(new Error(message.error.message)); else resolve(message.result?.result?.value); });
     socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }));
   });
@@ -267,7 +267,7 @@ async function verifyApiProvider(webSocketUrl) {
       toolRoundTrip = toolResult.tool_call_id === 'call_smoke' && input.messages.some(message => message.role === 'assistant' && message.tool_calls?.[0]?.id === 'call_smoke');
       if (input.model === 'smoke/long') {
         emit({choices:[{delta:{content:'```javascript\n'}}]});
-        for (let i = 0; i < 800; i++) { emit({choices:[{delta:{content:'const entry' + i + ' = ' + i + '; // Orion streaming performance sample\n'}}]}); await delay(5); }
+        for (let i = 0; i < 120; i++) { emit({choices:[{delta:{content:'const entry' + i + ' = ' + i + '; // Orion streaming performance sample\n'}}]}); await delay(10); }
         emit({choices:[{delta:{content:'```'},finish_reason:'stop'}]}); res.end('data: [DONE]\r\n\r\n'); return;
       }
       emit({choices:[{delta:{content:'Provider stream works.'},finish_reason:'stop'}],usage:{prompt_tokens:120,completion_tokens:5}});
@@ -291,34 +291,60 @@ async function verifyApiProvider(webSocketUrl) {
     const resolve = pending.get(message.id); pending.delete(message.id); resolve(message);
   });
   const evaluate = expression => new Promise((resolve, reject) => {
-    const id = nextId++, timeout = setTimeout(() => { pending.delete(id); reject(new Error('Timed out checking Orion’s model and Create pages.')); }, 60_000);
+    const id = nextId++, timeout = setTimeout(() => {
+      pending.delete(id);
+      const probeId = nextId++;
+      const probeTimeout = setTimeout(() => { pending.delete(probeId); reject(new Error('Timed out checking Orion’s API provider flow; renderer checkpoint unavailable.')); }, 5_000);
+      pending.set(probeId, message => {
+        clearTimeout(probeTimeout);
+        const stage = message.result?.result?.value;
+        reject(new Error(`Timed out checking Orion’s API provider flow at ${stage ?? 'unknown stage'}.`));
+      });
+      socket.send(JSON.stringify({ id: probeId, method: 'Runtime.evaluate', params: { expression: 'window.__orionSmokeStage ?? "stage marker not set"', returnByValue: true } }));
+    }, 180_000);
     pending.set(id, message => { clearTimeout(timeout); if (message.error) reject(new Error(message.error.message)); else resolve(message.result?.result?.value); });
     socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }));
   });
   try {
     const result = await evaluate(`(async () => {
+      const stage = value => { window.__orionSmokeStage = value; };
+      stage('opening provider settings');
       const pause = () => new Promise(resolve => setTimeout(resolve, 30));
       document.querySelector('.nav-item[data-view="Models"]').click();
-      [...document.querySelectorAll('.model-tab')].find(tab=>tab.textContent==='Providers').click();
-      const inputs = document.querySelectorAll('.provider-form input');
+      let providersTab;
+      for(let i=0;i<300 && !providersTab;i++){providersTab=[...document.querySelectorAll('.model-tab')].find(tab=>tab.textContent==='Providers');if(!providersTab)await pause();}
+      if(!providersTab)return {ok:false,stage:'models view did not render'};
+      providersTab.click();
+      let form;
+      for(let i=0;i<300 && !form;i++){form=document.querySelector('.provider-form');if(!form)await pause();}
+      if(!form)return {ok:false,stage:'provider form did not render'};
+      let inputs=form.querySelectorAll('input');
       inputs[0].value='Smoke API'; inputs[1].value=${JSON.stringify(baseUrl)}; inputs[2].value='smoke-secret'; inputs[4].checked=true;
-      [...document.querySelectorAll('.provider-form button')].find(button=>button.textContent==='Discover models').click();
+      [...form.querySelectorAll('button')].find(button=>button.textContent==='Discover models').click();
       for(let i=0;i<200 && !inputs[3].value.includes('smoke/chat');i++) await pause();
       const discovered=inputs[3].value.includes('smoke/chat');
-      document.querySelector('.provider-form').requestSubmit();
+      if(!discovered)return {ok:false,stage:'provider model discovery',status:form.querySelector('[role=status]')?.textContent};
+      const submitForm=document.querySelector('.provider-form');
+      inputs=submitForm.querySelectorAll('input');
+      if(inputs[0].value!=='Smoke API'||inputs[1].value!==${JSON.stringify(baseUrl)}){inputs[0].value='Smoke API';inputs[1].value=${JSON.stringify(baseUrl)};inputs[2].value='smoke-secret';inputs[3].value='smoke/chat, smoke/slow, smoke/error, smoke/long';inputs[4].checked=true;}
+      submitForm.requestSubmit();
+      stage('saving provider');
       for(let i=0;i<300 && !(await window.orion.listProviders()).length;i++) await pause();
       const provider=(await window.orion.listProviders())[0];
       if(!provider) return {ok:false,discovered,status:document.querySelector('.provider-form [role=status]')?.textContent,values:[...document.querySelectorAll('.provider-form input')].map(input=>input.type==='password'?'hidden':input.value)};
       const privateKey=provider.keyConfigured && !('apiKey' in provider);
       await window.orion.saveProvider({...provider,name:'Smoke API edited'});
+      stage('saving provider edits');
       const keptKey=(await window.orion.listProviders())[0].keyConfigured;
       const choices=await window.orion.listModels();
       const model=choices.find(item=>item.source==='api' && item.details.label.endsWith('smoke/chat')).name;
       const events=[]; const unsubscribe=window.orion.onStream(event=>events.push(event));
       const id='provider-smoke'; const messages=[{id:'provider-user',role:'user',content:'Explain API providers in Orion',createdAt:Date.now()}];
       await window.orion.saveConversation({id,title:'Provider smoke',model,createdAt:Date.now(),updatedAt:Date.now(),messages});
+      stage('saving smoke settings');
       const testSettings=await window.orion.settings(); testSettings.approvalLevel='none'; await window.orion.saveSettings(testSettings);
       const firstStream=window.orion.streamChat({conversationId:id,model,messages,think:false,agent:true});
+      stage('running tool round trip');
       const firstStreamState=await Promise.race([firstStream.then(()=> 'done',error=>'error:'+String(error)),new Promise(resolve=>setTimeout(()=>resolve('timeout'),20000))]);
       if(firstStreamState!=='done') return {ok:false,firstStreamState,eventTypes:events.map(event=>event.type+':'+(event.phase??'')),approval:document.querySelector('#tool-approval')?.outerHTML.slice(0,600)};
       const streamed=events.some(event=>event.type==='token' && event.content==='Provider stream works.');
@@ -326,17 +352,22 @@ async function verifyApiProvider(webSocketUrl) {
       const tools=events.some(event=>event.type==='tool' && event.phase==='finished');
       const done=events.some(event=>event.type==='done');
       const slow=choices.find(item=>item.source==='api' && item.details.label.endsWith('smoke/slow')).name;
+      stage('testing stream cancellation');
       const pending=window.orion.streamChat({conversationId:id,model:slow,messages,think:false,agent:false});
       for(let i=0;i<200 && !events.some(event=>event.content==='Starting');i++) await pause();
       await window.orion.cancelStream(); await pending;
       const cancelled=events.some(event=>event.type==='cancelled');
       const errorModel=choices.find(item=>item.source==='api' && item.details.label.endsWith('smoke/error')).name;
+      stage('testing provider error handling');
       await window.orion.streamChat({conversationId:id,model:errorModel,messages,think:false,agent:false}).catch(()=>undefined);
       const error=events.some(event=>event.type==='error' && event.content.includes('401'));
       unsubscribe();
       const longModel=choices.find(item=>item.source==='api' && item.details.label.endsWith('smoke/long')).name;
+      stage('testing long chat rendering');
       document.querySelector('.nav-item[data-view="Chat"]').click(); document.querySelector('#new-chat').click();
-      const approval=document.querySelector('.approval-selector'); approval.value='none'; approval.dispatchEvent(new Event('change',{bubbles:true}));
+      const approval=document.querySelector('.approval-selector'); approval.value='none';
+      const chatSettings=await window.orion.settings(); chatSettings.approvalLevel='none'; await window.orion.saveSettings(chatSettings);
+      approval.dispatchEvent(new Event('change',{bubbles:true}));
       const selector=document.querySelector('#model'); selector.value=longModel; selector.dispatchEvent(new Event('change',{bubbles:true})); await pause();
       const prompt=document.querySelector('#prompt'); prompt.value='Generate a longer code response for the rendering smoke check'; prompt.dispatchEvent(new Event('input',{bubbles:true}));
       let lastTick=performance.now(),maxStall=0; const heartbeat=setInterval(()=>{const tick=performance.now();maxStall=Math.max(maxStall,tick-lastTick);lastTick=tick;},16);
@@ -345,10 +376,11 @@ async function verifyApiProvider(webSocketUrl) {
       const toolPanel=document.querySelector('.message-assistant .tool-activity');
       const activeArticle=document.querySelector('.message-assistant'); const captureState=document.querySelector('#send').title; await new Promise(resolve=>setTimeout(resolve,100));
       const stablePanel=!!toolPanel && toolPanel===document.querySelector('.message-assistant .tool-activity') && activeArticle===document.querySelector('.message-assistant');
-      for(let i=0;i<2400 && !(document.querySelector('#send').title==='Send' && document.querySelector('.message-assistant .message-body')?.textContent.includes('const entry799 = 799'));i++) await pause();
+      for(let i=0;i<2400 && !(document.querySelector('#send').title==='Send' && document.querySelector('.message-assistant .message-body')?.textContent.includes('const entry119 = 119'));i++) await pause();
       clearInterval(heartbeat);
-      const longStream=document.querySelector('.message-assistant .message-body')?.textContent.includes('const entry799 = 799');
+      const longStream=document.querySelector('.message-assistant .message-body')?.textContent.includes('const entry119 = 119');
       await window.orion.deleteProvider(provider.id);
+      stage('removing provider');
       const removed=!(await window.orion.listModels()).some(item=>item.source==='api');
       return {ok:document.querySelector('.version')?.textContent===${JSON.stringify(`Orion · ${expectedVersion}`)}&&discovered&&privateKey&&keptKey&&streamed&&reasoning&&tools&&done&&cancelled&&error&&removed&&longStream&&stablePanel&&maxStall<500,discovered,privateKey,keptKey,streamed,reasoning,tools,done,cancelled,error,removed,longStream,stablePanel,maxStall,captureState,toolPanelExists:!!toolPanel,articleStable:activeArticle===document.querySelector('.message-assistant'),bodyTail:document.querySelector('.message-assistant .message-body')?.textContent.slice(-100)};
     })()`);

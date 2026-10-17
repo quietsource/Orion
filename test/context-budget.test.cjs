@@ -49,6 +49,17 @@ test('recent prompt allowance shrinks when tool schemas and fixed instructions n
     toolSchemaPromptTokens: 2500,
     toolsEnabled: true
   });
-  assert.equal(recentTokens, 323);
-  assert.ok(recentTokens + 600 + 200 + 2500 + 3686 + 819 + 64 <= 8192);
+  assert.equal(recentTokens, 512);
+  assert.ok(recentTokens + 600 + 200 + 2500 + 3497 + 819 + 64 <= 8192);
+});
+
+test('small contexts preserve room for the newest user request before reserving output', () => {
+  const recentTokens = planRecentPromptBudget({
+    contextTokens: 4096,
+    systemPromptTokens: 900,
+    summaryPromptTokens: 0,
+    toolSchemaPromptTokens: 1800,
+    toolsEnabled: true
+  });
+  assert.ok(recentTokens >= 256);
 });

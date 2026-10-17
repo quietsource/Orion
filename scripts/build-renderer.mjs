@@ -1,9 +1,10 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const rendererDirectory = path.join(root, 'dist', 'renderer');
+const publicDirectory = path.join(root, 'public');
 const packageInfo = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const sourceHtml = await readFile(path.join(root, 'index.html'), 'utf8');
 
@@ -32,3 +33,6 @@ const html = sourceHtml
   .replace('<script type="module" src="/src/renderer/renderer.ts"></script>', '<script type="module" src="./renderer.js"></script>')
   .replace('</head>', '<link rel="stylesheet" href="./renderer.css"></head>');
 await writeFile(path.join(rendererDirectory, 'index.html'), html);
+for (const file of ['browser.html', 'browser.css', 'browser-ui.js']) {
+  await copyFile(path.join(publicDirectory, file), path.join(rendererDirectory, file));
+}

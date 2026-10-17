@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, DiagramValidationRequest, DiagramValidationResult } from '../shared/types';
+import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, DiagramValidationRequest, DiagramValidationResult, AppUpdateState } from '../shared/types';
 
 const api: OrionAPI = {
   listOFSMemories: offset => ipcRenderer.invoke('memory:ofs-list', offset),
@@ -41,7 +41,7 @@ const api: OrionAPI = {
   createGitCheckpoint: (label) => ipcRenderer.invoke('workspace:git-checkpoint', label),
   previewGitRollback: (checkpointId) => ipcRenderer.invoke('workspace:git-preview-rollback', checkpointId),
   rollbackGitCheckpoint: (checkpointId) => ipcRenderer.invoke('workspace:git-rollback', checkpointId),
-  respondToTool: (id, approved) => ipcRenderer.invoke('tool:respond', id, approved),
+  respondToTool: (id, decision) => ipcRenderer.invoke('tool:respond', id, decision),
   onToolRequest: (callback) => { const listener = (_: Electron.IpcRendererEvent, event: Parameters<typeof callback>[0]) => callback(event); ipcRenderer.on('tool:request', listener); return () => ipcRenderer.removeListener('tool:request', listener); },
   respondToQuestion: (id, answer) => ipcRenderer.invoke('question:respond', id, answer),
   onUserQuestion: (callback) => { const listener = (_: Electron.IpcRendererEvent, event: UserQuestionRequest) => callback(event); ipcRenderer.on('question:request', listener); return () => ipcRenderer.removeListener('question:request', listener); },
@@ -65,8 +65,8 @@ const api: OrionAPI = {
   deleteOllamaModel: (name) => ipcRenderer.invoke('ollama:delete-model', name),
   onDownloadProgress: (callback) => { const listener = (_: Electron.IpcRendererEvent, progress: DownloadProgress) => callback(progress); ipcRenderer.on('models:progress', listener); return () => ipcRenderer.removeListener('models:progress', listener); },
   enterCreate: () => ipcRenderer.invoke('create:enter'),
-  getComfyState: () => ipcRenderer.invoke('create:state'),
-  installComfyUI: () => ipcRenderer.invoke('create:install'),
+  getCreateEngineState: () => ipcRenderer.invoke('create:state'),
+  installCreateEngine: () => ipcRenderer.invoke('create:install'),
   shouldShowLlamaIntro: () => ipcRenderer.invoke('llama:intro'),
   dismissLlamaIntro: () => ipcRenderer.invoke('llama:dismiss-intro'),
   installLlama: () => ipcRenderer.invoke('llama:install'),
@@ -75,6 +75,10 @@ const api: OrionAPI = {
   openGeneratedFolder: () => ipcRenderer.invoke('create:open-folder'),
   generateImage: (prompt, modelId, kind, requestId) => ipcRenderer.invoke('create:generate', prompt, modelId, kind, requestId),
   readGeneratedMedia: (imagePath) => ipcRenderer.invoke('create:read-media', imagePath),
-  onCreateProgress: (callback) => { const listener = (_: Electron.IpcRendererEvent, progress: CreateProgress) => callback(progress); ipcRenderer.on('create:progress', listener); return () => ipcRenderer.removeListener('create:progress', listener); }
+  onCreateProgress: (callback) => { const listener = (_: Electron.IpcRendererEvent, progress: CreateProgress) => callback(progress); ipcRenderer.on('create:progress', listener); return () => ipcRenderer.removeListener('create:progress', listener); },
+  getAppUpdateState: () => ipcRenderer.invoke('app-update:state'),
+  startAppUpdate: () => ipcRenderer.invoke('app-update:start'),
+  consumeUpdateChangelog: () => ipcRenderer.invoke('app-update:consume-changelog'),
+  onAppUpdateState: callback => { const listener = (_: Electron.IpcRendererEvent, state: AppUpdateState) => callback(state); ipcRenderer.on('app-update:state', listener); return () => ipcRenderer.removeListener('app-update:state', listener); }
 };
 contextBridge.exposeInMainWorld('orion', api);

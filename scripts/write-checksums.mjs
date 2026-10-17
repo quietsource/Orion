@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const directoryPath = fileURLToPath(new URL('../release/', import.meta.url));
+const version = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 const distributableExtensions = new Set(['.AppImage', '.deb', '.dmg', '.exe', '.rpm', '.zip']);
 
 async function sha256(path) {
@@ -15,7 +16,7 @@ async function sha256(path) {
 
 const entries = await readdir(directoryPath, { withFileTypes: true });
 const files = entries
-  .filter((entry) => entry.isFile() && [...distributableExtensions].some((extension) => entry.name.endsWith(extension)))
+  .filter((entry) => entry.isFile() && entry.name.includes(version) && (entry.name.endsWith('.blockmap') || [...distributableExtensions].some((extension) => entry.name.endsWith(extension))))
   .map((entry) => entry.name)
   .sort((a, b) => a.localeCompare(b));
 

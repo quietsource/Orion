@@ -238,6 +238,70 @@ button.question-option[aria-pressed="true"],.question-custom-option.is-selected{
 /* Unified, low-profile agent activity disclosure. */
 .message-assistant>.tool-activity{margin:7px 0 11px;border:1px solid var(--border-soft);border-radius:10px;background:color-mix(in srgb,var(--surface) 62%,transparent);overflow:hidden}.tool-activity>.tool-activity-summary{display:flex;min-height:34px;align-items:center;gap:9px;padding:0 10px;list-style:none;cursor:pointer;color:var(--secondary);font-size:11px}.tool-activity>.tool-activity-summary::-webkit-details-marker{display:none}.tool-activity>.tool-activity-summary::before{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 12%,transparent)}.tool-activity:has(.tool-call.running)>.tool-activity-summary::before,.tool-activity:has(.tool-call.pending)>.tool-activity-summary::before{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);animation:tool-status-pulse 1.5s ease-in-out infinite}.tool-activity-title{font-weight:600;color:var(--text)}.tool-activity-meta{margin-left:auto;color:var(--muted);font-size:10px}.tool-activity-meta.is-active{color:var(--accent)}.tool-activity>.tool-calls{display:flex;flex-direction:column;gap:0;margin:0 10px 7px 13px;padding:1px 0 2px 9px;border-left:1px solid var(--border)}.tool-activity .tool-call.reasoning{margin:0;border:0;border-radius:0;background:transparent;box-shadow:none}.tool-activity .tool-call.reasoning::before{display:none}.tool-activity .tool-call.reasoning>.tool-title{position:relative;min-height:27px;padding:3px 2px 3px 9px;color:var(--secondary);font-size:11px}.tool-activity .tool-call.reasoning>.tool-title::before{position:absolute;left:-13px;top:11px;width:6px;height:6px;border-radius:50%;background:var(--border);content:""}.tool-activity .tool-call.completed>.tool-title::before{background:var(--muted)}.tool-activity .tool-call.running>.tool-title::before,.tool-activity .tool-call.pending>.tool-title::before{background:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}.tool-activity .tool-call .tool-status{font-size:10px}.tool-activity .tool-call .tool-heading{gap:7px}.tool-activity .tool-call .tool-body{margin-left:10px;padding:2px 0 8px 9px;border-left:1px solid var(--border-soft)}.tool-activity .tool-activity-group{margin:1px 0}.tool-activity .tool-activity-group>summary{color:var(--muted);font-size:10px}
 
+/* Keep approvals beside the input and tool progress compact while it runs. */
+.tool-approval{width:min(820px,100%);margin:0 auto 8px;padding:7px 9px;gap:10px;border:1px solid var(--border-soft);border-radius:10px;background:color-mix(in srgb,var(--surface) 88%,var(--bg));pointer-events:auto}
+.tool-approval-copy{grid-template-columns:auto minmax(0,1fr);align-items:center;gap:2px 8px}
+#tool-approval-title{font-size:11px;white-space:nowrap}
+#tool-approval-summary{font-size:10px}
+#tool-approval-details{margin-top:2px}
+.tool-approval-actions{gap:5px}
+.tool-approval-actions button{min-height:27px;padding:3px 9px}
+.message-assistant>.tool-activity{margin:5px 0 8px;border-radius:8px;background:color-mix(in srgb,var(--surface) 36%,transparent)}
+.tool-activity>.tool-activity-summary{min-height:30px;gap:7px;padding:0 9px}
+.tool-activity>.tool-calls{margin:0 9px 5px 10px;padding:0 0 0 8px}
+.tool-activity details.tool-call{margin:0 0 2px 0}
+.tool-activity details.tool-call>summary.tool-title{min-height:25px;padding:3px 2px;font-size:10px}
+.tool-activity .tool-call .tool-body{margin-left:8px;padding:1px 0 5px 7px}
+@media(max-width:620px){.tool-approval{align-items:center;padding:7px}.tool-approval-copy{grid-template-columns:minmax(0,1fr)}.tool-approval-actions{align-self:center}}
+
+/* Final compact layouts: one work surface, bounded labels, and a single question frame. */
+.assistant-workflow{width:calc(100% - 31px);min-width:0;max-width:calc(100% - 31px);margin:3px 0 14px 31px;padding:8px 10px 7px;overflow:hidden;border:1px solid var(--border-soft);border-radius:9px;background:color-mix(in srgb,var(--surface) 70%,var(--bg))}
+.assistant-workflow-label{margin:0 0 5px 1px}
+.assistant-workflow>.web-research-activity,.assistant-workflow>.tool-activity{width:100%;min-width:0;max-width:100%;margin:0;border:0;border-radius:0;background:transparent;overflow:hidden}
+.assistant-workflow>.web-research-activity+.tool-activity,.assistant-workflow>.tool-activity+.web-research-activity{border-top:1px solid var(--border-soft)}
+.assistant-workflow .web-research-activity>summary,.assistant-workflow .tool-activity>.tool-activity-summary{display:flex;width:100%;min-width:0;min-height:31px;gap:8px;padding:3px 2px;overflow:hidden}
+.assistant-workflow .web-research-title,.assistant-workflow .tool-activity-title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .web-research-status,.assistant-workflow .tool-activity-meta{min-width:0;max-width:38%;flex:0 1 auto;margin-left:auto;overflow:hidden;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .web-research-steps{width:100%;min-width:0;max-width:100%;padding:1px 2px 7px 11px;overflow:hidden}
+.assistant-workflow .web-research-step{min-width:0;max-width:100%;padding:3px 0 7px 12px;overflow:hidden}
+.assistant-workflow .web-research-query,.assistant-workflow .web-research-error{max-width:100%;overflow-wrap:anywhere;white-space:normal;word-break:break-word}
+.assistant-workflow .web-research-sources{min-width:0;max-width:100%;overflow:hidden}
+.assistant-workflow .web-research-source{min-width:0;max-width:min(240px,100%);overflow:hidden;text-overflow:ellipsis}
+.assistant-workflow>.tool-activity>.tool-calls{min-width:0;max-width:100%;margin:0;padding:0 0 3px 7px;border-left:1px solid var(--border-soft)}
+.assistant-workflow .tool-activity details.tool-call{min-width:0;max-width:100%;margin:0}
+.assistant-workflow .tool-activity details.tool-call>summary.tool-title{display:flex;width:100%;min-width:0;gap:7px;min-height:28px;padding:3px 4px;overflow:hidden}
+.assistant-workflow .tool-activity .tool-heading{display:flex;min-width:0;max-width:100%;flex:1 1 auto;align-items:center;gap:6px;overflow:hidden}
+.assistant-workflow .tool-activity .tool-name{min-width:0;max-width:100%;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .tool-activity .tool-inline-detail{min-width:0;max-width:100%;flex:1 1 90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .tool-activity .tool-status{min-width:0;max-width:36%;flex:0 1 auto;margin:0;overflow:hidden;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .tool-activity .tool-body{min-width:0;max-width:calc(100% - 12px);margin:0 4px 5px 13px;padding:5px 7px;overflow:hidden;border-left:1px solid var(--border-soft);border-radius:0;background:transparent;overflow-wrap:anywhere}
+.assistant-workflow .tool-activity .tool-output{max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+.assistant-workflow+.message-body{min-width:0;max-width:100%;overflow-wrap:anywhere}
+.composer.asking-user{padding:11px;border:1px solid var(--border);background:#121216;box-shadow:none!important}
+.user-question{gap:8px;padding:0}
+.user-question-card,.user-question-card.is-current,.user-question-card.is-answered{gap:8px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;opacity:1}
+.user-question-list{gap:10px;padding:0;scroll-snap-type:none}
+.question-option,.question-custom-option{min-width:0;max-width:100%;box-shadow:none!important}
+.question-custom-option{display:flex;align-items:center}
+.question-custom-option input{display:block;min-width:0;width:auto;flex:1 1 auto;margin:0;padding:3px 2px!important;border:0!important;border-radius:0!important;outline:0!important;background:transparent!important;box-shadow:none!important;appearance:none;color:var(--text);font:inherit;font-size:12px}
+.question-custom-option input:focus{border:0!important;background:transparent!important;box-shadow:none!important;outline:0!important}
+#tool-approval-choice{width:148px;min-width:148px;height:30px;padding:0 28px 0 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:11px;cursor:pointer}
+#tool-approval-choice:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 68%,transparent);outline-offset:2px}
+#tool-approval-choice option{background:var(--surface);color:var(--text)}
+@media(max-width:640px){.assistant-workflow{width:100%;max-width:100%;margin-left:0}.assistant-workflow .web-research-status{max-width:32%}.assistant-workflow .tool-inline-detail{display:none}}
+@media(max-width:620px){#tool-approval-choice{width:100%;min-width:120px}.tool-approval-actions{width:100%}.tool-approval-copy{flex:1 1 100%}.tool-approval{flex-wrap:wrap}}
+
+/* Keep activity embedded in the assistant message instead of inside a panel. */
+.assistant-workflow{width:calc(100% - 31px);max-width:calc(100% - 31px);margin:2px 0 12px 31px;padding:0;overflow:visible;border:0;border-radius:0;background:transparent;contain:layout style}
+.assistant-workflow-label{display:none}
+.assistant-workflow>.web-research-activity,.assistant-workflow>.tool-activity{border:0;border-radius:0;background:transparent;overflow:visible}
+.assistant-workflow>.web-research-activity+.tool-activity,.assistant-workflow>.tool-activity+.web-research-activity{border-top:1px solid var(--border-soft)}
+.assistant-workflow .web-research-activity>summary,.assistant-workflow .tool-activity>.tool-activity-summary{min-height:29px;padding:2px 0}
+.assistant-workflow .web-research-steps{padding:0 0 5px 11px}
+.assistant-workflow>.tool-activity>.tool-calls{margin-left:4px;padding-left:8px}
+.assistant-workflow+.message-body{margin-top:0}
+@media(max-width:640px){.assistant-workflow{width:100%;max-width:100%;margin-left:0}}
+
 /* Match the Canvas card geometry on the left and reveal it from an invisible edge target. */
 .sidebar{height:calc(100vh - 16px);margin:8px 0 8px 8px;border:1px solid var(--border-soft);border-radius:16px;background:var(--bg)}
 #sidebar-hover-trigger{position:fixed;z-index:49;top:8px;bottom:8px;left:0;width:8px;visibility:hidden;pointer-events:none;background:transparent}
@@ -314,6 +378,11 @@ body.sidebar-collapsed .sidebar{position:fixed!important;inset:8px auto 8px 8px!
 .context-selector{appearance:auto!important;-webkit-appearance:auto!important;height:32px;min-width:72px;padding:0 8px;margin-left:6px;border:1px solid var(--border)!important;border-radius:9px;background:var(--surface);color:var(--text);font:inherit;font-size:12px;cursor:pointer;outline:none}
 .context-selector:hover{background:var(--hover);border-color:var(--secondary)!important}
 .context-selector:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.model-selector,.context-selector{height:36px;border:1px solid var(--border)!important;border-radius:10px;background:var(--surface)!important;color:var(--text);transition:background-color .14s ease,border-color .14s ease,box-shadow .14s ease;outline:none;box-shadow:none}
+.model-selector:hover,.context-selector:hover{background:var(--hover)!important;border-color:var(--secondary)!important}
+.model-selector:active,.context-selector:active{background:var(--active)!important;border-color:var(--accent)!important}
+.model-selector:focus,.context-selector:focus{background:var(--hover)!important;border-color:var(--secondary)!important;box-shadow:none}
+.model-selector:focus-visible,.context-selector:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .memory-inspector{padding:13px;margin:12px 0;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg)}
 .memory-inspector h4{margin:0 0 8px;font-size:13px;font-weight:600}
 .memory-inspector-stats{display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:12px 0;font-size:12px}
@@ -325,3 +394,7 @@ body.sidebar-collapsed .sidebar{position:fixed!important;inset:8px auto 8px 8px!
 .memory-inspector-actions{display:flex;gap:8px;margin-top:12px}
 #settings-form>.dialog-actions{grid-area:actions;position:static;display:flex;justify-content:flex-end;gap:8px;min-height:62px;margin:0;padding:12px 20px;border-top:1px solid var(--border-soft);background:var(--surface)}
 @media(max-width:600px){#settings-form{max-height:90vh}.settings-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:12px;padding:12px}.settings-nav{grid-template-columns:repeat(3,minmax(0,1fr));padding:4px}.settings-nav-item{min-height:32px;padding:0 4px;text-align:center;font-size:10px}#settings-form>.dialog-title{padding:0 14px}#settings-form>.dialog-actions{padding-right:14px;padding-left:14px}}
+
+/* Workspace selection, review and approval flows are temporarily disabled. */
+#command-palette,#workspace-review,#workspace-required,#chat-mode,#approval-strip{display:none!important}
+#settings-form>[hidden]{display:none!important}
