@@ -1,3 +1,9 @@
+# Orion 0.1.3 — Smoother media generation and chat activity
+
+- Matched image and video generation from chat to the Create tab, including live progress, generated media preview, and a clear model-restoration state.
+- Improved local model reconnection during media handoff so brief server restarts do not immediately surface as a failed chat request.
+- Refined web research and tool activity in chat with a compact embedded layout, readable long inputs and results, and clearer progress and status.
+
 # Orion 0.1.2 — Reliable updates and smoother model browsing
 
 - Moved update notices and download progress into the sidebar and hardened Windows update installation and relaunch so Orion verifies the installer handoff before showing release notes.
@@ -25,8 +31,8 @@ Orion 0.1.0 is the first public release.
 - General chat tools for web search, page reading, local application actions, questions, and Canvas. These tools run without per-action approval prompts. Project workspace tools are disabled in this release.
 - Canvas for working with documents and code, including source editing and preview where supported. Canvas state belongs to the current conversation.
 - Orion Create with a managed `stable-diffusion.cpp` Vulkan runtime for Stable Diffusion image generation and Wan video generation.
-- Orion Browser controls, Markdown and code rendering, syntax highlighting, and Mermaid diagrams.
-- Local recurring schedules, with optional continued operation from the system tray.
+- Orion Browser controls, Markdown and code rendering, and syntax highlighting.
+- Optional continued operation from the system tray.
 - Bun-based installation, development, build, and packaging commands; Electron provides the desktop runtime.
 
 ## Platform support

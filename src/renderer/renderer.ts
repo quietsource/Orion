@@ -632,7 +632,7 @@ function renderMessage(active: Conversation, message: Message) {
     for (const call of message.toolCalls) {
       if (message.webResearch && (call.name === 'search_web' || call.name === 'web_fetch')) continue;
       const card = document.createElement('details');
-      card.className = `tool-call${call.name==='create_image'?' generation-card':''} ${call.status}`;
+      card.className = `tool-call${call.name==='create_image'?' generation-card create-generation-card':''} ${call.status}`;
       card.dataset.toolCallId = call.id;
       card.dataset.toolName = call.name;
       card.open = toolCallOpenState.get(call.id) ?? Boolean(call.imagePath);
@@ -641,8 +641,9 @@ function renderMessage(active: Conversation, message: Message) {
       title.className = 'tool-title';
       const label = document.createElement('span');
       label.className = 'tool-name';
+      label.dataset.glyph = call.name === 'create_image' ? '✦' : /search|web_fetch|browser_open/i.test(call.name) ? '⌕' : /file|workspace|canvas/i.test(call.name) ? '▤' : /command|run/i.test(call.name) ? '›_' : '·';
       const toolNames: Record<string, string> = { ask_user_question: 'Asked a question', workspace_list: 'Listed files', workspace_search: 'Searched files', workspace_read: 'Read file', workspace_write: 'Wrote file', workspace_edit: 'Edited file', workspace_run: 'Ran command', read_file: 'Read file', write_file: 'Wrote file', run_command: 'Ran command', search_files: 'Searched files', create_image: 'Created media', search_memory: 'Searched memory', search_web: 'Searched the web', browser_open: 'Opened browser', browser_control: 'Used browser' };
-      label.textContent = toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
+      label.textContent = call.name === 'create_image' ? call.status === 'running' ? (call.imagePath ? 'Restoring chat model' : `Creating ${call.mediaType ?? call.input.kind ?? 'image'}`) : call.status === 'completed' ? `${call.mediaType === 'video' ? 'Video' : 'Image'} ready` : call.status === 'error' ? 'Generation failed' : 'Preparing generation' : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
       const heading = document.createElement('span'); heading.className = 'tool-heading'; heading.append(label);
       const detailValue = call.name === 'workspace_run' || call.name === 'run_command' ? call.input.command
         : call.name === 'workspace_search' || call.name === 'search_files' || call.name === 'search_memory' || call.name === 'search_web' ? call.input.query
@@ -654,7 +655,7 @@ function renderMessage(active: Conversation, message: Message) {
       title.append(heading);
       const status = document.createElement('span');
       status.className = `tool-status ${call.status}`;
-      status.textContent = call.status === 'running' ? 'Running' : call.status === 'pending' ? 'Needs approval' : call.status === 'completed' ? 'Completed' : call.status === 'denied' ? 'Declined' : 'Failed';
+      status.textContent = call.status === 'running' ? (call.name === 'create_image' && call.imagePath ? 'Restoring model' : 'Running') : call.status === 'pending' ? 'Needs approval' : call.status === 'completed' ? 'Completed' : call.status === 'denied' ? 'Declined' : 'Failed';
       title.append(status);
       card.append(title);
       const body = document.createElement('div'); body.className = 'tool-body';
@@ -681,12 +682,13 @@ function renderMessage(active: Conversation, message: Message) {
         const output = document.createElement('div'); output.className = 'tool-output'; output.textContent = call.output; result.append(output); body.append(result);
       }
       if (call.name === 'create_image') {
-        const visual=document.createElement('div');visual.className=`tool-generation-stage${call.imagePath?' is-complete':''}`;
-        if(call.imagePath&&call.mediaType){void generatedMediaUrl(call.imagePath).then(src=>{if(!visual.isConnected)return;const media=call.mediaType==='video'?document.createElement('video'):document.createElement('img');media.className='tool-generation-output';if(media instanceof HTMLVideoElement){media.controls=true;media.playsInline=true;}else media.alt='Generated with Orion';media.src=src;visual.replaceChildren(media);}).catch(()=>undefined);}
-        else if(call.status==='running'){visual.append(generationDotField());const percent=document.createElement('span');percent.className='tool-generation-percent';percent.textContent=`${Math.max(0,Math.min(99,call.progress??0))}%`;visual.append(percent);}
-        else {const waiting=document.createElement('span');waiting.className='tool-generation-waiting';waiting.textContent=call.status==='pending'?'Waiting for approval…':call.status==='error'?(call.output??'Generation failed'):'Preparing local generation…';visual.append(waiting);}
+        const visual=document.createElement('div');visual.className=`generation-visual tool-generation-stage${call.imagePath?' is-complete':''}`;visual.setAttribute('role','status');visual.setAttribute('aria-label',call.imagePath?'Generated media ready':call.status==='running'?'Generating media':'Media generation');
+        if(call.imagePath&&call.mediaType){const loading=generationDotField();visual.append(loading);const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=call.status==='running'?'Restoring model…':'Ready';visual.append(percent);void generatedMediaUrl(call.imagePath).then(src=>{if(!visual.isConnected)return;const media=call.mediaType==='video'?document.createElement('video'):document.createElement('img');media.className='generation-output tool-generation-output';if(media instanceof HTMLVideoElement){media.controls=true;media.playsInline=true;}else media.alt='Generated with Orion';media.src=src;visual.replaceChildren(media);}).catch(()=>undefined);}
+        else if(call.status==='running'){visual.append(generationDotField());const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=`${Math.max(0,Math.min(99,call.progress??0))}%`;visual.append(percent);}
+        else {const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=call.status==='error'?'Failed':call.status==='pending'?'Queued':'Starting';visual.append(percent);}
         body.append(visual);
-        const detail=document.createElement('div');detail.className='tool-generation-detail';detail.textContent=call.status==='running'?(call.progressDetail??'Generating locally…'):call.status==='pending'?'Waiting for approval…':call.status==='error'?(call.output??'Generation failed'):'';body.append(detail);
+        const detail=document.createElement('div');detail.className='tool-generation-detail';detail.textContent=call.status==='running'?(call.imagePath?'The media is ready. Reconnecting to the chat model…':call.progressDetail??'Generating locally…'):call.status==='pending'?'Waiting for approval…':call.status==='error'?(call.output??'Generation failed'):'';body.append(detail);
+        const prompt=document.createElement('p');prompt.className='generation-prompt tool-generation-prompt';prompt.textContent=String(call.input.prompt??'');if(prompt.textContent)body.append(prompt);
       }
       if (body.childNodes.length) card.append(body);
       renderedToolCards.push({ call, card });
@@ -1135,10 +1137,10 @@ $('engine-install').addEventListener('click',()=>void startEngineInstall());
 function patchLiveGenerationCall(call: ToolCallRecord) {
   const card=[...chatBox.querySelectorAll<HTMLElement>('.tool-call[data-tool-call-id]')].find(item=>item.dataset.toolCallId===call.id);if(!card)return;
   const status=card.querySelector<HTMLElement>('.tool-status');if(status){status.textContent=call.status;status.className=`tool-status ${call.status}`;}
-  const visual=card.querySelector<HTMLElement>('.tool-generation-stage');let percent=card.querySelector<HTMLElement>('.tool-generation-percent');
-  if(visual&&!percent){visual.replaceChildren(generationDotField());percent=document.createElement('span');percent.className='tool-generation-percent';visual.append(percent);}
-  if(percent)percent.textContent=`${Math.max(0,Math.min(99,call.progress??0))}%`;
-  let detail=card.querySelector<HTMLElement>('.tool-generation-detail');if(!detail){detail=document.createElement('div');detail.className='tool-generation-detail';card.append(detail);}detail.textContent=call.progressDetail??'Generating locally…';
+  const visual=card.querySelector<HTMLElement>('.tool-generation-stage');let percent=card.querySelector<HTMLElement>('.generation-percent');
+  if(visual&&!percent){visual.replaceChildren(generationDotField());percent=document.createElement('span');percent.className='generation-percent';visual.append(percent);}
+  if(percent)percent.textContent=call.imagePath?'Restoring model…':`${Math.max(0,Math.min(99,call.progress??0))}%`;
+  let detail=card.querySelector<HTMLElement>('.tool-generation-detail');if(!detail){detail=document.createElement('div');detail.className='tool-generation-detail';card.append(detail);}detail.textContent=call.imagePath?'The media is ready. Reconnecting to the chat model…':call.progressDetail??'Generating locally…';
 }
 window.orion.onCreateProgress(progress=>{
   const isCreatePageJob=createPageGenerationIds.has(progress.id);
@@ -1151,7 +1153,7 @@ window.orion.onCreateProgress(progress=>{
     else {const card=chatBox.querySelector<HTMLElement>(`[data-generation="${CSS.escape(progress.id)}"]`);const percent=card?.querySelector<HTMLElement>('.generation-percent');if(percent)percent.textContent=`${Math.max(0,Math.min(99,progress.percent??0))}%`;else renderCreateView();}
   }
   if(engineInstallPending&&progress.phase==='complete')window.setTimeout(()=>{createProgress.delete(progress.id);if(activeView==='Create')renderCreateView();},10000);
-  if(current)for(const message of current.messages){const call=message.toolCalls?.find(item=>item.id===progress.id);if(!call)continue;call.progress=progress.percent;call.progressDetail=progress.detail;if(progress.phase==='error'){call.status='error';call.output=progress.error??progress.detail;}else if(progress.phase==='complete'){call.status='completed';call.imagePath=progress.imagePath;call.mediaType=progress.mediaType;}else{call.status='running';patchLiveGenerationCall(call);}if(progress.phase==='error'||progress.phase==='complete'){renderMessages();void save(current);}}
+  if(current)for(const message of current.messages){const call=message.toolCalls?.find(item=>item.id===progress.id);if(!call)continue;call.progress=progress.percent;call.progressDetail=progress.phase==='complete'?'Media ready · restoring the chat model…':progress.detail;if(progress.phase==='error'){call.status='error';call.output=progress.error??progress.detail;}else if(progress.phase==='complete'){call.status='running';call.imagePath=progress.imagePath;call.mediaType=progress.mediaType;}else{call.status='running';patchLiveGenerationCall(call);}if(progress.phase==='error'||progress.phase==='complete'){renderMessages();void save(current);}}
 });
 const llamaIntroDialog=$('llama-intro-dialog') as HTMLDialogElement;
 llamaIntroDialog.addEventListener('close',()=>{void window.orion.dismissLlamaIntro();});

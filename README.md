@@ -1,6 +1,6 @@
 # Orion
 
-Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.2`.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.3`.
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the Node runtime needed by the desktop app, so a separate system Node.js installation is not required.
 

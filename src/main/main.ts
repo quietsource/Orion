@@ -1384,6 +1384,20 @@ async function prepareModelToolSupport(model: string, context: number): Promise<
   return undefined;
 }
 
+async function fetchWithLocalReconnect(url: string, init: RequestInit, service: string, attempts = 7): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try { return await fetch(url, init); }
+    catch (error) {
+      if ((init.signal as AbortSignal | undefined)?.aborted) throw error;
+      lastError = error;
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, Math.min(5000, 350 * 2 ** attempt)));
+    }
+  }
+  const reason = lastError instanceof Error ? lastError.message : String(lastError ?? 'connection refused');
+  throw new Error(`Could not reconnect to ${service} after media generation: ${reason}`);
+}
+
 async function providerMediaRestore(provider: ApiProvider, model: string, context: number): Promise<(() => Promise<void>) | undefined> {
   const base = new URL('/', provider.baseUrl);
   const host = base.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -1398,11 +1412,16 @@ async function providerMediaRestore(provider: ApiProvider, model: string, contex
 
   const ollama = await readJson(await request('/api/tags').catch(() => new Response(null, { status: 503 })));
   if (ollama && Array.isArray(ollama.models)) {
-    const unload = await request('/api/generate', { model, prompt: '', stream: false, keep_alive: 0 });
+    const unload = await fetchWithLocalReconnect(new URL('/api/generate', base).toString(), {
+      method: 'POST', headers, body: JSON.stringify({ model, prompt: '', stream: false, keep_alive: 0 }), signal: AbortSignal.timeout(60000)
+    }, 'the local Ollama model');
     if (!unload.ok) throw new Error(`The local Ollama provider could not unload ${model} (${unload.status}).`);
     return async () => {
-      const loaded = await request('/api/generate', { model, prompt: '', stream: false, keep_alive: -1, options: { num_predict: 1 } });
+      const loaded = await fetchWithLocalReconnect(new URL('/api/generate', base).toString(), {
+        method: 'POST', headers, body: JSON.stringify({ model, prompt: '', stream: false, keep_alive: -1, options: { num_predict: 1 } }), signal: AbortSignal.timeout(8 * 60_000)
+      }, 'the local Ollama model');
       if (!loaded.ok) throw new Error(`The local Ollama provider could not reload ${model} (${loaded.status}).`);
+      await loaded.arrayBuffer();
     };
   }
 
@@ -1464,19 +1483,20 @@ async function withMediaModelHandoffLocked<T>(model: string, context: number, op
       await llamaManager.stop();
       restore = async () => { await llamaManager.ensureServer(modelPath, context, mmproj); };
     } else {
-      const response = await fetch(`${settings.ollamaUrl}/api/generate`, {
+      const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/generate`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model, prompt: '', stream: false, keep_alive: 0 }),
         signal: AbortSignal.timeout(60000)
-      });
+      }, 'Ollama');
       if (!response.ok) throw new Error(`Ollama could not unload the active chat model (${response.status}): ${(await response.text()).slice(0, 500)}`);
       restore = async () => {
-        const loaded = await fetch(`${settings.ollamaUrl}/api/generate`, {
+      const loaded = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/generate`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ model, prompt: '', stream: false, keep_alive: -1, options: { num_predict: 1 } }),
           signal: AbortSignal.timeout(8 * 60 * 1000)
-        });
+      }, 'Ollama');
         if (!loaded.ok) throw new Error(`Ollama could not reload the chat model (${loaded.status}).`);
+      await loaded.arrayBuffer();
       };
     }
   }
@@ -1909,7 +1929,8 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         const began = Date.now();
         const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
         const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,input.think,input.thinkLevel) : { url: `${baseUrl}/chat/completions`, body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(routedManaged||routedModel.startsWith('orion-gguf:') ? input.think ? { reasoning_effort: input.thinkLevel && input.thinkLevel !== 'default' ? input.thinkLevel : 'medium' } : {} : {}), ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
-        const response = await fetch(providerRequest.url, { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal });
+        const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
+        const response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(providerRequest.url, providerInit, 'the local chat model');
         if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. Check the model, API credentials, and provider compatibility.`);
         const reader = response.body.getReader(), decoder = new TextDecoder(); let turnContent = ''; let buffer = '', calls = new Map<number, { id: string; name: string; arguments: string; uiId: string }>(), finishReason = '', completionTokens = 0;
         const publishToolUpdate = (call: { id: string; name: string; arguments: string; uiId: string }, phase: 'started'|'updated') => {
@@ -2034,11 +2055,11 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       const reportContextUsage = () => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'context', usedContextTokens: Math.min(contextBudget, promptContextTokens + generatedContextTokens), maxContextTokens: contextBudget });
       reportContextUsage();
       const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
-      const response = await fetch(`${settings.ollamaUrl}/api/chat`, {
+      const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: input.model, messages: requestMessages, stream: true, think: input.think?(input.thinkLevel&&input.thinkLevel!=='default'?input.thinkLevel:true):false, ...(apiTools.length ? { tools: apiTools } : {}), options: { temperature: settings.temperature, num_ctx: contextBudget, num_predict: outputReserveTokens } }),
         signal: requestAbort.signal
-      });
+      }, 'Ollama chat');
       if (!response.ok || !response.body) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
       const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '', turnContent = '';
       let assistant: Record<string, unknown> = { role: 'assistant', content: '' };
