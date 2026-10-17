@@ -204,7 +204,11 @@ export class LlamaManager {
     const state = await this.loadState() ?? (await this.install(), await this.loadState()); if (!state) throw new Error('llama.cpp backend did not install.');
     if (mmprojPath && !await fs.stat(mmprojPath).then(s => s.isFile(), () => false)) throw new Error('A required GGUF projector file is missing. Re-download the model from Models.');
     check();
-    if (this.process && this.process.exitCode === null && !this.process.killed && this.activeModel === `${modelPath}\0${mmprojPath ?? ''}` && this.activeContext === context) return `http://127.0.0.1:${this.port}`;
+    if (this.process && this.process.exitCode === null && !this.process.killed && this.activeModel === `${modelPath}\0${mmprojPath ?? ''}` && this.activeContext === context) {
+      const healthy = await fetch(`http://127.0.0.1:${this.port}/health`, { signal: AbortSignal.timeout(2500) }).then(response => response.ok).catch(() => false);
+      check();
+      if (healthy) return `http://127.0.0.1:${this.port}`;
+    }
     await this.stopChild(); check(); this.port = await this.freePort(); const binary = state.backend === 'cpu' ? state.cpuBinary : state.serverBinary;
     const args = ['--model', modelPath, '--host', '127.0.0.1', '--port', String(this.port), '--ctx-size', String(context), '--alias', 'orion-local', '--jinja', '--n-gpu-layers', state.backend === 'cpu' ? '0' : 'all'];
     if (mmprojPath) args.push('--mmproj', mmprojPath);

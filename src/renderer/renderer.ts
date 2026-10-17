@@ -584,58 +584,47 @@ function renderMessage(active: Conversation, message: Message) {
   }
   if (message.webResearch) {
     const activity = message.webResearch;
-    const details = document.createElement('details');
-    details.className = 'web-research-activity';
-    details.open = toolActivityOpenState.get(`web:${message.id}`) ?? (activity.status !== 'complete' && activity.status !== 'error');
-    details.addEventListener('toggle', () => toolActivityOpenState.set(`web:${message.id}`, details.open));
-    const summary = document.createElement('summary');
-    const title = document.createElement('span'); title.className = 'web-research-title'; title.textContent = 'Web research';
-    const status = document.createElement('span'); status.className = `web-research-status ${activity.status}`;
-    status.textContent = activity.status === 'planning' ? 'Preparing search' : activity.status === 'searching' ? 'Searching' : activity.status === 'reading' ? 'Reading sources' : activity.status === 'error' ? 'Search issue' : 'Complete';
-    summary.append(title, status); details.append(summary);
-    const steps = document.createElement('div'); steps.className = 'web-research-steps';
     for (const step of activity.steps) {
-      const section = document.createElement('section'); section.className = `web-research-step ${step.status}`;
-      const query = document.createElement('div'); query.className = 'web-research-query'; query.textContent = step.query ? `Search for ${step.query}` : 'Preparing a search query'; section.append(query);
+      const event = document.createElement('div'); event.className = 'tool-event web-research-event';
+      const details = document.createElement('details'); details.className = `tool-call web-research-activity ${step.status}`;
+      const stepId = `web:${message.id}:${activity.steps.indexOf(step)}`;
+      details.open = toolCallOpenState.get(stepId) ?? false;
+      details.addEventListener('toggle', () => toolCallOpenState.set(stepId, details.open));
+      const summary = document.createElement('summary'); summary.className = 'tool-title';
+      const heading = document.createElement('span'); heading.className = 'tool-heading';
+      const title = document.createElement('span'); title.className = 'tool-name'; title.dataset.glyph = '⌕'; title.textContent = 'Web search';
+      heading.append(title);
+      if (step.query) { const preview=document.createElement('span');preview.className='tool-inline-detail';preview.textContent=step.query;heading.append(preview); }
+      const status = document.createElement('span'); status.className = `tool-status ${step.status}`;
+      status.textContent = step.status === 'searching' ? 'Searching' : step.status === 'reading' ? 'Reading sources' : step.status === 'error' ? 'Search failed' : 'Complete';
+      summary.append(heading, status); summary.title=status.textContent; details.append(summary);
+      const body = document.createElement('div'); body.className = 'tool-body';
+      const query = document.createElement('div'); query.className = 'tool-argument-value web-research-query'; query.textContent = step.query || 'Preparing a search query'; body.append(query); details.append(body);
+      event.append(details);
+      const results = document.createElement('div'); results.className = 'tool-result-inline web-research-results';
       if (step.sources.length) {
-        const reading = document.createElement('div'); reading.className = 'web-research-phase'; reading.textContent = 'Reading'; section.append(reading);
         const sources = document.createElement('div'); sources.className = 'web-research-sources';
         for (const source of step.sources) {
           const link = document.createElement('a'); link.className = `web-research-source ${source.status}`; link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
           link.textContent = source.title || (() => { try { return new URL(source.url).hostname.replace(/^www\./, ''); } catch { return source.url; } })();
           link.title = source.title || source.url; sources.append(link);
         }
-        section.append(sources);
+        results.append(sources);
       }
-      if (step.error) { const error = document.createElement('div'); error.className = 'web-research-error'; error.textContent = step.error; section.append(error); }
-      steps.append(section);
+      if (step.error) { const error = document.createElement('div'); error.className = 'tool-result-error'; error.textContent = step.error; results.append(error); }
+      if (results.childNodes.length) event.append(results);
+      workflow.append(event);
     }
-    details.append(steps); workflow.append(details);
   }
   if (message.toolCalls?.length) {
-    const activity = document.createElement('details');
-    activity.className = 'tool-activity';
-    const activityId = `tool-activity:${message.id}`;
-    const activeToolCount = message.toolCalls.filter(call => call.status === 'running' || call.status === 'pending').length;
-    activity.open = toolActivityOpenState.get(activityId) ?? activeToolCount > 0;
-    activity.addEventListener('toggle', () => toolActivityOpenState.set(activityId, activity.open));
-    const activitySummary = document.createElement('summary');
-    activitySummary.className = 'tool-activity-summary';
-    const activityTitle = document.createElement('span'); activityTitle.className = 'tool-activity-title';
-    activityTitle.textContent = activeToolCount ? 'Working with tools' : 'Tool activity';
-    const activityMeta = document.createElement('span'); activityMeta.className = `tool-activity-meta${activeToolCount ? ' is-active' : ''}`;
-    activityMeta.textContent = activeToolCount ? `${activeToolCount} active` : `${message.toolCalls.length} ${message.toolCalls.length === 1 ? 'action' : 'actions'}`;
-    activitySummary.append(activityTitle, activityMeta); activity.append(activitySummary);
-    const calls = document.createElement('div');
-    calls.className = 'tool-calls';
-    const renderedToolCards: Array<{ call: ToolCallRecord; card: HTMLDetailsElement }> = [];
     for (const call of message.toolCalls) {
       if (message.webResearch && (call.name === 'search_web' || call.name === 'web_fetch')) continue;
+      const event = document.createElement('div'); event.className = 'tool-event';
       const card = document.createElement('details');
-      card.className = `tool-call${call.name==='create_image'?' generation-card create-generation-card':''} ${call.status}`;
+      card.className = `tool-call ${call.status}`;
       card.dataset.toolCallId = call.id;
       card.dataset.toolName = call.name;
-      card.open = toolCallOpenState.get(call.id) ?? Boolean(call.imagePath);
+      card.open = toolCallOpenState.get(call.id) ?? false;
       card.addEventListener('toggle', () => toolCallOpenState.set(call.id, card.open));
       const title = document.createElement('summary');
       title.className = 'tool-title';
@@ -643,7 +632,7 @@ function renderMessage(active: Conversation, message: Message) {
       label.className = 'tool-name';
       label.dataset.glyph = call.name === 'create_image' ? '✦' : /search|web_fetch|browser_open/i.test(call.name) ? '⌕' : /file|workspace|canvas/i.test(call.name) ? '▤' : /command|run/i.test(call.name) ? '›_' : '·';
       const toolNames: Record<string, string> = { ask_user_question: 'Asked a question', workspace_list: 'Listed files', workspace_search: 'Searched files', workspace_read: 'Read file', workspace_write: 'Wrote file', workspace_edit: 'Edited file', workspace_run: 'Ran command', read_file: 'Read file', write_file: 'Wrote file', run_command: 'Ran command', search_files: 'Searched files', create_image: 'Created media', search_memory: 'Searched memory', search_web: 'Searched the web', browser_open: 'Opened browser', browser_control: 'Used browser' };
-      label.textContent = call.name === 'create_image' ? call.status === 'running' ? (call.imagePath ? 'Restoring chat model' : `Creating ${call.mediaType ?? call.input.kind ?? 'image'}`) : call.status === 'completed' ? `${call.mediaType === 'video' ? 'Video' : 'Image'} ready` : call.status === 'error' ? 'Generation failed' : 'Preparing generation' : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
+      label.textContent = call.name === 'create_image' ? `Create ${call.mediaType ?? call.input.kind ?? 'image'}` : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
       const heading = document.createElement('span'); heading.className = 'tool-heading'; heading.append(label);
       const detailValue = call.name === 'workspace_run' || call.name === 'run_command' ? call.input.command
         : call.name === 'workspace_search' || call.name === 'search_files' || call.name === 'search_memory' || call.name === 'search_web' ? call.input.query
@@ -656,14 +645,13 @@ function renderMessage(active: Conversation, message: Message) {
       const status = document.createElement('span');
       status.className = `tool-status ${call.status}`;
       status.textContent = call.status === 'running' ? (call.name === 'create_image' && call.imagePath ? 'Restoring model' : 'Running') : call.status === 'pending' ? 'Needs approval' : call.status === 'completed' ? 'Completed' : call.status === 'denied' ? 'Declined' : 'Failed';
+      title.title = status.textContent;
       title.append(status);
       card.append(title);
       const body = document.createElement('div'); body.className = 'tool-body';
+      if (call.description && !call.description.startsWith('Orion coding tool.')) { const description = document.createElement('p'); description.className = 'tool-call-description'; description.textContent = call.description; body.append(description); }
       const entries = Object.entries(call.input ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== '');
       if (entries.length) {
-        const request = document.createElement('details'); request.className = 'tool-request';
-        request.open = false;
-        const requestTitle = document.createElement('summary'); requestTitle.textContent = 'Arguments'; request.append(requestTitle);
         const requestBody = document.createElement('dl'); requestBody.className = 'tool-input-list';
         for (const [key, value] of entries.slice(0, 16)) {
           const term = document.createElement('dt'); term.textContent = key.replaceAll('_', ' ');
@@ -673,43 +661,28 @@ function renderMessage(active: Conversation, message: Message) {
           requestBody.append(term, description);
         }
         if (entries.length > 16) { const more = document.createElement('dd'); more.textContent = `${entries.length - 16} additional inputs`; requestBody.append(more); }
-        request.append(requestBody); body.append(request);
+        body.append(requestBody);
       }
+      if (!body.childNodes.length) { const empty = document.createElement('p'); empty.className = 'tool-call-description'; empty.textContent = 'No additional input.'; body.append(empty); }
+      card.append(body); event.append(card);
       if (call.output !== undefined && call.name !== 'create_image') {
-        const result = document.createElement('details'); result.className = 'tool-result';
-        result.open = false;
-        const resultTitle = document.createElement('summary'); resultTitle.className = 'tool-result-summary'; const resultLabel = document.createElement('span'); resultLabel.textContent = 'Result'; const resultHint = document.createElement('span'); resultHint.className = 'tool-result-hint'; resultHint.textContent = 'Click to expand'; resultTitle.append(resultLabel, resultHint); result.addEventListener('toggle', () => { resultHint.textContent = result.open ? 'Click to collapse' : 'Click to expand'; }); result.append(resultTitle);
-        const output = document.createElement('div'); output.className = 'tool-output'; output.textContent = call.output; result.append(output); body.append(result);
+        const result = document.createElement('div'); result.className = 'tool-result-inline';
+        result.replaceChildren(safeMarkdownFragment(call.output, live));
+        wireCodeButtons(result, active);
+        event.append(result);
       }
       if (call.name === 'create_image') {
+        const generation=document.createElement('div');generation.className='tool-generation-card';
         const visual=document.createElement('div');visual.className=`generation-visual tool-generation-stage${call.imagePath?' is-complete':''}`;visual.setAttribute('role','status');visual.setAttribute('aria-label',call.imagePath?'Generated media ready':call.status==='running'?'Generating media':'Media generation');
         if(call.imagePath&&call.mediaType){const loading=generationDotField();visual.append(loading);const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=call.status==='running'?'Restoring model…':'Ready';visual.append(percent);void generatedMediaUrl(call.imagePath).then(src=>{if(!visual.isConnected)return;const media=call.mediaType==='video'?document.createElement('video'):document.createElement('img');media.className='generation-output tool-generation-output';if(media instanceof HTMLVideoElement){media.controls=true;media.playsInline=true;}else media.alt='Generated with Orion';media.src=src;visual.replaceChildren(media);}).catch(()=>undefined);}
         else if(call.status==='running'){visual.append(generationDotField());const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=`${Math.max(0,Math.min(99,call.progress??0))}%`;visual.append(percent);}
         else {const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=call.status==='error'?'Failed':call.status==='pending'?'Queued':'Starting';visual.append(percent);}
-        body.append(visual);
-        const detail=document.createElement('div');detail.className='tool-generation-detail';detail.textContent=call.status==='running'?(call.imagePath?'The media is ready. Reconnecting to the chat model…':call.progressDetail??'Generating locally…'):call.status==='pending'?'Waiting for approval…':call.status==='error'?(call.output??'Generation failed'):'';body.append(detail);
-        const prompt=document.createElement('p');prompt.className='generation-prompt tool-generation-prompt';prompt.textContent=String(call.input.prompt??'');if(prompt.textContent)body.append(prompt);
+        generation.append(visual);
+        const detail=document.createElement('div');detail.className='tool-generation-detail';detail.textContent=call.status==='running'?(call.imagePath?'The media is ready. Reconnecting to the chat model…':call.progressDetail??'Generating locally…'):call.status==='pending'?'Waiting for approval…':call.status==='error'?(call.output??'Generation failed'):'';generation.append(detail);
+        event.append(generation);
       }
-      if (body.childNodes.length) card.append(body);
-      renderedToolCards.push({ call, card });
+      workflow.append(event);
     }
-    const isCompactRead = (call: ToolCallRecord) => call.status === 'completed' && ['workspace_list','workspace_search','workspace_read','read_file','search_files'].includes(call.name);
-    for (let index = 0; index < renderedToolCards.length;) {
-      const item = renderedToolCards[index]!;
-      if (!isCompactRead(item.call)) { calls.append(item.card); index++; continue; }
-      let end = index + 1;
-      while (end < renderedToolCards.length && isCompactRead(renderedToolCards[end]!.call)) end++;
-      if (end - index < 2) { calls.append(item.card); index = end; continue; }
-      const group = document.createElement('details'); group.className = 'tool-activity-group';
-      const groupId = message.id + ':' + renderedToolCards[index]!.call.id; group.open = toolActivityOpenState.get(groupId) ?? false;
-      group.addEventListener('toggle', () => toolActivityOpenState.set(groupId, group.open));
-      const summary = document.createElement('summary'); summary.textContent = 'Reviewed the workspace · ' + (end - index) + ' reads and searches'; group.append(summary);
-      const items = document.createElement('div'); items.className = 'tool-activity-items';
-      for (let child = index; child < end; child++) items.append(renderedToolCards[child]!.card);
-      group.append(items); calls.append(group); index = end;
-    }
-    activity.append(calls);
-    workflow.append(activity);
   }
   if (workflow.childNodes.length) {
     const label = document.createElement('div');
@@ -1136,11 +1109,12 @@ async function startEngineInstall() {
 $('engine-install').addEventListener('click',()=>void startEngineInstall());
 function patchLiveGenerationCall(call: ToolCallRecord) {
   const card=[...chatBox.querySelectorAll<HTMLElement>('.tool-call[data-tool-call-id]')].find(item=>item.dataset.toolCallId===call.id);if(!card)return;
-  const status=card.querySelector<HTMLElement>('.tool-status');if(status){status.textContent=call.status;status.className=`tool-status ${call.status}`;}
-  const visual=card.querySelector<HTMLElement>('.tool-generation-stage');let percent=card.querySelector<HTMLElement>('.generation-percent');
+  const status=card.querySelector<HTMLElement>('.tool-status');if(status){status.textContent=call.imagePath?'Restoring model':call.status==='running'?'Generating':call.status==='pending'?'Queued':call.status==='completed'?'Complete':call.status==='error'?'Failed':call.status;status.className=`tool-status ${call.status}`;}
+  const generation=card.parentElement?.querySelector<HTMLElement>('.tool-generation-card');if(!generation)return;
+  const visual=generation.querySelector<HTMLElement>('.tool-generation-stage');let percent=generation.querySelector<HTMLElement>('.generation-percent');
   if(visual&&!percent){visual.replaceChildren(generationDotField());percent=document.createElement('span');percent.className='generation-percent';visual.append(percent);}
   if(percent)percent.textContent=call.imagePath?'Restoring model…':`${Math.max(0,Math.min(99,call.progress??0))}%`;
-  let detail=card.querySelector<HTMLElement>('.tool-generation-detail');if(!detail){detail=document.createElement('div');detail.className='tool-generation-detail';card.append(detail);}detail.textContent=call.imagePath?'The media is ready. Reconnecting to the chat model…':call.progressDetail??'Generating locally…';
+  let detail=generation.querySelector<HTMLElement>('.tool-generation-detail');if(!detail){detail=document.createElement('div');detail.className='tool-generation-detail';generation.append(detail);}detail.textContent=call.imagePath?'Restoring chat model…':call.progressDetail??'Generating locally…';
 }
 window.orion.onCreateProgress(progress=>{
   const isCreatePageJob=createPageGenerationIds.has(progress.id);

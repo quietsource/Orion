@@ -459,3 +459,52 @@ body.sidebar-collapsed .sidebar{position:fixed!important;inset:8px auto 8px 8px!
 .assistant-workflow .tool-generation-detail{margin:5px 0;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
 .assistant-workflow .tool-generation-prompt{margin:5px 0 0;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
 @media(max-width:640px){.assistant-workflow .tool-activity .tool-inline-detail{margin-left:0}.assistant-workflow .tool-input-list{grid-template-columns:minmax(64px,auto) minmax(0,1fr)}}
+
+/* Single-line chat activity rows; tool results stay visible outside the disclosure. */
+.assistant-workflow{display:flex;flex-direction:column;gap:0;width:calc(100% - 31px);max-width:calc(100% - 31px);margin:3px 0 9px 31px;padding:0;border:0;border-radius:0;background:transparent;overflow:visible;contain:layout style}
+.assistant-workflow-label{display:none}
+.assistant-workflow .tool-event{display:flex;flex-direction:column;align-items:stretch;gap:0;min-width:0;margin:0;padding:0}
+.assistant-workflow .tool-event details.tool-call{display:block;width:100%;min-width:0;margin:0;padding:0;border:0;border-radius:0;background:transparent;overflow:visible;box-shadow:none}
+.assistant-workflow .tool-event details.tool-call::before{display:none}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title{display:flex;align-items:center;justify-content:flex-start;gap:6px;width:fit-content;max-width:100%;min-width:0;min-height:25px;margin:0;padding:3px 0;border:0;border-radius:0;background:transparent;color:var(--secondary);cursor:pointer;list-style:none;transition:color .12s ease}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title::-webkit-details-marker{display:none}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title::before{display:none;content:none}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title::after{content:'';order:1;flex:none;width:5px;height:5px;margin:0 2px 3px 1px;border-right:1px solid currentColor;border-bottom:1px solid currentColor;color:var(--muted);transform:rotate(45deg);transition:transform .12s ease}
+.assistant-workflow .tool-event details.tool-call[open]>summary.tool-title::after{transform:rotate(225deg);margin-top:4px}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title:hover{background:transparent;color:var(--text)}
+.assistant-workflow .tool-event details.tool-call>summary.tool-title:focus-visible{outline:1px solid var(--accent);outline-offset:3px;border-radius:3px}
+.assistant-workflow .tool-event .tool-heading{display:flex;flex-direction:row;align-items:center;gap:6px;flex:0 1 auto;min-width:0;overflow:hidden}
+.assistant-workflow .tool-event .tool-name{display:inline-flex;align-items:center;gap:7px;flex:none;min-width:0;color:inherit;font-size:12px;font-weight:400;white-space:nowrap}
+.assistant-workflow .tool-event .tool-name::before{content:'';display:block;width:13px;height:13px;flex:none;border:0;border-radius:0;background:currentColor;opacity:.8;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='1.5' width='13' height='13' rx='3' fill='none' stroke='black'/%3E%3Cpath d='m4.5 5.5 2.5 2.5-2.5 2.5M9 10.5h3' fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+.assistant-workflow .web-research-event .tool-name::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='7' cy='7' r='4.5' fill='none' stroke='black'/%3E%3Cpath d='m10.5 10.5 3.5 3.5' stroke='black' stroke-linecap='round'/%3E%3C/svg%3E")}
+.assistant-workflow .tool-event .tool-inline-detail{display:block;flex:0 1 auto;min-width:0;max-width:650px;margin:0;color:inherit;opacity:.8;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assistant-workflow .tool-event .tool-status{display:none}
+.assistant-workflow .tool-event .tool-status.running,.assistant-workflow .tool-event .tool-status.searching,.assistant-workflow .tool-event .tool-status.reading{display:block;order:2;margin-left:2px;font-size:10px;color:var(--muted);animation:none}
+.assistant-workflow .tool-event .tool-status.running,.assistant-workflow .tool-event .tool-status.searching,.assistant-workflow .tool-event .tool-status.reading{color:var(--accent);animation:tool-status-pulse 1.5s ease-in-out infinite}
+.assistant-workflow .tool-event .tool-status.completed,.assistant-workflow .tool-event .tool-status.complete{color:var(--muted)}
+.assistant-workflow .tool-event .tool-status.error,.assistant-workflow .tool-event .tool-status.failed{color:var(--danger)}
+.assistant-workflow .tool-event .tool-status.error,.assistant-workflow .tool-event .tool-status.denied{display:block;font-size:10px;margin-left:2px}
+.assistant-workflow .tool-event .tool-status.running,.assistant-workflow .tool-event .tool-status.searching,.assistant-workflow .tool-event .tool-status.reading{animation:none;color:var(--muted)}
+.assistant-workflow .tool-event .tool-status::before{display:none!important}
+.assistant-workflow .tool-event .tool-body{max-width:100%;margin:3px 0 10px 20px;padding:8px 0;border:0;border-radius:0;background:transparent;overflow:visible}
+.assistant-workflow .tool-event .tool-call-description{margin:0 0 5px;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.assistant-workflow .tool-event .tool-input-list{display:grid;grid-template-columns:minmax(68px,max-content) minmax(0,1fr);gap:4px 12px;margin:0;padding:0;background:transparent}
+.assistant-workflow .tool-event .tool-input-list dt{color:var(--muted);font-size:10px;text-transform:capitalize}
+.assistant-workflow .tool-event .tool-input-list dd{min-width:0;margin:0;color:var(--secondary);font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.assistant-workflow .tool-result-inline{min-width:0;margin:5px 0 13px;padding:0;color:var(--text);font-size:13px;line-height:1.65;overflow-wrap:anywhere;word-break:break-word}
+.assistant-workflow .tool-result-inline p{margin:2px 0 7px}
+.assistant-workflow .tool-result-inline pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.assistant-workflow .tool-result-inline a{color:var(--secondary);overflow-wrap:anywhere}
+.assistant-workflow .tool-result-error{color:var(--danger);font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.assistant-workflow .web-research-results{margin-top:1px}
+.assistant-workflow .web-research-sources{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:4px 14px;max-width:100%;margin:2px 0 3px}
+.assistant-workflow .web-research-source{max-width:100%;padding:0;border:0;border-radius:0;background:transparent;color:var(--secondary);font-size:10px;line-height:1.5;text-decoration:none;white-space:normal;overflow-wrap:anywhere}
+.assistant-workflow .web-research-source:hover{color:var(--text);text-decoration:underline}
+.assistant-workflow .web-research-source.read{background:transparent}
+.assistant-workflow .web-research-source.read::before{content:'↗ ';color:var(--muted)}
+.assistant-workflow .tool-generation-card{width:min(100%,640px);min-width:0;margin:5px 0 10px}
+.assistant-workflow .tool-generation-stage{min-height:150px;margin:0;border:0;border-radius:11px;background-color:var(--surface);overflow:hidden}
+.assistant-workflow .tool-generation-output{display:block;max-width:100%;max-height:480px;margin:0 auto;border-radius:10px;object-fit:contain}
+.assistant-workflow .tool-generation-detail{margin:7px 1px 0;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.assistant-workflow .tool-generation-prompt{margin:5px 1px 0;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+@media(max-width:640px){.assistant-workflow{width:100%;max-width:100%;margin-left:0}.assistant-workflow .tool-event .tool-body{margin-left:19px}.assistant-workflow .tool-result-inline{margin-left:0}.assistant-workflow .tool-input-list{grid-template-columns:minmax(54px,max-content) minmax(0,1fr)}.assistant-workflow .tool-inline-detail{display:none}}

@@ -27,6 +27,7 @@ import { ORION_SUBAGENT_MODEL, SubagentCapacity, type OrionSubagentRole } from '
 import { runSubagentInference } from './subagentRuntime';
 import { initializeSecureStorage, readEncryptedText, writeEncryptedText, openEncryptedDatabase, sealEncryptedDatabase } from './secure-storage';
 import { downloadUpdateAsset, findLatestUpdate, isNewerVersion, type AppUpdate, type UpdateAsset } from './appUpdater';
+import { fetchWithLocalReconnect } from './localReconnect';
 
 // Desktop launchers can close the inherited output pipe while Orion is still running.
 // A later diagnostic write must not turn that closed pipe into an uncaught exception.
@@ -1386,20 +1387,6 @@ async function prepareModelToolSupport(model: string, context: number): Promise<
   return undefined;
 }
 
-async function fetchWithLocalReconnect(url: string, init: RequestInit, service: string, attempts = 7): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try { return await fetch(url, init); }
-    catch (error) {
-      if ((init.signal as AbortSignal | undefined)?.aborted) throw error;
-      lastError = error;
-      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, Math.min(5000, 350 * 2 ** attempt)));
-    }
-  }
-  const reason = lastError instanceof Error ? lastError.message : String(lastError ?? 'connection refused');
-  throw new Error(`Could not reconnect to ${service} after media generation: ${reason}`);
-}
-
 async function providerMediaRestore(provider: ApiProvider, model: string, context: number): Promise<(() => Promise<void>) | undefined> {
   const base = new URL('/', provider.baseUrl);
   const host = base.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -1686,7 +1673,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const installedConversational = remote ? [] : await readInstalledModels();
   const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
   const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
-  const llamaBaseUrl = remote ? undefined : await prepareModelToolSupport(routedModel, contextBudget);
+  if (!remote) await prepareModelToolSupport(routedModel, contextBudget);
   let nativeToolCalling = remote ? remote.provider.tools : installedToolSupport.get(`${settings.ollamaUrl}\0${routedModel}`) === true;
   // Project workspaces and their tool schemas are temporarily disabled.
   // The original handlers remain in place for a later re-enable.
@@ -1911,7 +1898,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       if (!managed && !remote) throw new Error('The selected Orion GGUF model is no longer installed. Open Models → Manage and refresh your models.');
       const modelRoot = path.resolve(modelsRoot()), modelPath = path.resolve(modelRoot, managed?.path ?? '.');
       if (!remote && !modelPath.startsWith(`${modelRoot}${path.sep}`)) throw new Error('The selected model path is invalid.');
-      const baseUrl = remote?.provider.baseUrl ?? `${llamaBaseUrl ?? await llamaManager.ensureServer(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1`;
+      const managedEndpoint = async () => `${await llamaManager.ensureServer(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
       let repeatedLoopDetected = false;
       for (;;) {
         if (toolRounds++ >= 20) { event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: '\n\nI stopped this run after 20 tool rounds so it would not loop indefinitely. The tool results above are available if you want me to continue from them.' }); break; }
@@ -1930,9 +1917,9 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         reportContextUsage();
         const began = Date.now();
         const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
-        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,input.think,input.thinkLevel) : { url: `${baseUrl}/chat/completions`, body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(routedManaged||routedModel.startsWith('orion-gguf:') ? input.think ? { reasoning_effort: input.thinkLevel && input.thinkLevel !== 'default' ? input.thinkLevel : 'medium' } : {} : {}), ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
+        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,input.think,input.thinkLevel) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(routedManaged||routedModel.startsWith('orion-gguf:') ? input.think ? { reasoning_effort: input.thinkLevel && input.thinkLevel !== 'default' ? input.thinkLevel : 'medium' } : {} : {}), ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
         const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
-        const response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(providerRequest.url, providerInit, 'the local chat model');
+        const response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
         if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. Check the model, API credentials, and provider compatibility.`);
         const reader = response.body.getReader(), decoder = new TextDecoder(); let turnContent = ''; let buffer = '', calls = new Map<number, { id: string; name: string; arguments: string; uiId: string }>(), finishReason = '', completionTokens = 0;
         const publishToolUpdate = (call: { id: string; name: string; arguments: string; uiId: string }, phase: 'started'|'updated') => {

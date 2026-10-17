@@ -1,11 +1,14 @@
+# Orion 0.1.5 — Cleaner chat activity and consistent model restoration
+
+- Redesigned tool calls and web searches as compact disclosure rows with outline icons, muted text, tight spacing, and expandable inputs.
+- Show tool results and web sources directly in chat. Image generation appears in its own live card beneath the tool row and transitions into the generated image or video.
+- Fixed follow-up inference using an obsolete llama.cpp port after the Create Image tool restored the chat model. Each request and reconnect attempt now resolves the current managed server address.
+- Check managed model health before reusing a process and restart an unresponsive runtime before inference. Reconnect delays now respect cancellation.
+- Fixed live generation progress updates after moving the media card outside the tool dropdown.
+
 # Orion 0.1.4 — Reliable Windows updates
 
 - Hardened the Windows update handoff: Orion now records installer diagnostics, verifies the installed version, locates the updated application, and only then relaunches it.
-- Fixed the updater silently reopening the previous executable when installation did not complete as expected.
-
-# Orion 0.1.4 — Reliable Windows updates
-
-- Hardened Windows update handoff with persistent installer diagnostics, installed-version verification, and executable discovery before relaunch.
 - Fixed the updater silently reopening the previous executable when installation did not complete as expected.
 
 # Orion 0.1.3 — Smoother media generation and chat activity

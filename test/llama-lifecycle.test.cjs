@@ -24,10 +24,21 @@ test('concurrent llama requests share one ready process and shutdown forbids res
     const manager = new LlamaManager(root, () => {});
     manager.state = { backend: 'cpu', cpuBinary: path.join(root, 'runtime-cpu', 'fake'), serverBinary: 'fake' };
     manager.runtimeEnvironment = async () => process.env;
+    let port = 49000;
+    manager.freePort = async () => ++port;
     const urls = await Promise.all([manager.ensureServer(model, 8192), manager.ensureServer(model, 8192), manager.ensureServer(model, 8192)]);
     assert.equal(spawns, 1); assert.equal(new Set(urls).size, 1);
-    await manager.dispose(); assert.equal(exits, 1);
+    await manager.stop(); assert.equal(exits, 1);
+    const restored = await manager.ensureServer(model, 8192);
+    assert.notEqual(restored, urls[0], 'restoring the same model exposes its new server port');
+    assert.equal(spawns, 2);
+    let failNextHealth = true;
+    global.fetch = async () => { if (failNextHealth) { failNextHealth = false; throw new Error('connection closed'); } return { ok: true }; };
+    const recovered = await manager.ensureServer(model, 8192);
+    assert.notEqual(recovered, restored, 'an unresponsive process is replaced before inference');
+    assert.equal(spawns, 3);
+    await manager.dispose(); assert.equal(exits, 3);
     await assert.rejects(manager.ensureServer(model, 8192), /shutting down/);
-    assert.equal(spawns, 1);
+    assert.equal(spawns, 3);
   } finally { childProcess.spawn = originalSpawn; global.fetch = originalFetch; await fs.rm(root, { recursive: true, force: true }); }
 });
