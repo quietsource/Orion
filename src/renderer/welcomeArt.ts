@@ -127,12 +127,12 @@ export function captureLiquidMetalStill(size = 2048, time = 1.8): string {
 }
 
 /** An actual deforming surface, rather than an image moved by CSS. */
-export function createWelcomeArt() {
+export function createWelcomeArt(compact = false) {
   disposeCurrent?.();
-  const empty=document.createElement('div');empty.className='empty-state orion-idle';
+  const empty=document.createElement('div');empty.className=compact?'orion-loading-art':'empty-state orion-idle';
   const art=document.createElement('div');art.className='orion-idle-art';
   let canvas=document.createElement('canvas');canvas.setAttribute('role','img');canvas.setAttribute('aria-label','An evolving liquid-metal form, rendered live');
-  const greeting=document.createElement('p');greeting.className='orion-idle-greeting';greeting.textContent='Hello, welcome to Orion.';
+  const greeting=document.createElement('p');greeting.className='orion-idle-greeting';greeting.textContent=compact?'Waiting for model':'Hello, welcome to Orion.';
   art.append(canvas);empty.append(art,greeting);
   let renderer=gpuRenderer(canvas);
   const accelerated=Boolean(renderer);
@@ -170,7 +170,7 @@ export function createWelcomeArt() {
   const intersection=new IntersectionObserver(entries=>{visible=entries[0]?.isIntersecting??true;if(visible)resume();});intersection.observe(art);
   document.addEventListener('visibilitychange',resume);reduce.addEventListener('change',resume);
   // Release the GPU even if a conversation replaces the empty view while paused.
-  removal=new MutationObserver(()=>{if(!empty.isConnected&&drawn)dispose();});removal.observe(document.getElementById('messages')??document.body,{childList:true});
+  removal=new MutationObserver(()=>{if(!empty.isConnected&&drawn)dispose();});removal.observe(document.getElementById('messages')??document.body,{childList:true,subtree:compact});
   disposeCurrent=dispose;
   resume();return empty;
 }

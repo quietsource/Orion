@@ -8,7 +8,7 @@ export interface WebResearchStep { id: string; query: string; status: 'searching
 export interface WebResearchActivity { status: 'planning'|'searching'|'reading'|'complete'|'error'; steps: WebResearchStep[]; }
 export interface WebResearchEvent { stepId: string; phase: 'planning'|'searching'|'reading'|'source'|'complete'|'error'; query?: string; source?: WebResearchSource; error?: string; }
 export interface MessageAttachment { id: string; name: string; mimeType: string; kind: 'image'|'document'; }
-export interface Message { id: string; role: Role; content: string; createdAt: number; reasoning?: string; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
+export interface Message { id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
 export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }

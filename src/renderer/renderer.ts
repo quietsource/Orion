@@ -193,8 +193,8 @@ function scheduleRender(structureChanged = false) {
         const loading = existing.querySelector<HTMLElement>('.chat-loading');
         if (hasVisibleOutput) loading?.remove();
         else {
-          const liveStatus = loading?.querySelector<HTMLElement>('span:last-child');
-          if (liveStatus) liveStatus.textContent = generationStatus || 'Waiting for the model…';
+          const liveStatus = loading?.querySelector<HTMLElement>('.orion-idle-greeting');
+          if (liveStatus) liveStatus.textContent = 'Waiting for model';
         }
         const body = existing.querySelector<HTMLElement>('.message-body');
         if (body && body.dataset.contentLength !== String(message.content.length)) {
@@ -617,7 +617,7 @@ function renderMessage(active: Conversation, message: Message) {
   header.append(author, timestamp);
   article.append(header);
   const hasVisibleOutput = Boolean(message.content.trim() || message.reasoning?.trim() || message.toolCalls?.length || message.webResearch?.steps.length);
-  if (live && !hasVisibleOutput) { const loading=document.createElement('div');loading.className='chat-loading';loading.setAttribute('role','status');loading.setAttribute('aria-live','polite');const dots=document.createElement('span');dots.className='loading-dots';dots.setAttribute('aria-hidden','true');for(let index=0;index<3;index++)dots.append(document.createElement('i'));const text=document.createElement('span');text.textContent=generationStatus||'Waiting for the model…';loading.append(dots,text);article.append(loading); }
+  if (live && !hasVisibleOutput) {const loading=document.createElement('div');loading.className='chat-loading';loading.setAttribute('role','status');loading.setAttribute('aria-live','polite');loading.append(createWelcomeArt(true));article.append(loading);}
   const workflow = document.createElement('section');
   workflow.className = 'assistant-workflow';
   if (message.reasoning) {
@@ -637,7 +637,7 @@ function renderMessage(active: Conversation, message: Message) {
   if (message.webResearch) {
     const activity = message.webResearch;
     for (const step of activity.steps) {
-      const event = document.createElement('div'); event.className = 'tool-event web-research-event';
+      const event = document.createElement('div'); event.className = 'tool-event web-research-event';event.dataset.activityKey='web:'+step.id;
       const details = document.createElement('details'); details.className = `tool-call web-research-activity ${step.status}`;
       const stepId = `web:${message.id}:${activity.steps.indexOf(step)}`;
       details.open = toolCallOpenState.get(stepId) ?? false;
@@ -671,7 +671,7 @@ function renderMessage(active: Conversation, message: Message) {
   if (message.toolCalls?.length) {
     for (const call of message.toolCalls) {
       if (message.webResearch && (call.name === 'search_web' || call.name === 'web_fetch')) continue;
-      const event = document.createElement('div'); event.className = 'tool-event';
+      const event = document.createElement('div'); event.className = 'tool-event';event.dataset.activityKey='tool:'+call.id;
       const card = document.createElement('details');
       card.className = `tool-call ${call.status}`;
       card.dataset.toolCallId = call.id;
@@ -736,6 +736,11 @@ function renderMessage(active: Conversation, message: Message) {
       workflow.append(event);
     }
   }
+  const order=message.activityOrder??(message.toolCalls??[]).map(call=>({kind:(call.name==='search_web'?'web':'tool') as 'web'|'tool',id:call.id}));
+  const positions=new Map(order.map((item,index)=>[item.kind+':'+item.id,index]));
+  const timeline=Array.from(workflow.children).filter((node):node is HTMLElement=>node instanceof HTMLElement&&node.classList.contains('tool-event'));
+  timeline.sort((a,b)=>(positions.get(a.dataset.activityKey??'')??Number.MAX_SAFE_INTEGER)-(positions.get(b.dataset.activityKey??'')??Number.MAX_SAFE_INTEGER));
+  timeline.forEach(node=>workflow.append(node));
   if (workflow.childNodes.length) {
     const label = document.createElement('div');
     label.className = 'assistant-workflow-label';
@@ -977,6 +982,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     }
     if (e.type === 'reasoning') { assistant.reasoning = (assistant.reasoning ?? '') + (e.content ?? ''); if (!assistant.content) expandedThinking.add(assistant.id); }
     if (e.type === 'web' && e.web) {
+      assistant.activityOrder??=[];if(!assistant.activityOrder.some(item=>item.kind==='web'&&item.id===e.web!.stepId))assistant.activityOrder.push({kind:'web',id:e.web.stepId});
       assistant.webResearch ??= { status: 'planning', steps: [] };
       let step = assistant.webResearch.steps.find(item => item.id === e.web!.stepId);
       if (!step) { step = { id: e.web.stepId, query: e.web.query ?? '', status: 'searching', sources: [] }; assistant.webResearch.steps.push(step); }
@@ -991,6 +997,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     }
     if (e.type === 'token' || e.type === 'replace' || e.type === 'reasoning') scheduleSave(target);
     if (e.type === 'tool' && e.tool) {
+      assistant.activityOrder??=[];if(!assistant.activityOrder.some(item=>item.kind==='tool'&&item.id===e.tool!.id))assistant.activityOrder.push({kind:'tool',id:e.tool.id});
       assistant.toolCalls ??= []; let entry = assistant.toolCalls.find(x => x.id === e.tool!.id);
       if (!entry) { entry = { id: e.tool.id, name: e.tool.name, description: e.tool.description, input: e.tool.input, status: 'pending' }; assistant.toolCalls.push(entry); }
       entry.name = e.tool.name; entry.description = e.tool.description; entry.input = e.tool.input ?? entry.input;

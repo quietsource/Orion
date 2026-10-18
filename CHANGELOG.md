@@ -1,5 +1,8 @@
 # Orion 0.1.8 — Canvas, composer and video creation
 
+- Preserve tool and web-search chronology, including searches after question/answer tools.
+- Expand the model-facing OGS schema and examples, provide internal authoring help, and automatically request bounded graph corrections after a completed model turn.
+- Replace loading dots with a small live liquid-metal form and “Waiting for model”.
 - Replace the application, installer, window, and tray icons with a transparent still of Orion’s native liquid-metal artwork.
 - Prevent background model loading: disable historical schedule dispatch at startup and make system-prompt inspection metadata-only. Models load when generation or an explicit compatibility check is requested.
 

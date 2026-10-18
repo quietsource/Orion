@@ -20,6 +20,7 @@ import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } fr
 import { isOrionHelpQuestion, searchOrionHelp } from './orionHelp';
 import { DiffusionManager } from './diffusion';
 import { LlamaManager, isModelCompatibilityError } from './llama';
+import { OGS_PROMPT, validateOgsResponse, ogsCorrectionPrompt, validOgsGraphCount } from '../shared/ogs';
 import { buildModelPrompt, addModelTextToolProtocol, isReasoningModelName } from './modelPrompt';
 import { WorkspaceManager } from './workspace';
 import { nativeWorkspaceTools, parseTextToolCalls, runNativeWorkspaceTool } from './native-tools';
@@ -1300,7 +1301,7 @@ function toolNeedsApproval(name: string, settings: AppSettings) {
 }
 
 const ollamaTools = [
-  { type: 'function', function: { name: 'search_orion_help', description: 'Search the built-in Orion user guide for accurate instructions about using this application. Use when the user asks how Orion works or how to do something in Orion.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The Orion feature or task the user needs help with.' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'search_orion_help', description: 'Search Orion help. For OGS, graphs, diagrams, or charts, this returns the complete internal JSON authoring schema and valid examples, not just user-facing guidance. Use when the user asks how Orion works or how to do something in Orion.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The Orion feature or task the user needs help with.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'create_image', description: 'Generate media in Orion Create with the selected default model. Use only when the user explicitly requests image or video generation. Write a clear, detailed visual prompt. Set kind to video only for an explicit video request; otherwise omit it or use image.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, kind: { type: 'string', enum: ['image','video'] } }, required: ['prompt'] } } },
   { type: 'function', function: { name: 'create_video', description: 'Generate a video locally in Orion Create using the selected default video model. Use only when the user explicitly requests a video or animation. Describe the subject, scene, motion, camera movement, lighting, and style in a detailed visual prompt. Orion displays live generation progress and plays the finished video in chat, then restores the chat model for your final response.', parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'Detailed description of the requested video, including motion.' } }, required: ['prompt'] } } },
   { type: 'function', function: { name: 'search_memory', description: 'Search OrionFS memories from saved conversations for facts, decisions, names, dates, or details. Use the returned memories as evidence and search again with a more precise query if needed.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Specific words, names, or question to find in saved conversation memories.' } }, required: ['query'] } } },
@@ -1886,6 +1887,26 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     ? '\n\n' + agentRunMemory.createAgentCheckpoint(input.conversationId, focusRunId, latestUserRequest, checkpoint)
     : '';
   let full = '', evaluatedTokens = 0, evaluationNanos = 0;
+  let ogsRepairPrompt='',ogsRepairAttempts=0,ogsExpectedGraphs=0;let lastOgsIssues:ReturnType<typeof validateOgsResponse>=[];
+  const queueOgsRepair=(history:Array<Record<string,unknown>>)=>{
+    let issues=validateOgsResponse(full);
+    if(!issues.length&&ogsRepairPrompt&&validOgsGraphCount(full)<ogsExpectedGraphs)issues=lastOgsIssues;
+    if(!issues.length)return false;
+    if(ogsRepairAttempts>=2){
+      // If the model omitted the corrected graph entirely, retain a visible error.
+      if(!validateOgsResponse(full).length){full+='\n\n'+issues.map(issue=>issue.block).join('\n\n');event.sender.send('ollama:stream',{conversationId:input.conversationId,type:'replace',content:full});}
+      return false;
+    }
+    if(!ogsRepairAttempts)ogsExpectedGraphs=validOgsGraphCount(full)+issues.length;
+    lastOgsIssues=issues;
+    ogsRepairAttempts++;ogsRepairPrompt=ogsCorrectionPrompt(issues);
+    // Validate only after the turn has completed; the current stream is never interrupted.
+    history.push({role:'assistant',content:'Previous OGS output rejected by the local validator. See the internal system correction for the exact source and errors.'});
+    for(const issue of issues)full=full.replace(issue.block,'');
+    if(full.trim())full+='\n\n';
+    event.sender.send('ollama:stream',{conversationId:input.conversationId,type:'replace',content:full});
+    return true;
+  };
   let webSearchAttempted = !webSearchRequired;
   const webSearchTools = availableTools.filter(tool => tool.function.name === 'search_web');
   const initialWebSearchStepId = crypto.randomUUID();
@@ -1938,7 +1959,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         const continuityTokens = estimateModelChatTokens(continuityContext, settings.ollamaUrl, input.model) + 128;
         trimAgentHistory(agentHistory, continuityTokens);
         const requestMessages: Array<Record<string, unknown>> = [
-          { role: 'system', content: `${system}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
+          { role: 'system', content: `${system}${ogsRepairPrompt}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
           ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role: role === 'system' ? 'user' : role, content, ...(images.length?{images}:{}) })),
           ...agentHistory
         ];
@@ -1947,7 +1968,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         const reportContextUsage = () => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'context', usedContextTokens: Math.min(contextBudget, promptContextTokens + generatedContextTokens), maxContextTokens: contextBudget });
         reportContextUsage();
         const began = Date.now();
-        const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
+        const apiTools = !ogsRepairPrompt && nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
         const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,modelInformation.supportsThinking) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
         const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
         let response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
@@ -2006,7 +2027,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         buffer += decoder.decode(); if (buffer.trim()) for (const line of buffer.split(/\r?\n/)) processEvent(line);
         let textProtocolRound = false, textCallContext = '';
         if (!calls.size) {
-          const parsed = parseTextToolCalls(turnContent, webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools);
+          const parsed = parseTextToolCalls(turnContent, ogsRepairPrompt ? [] : webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools);
           if (parsed.calls.length) {
             const rawTurnContent = turnContent;
             textProtocolRound = true; turnContent = parsed.visibleText;
@@ -2021,6 +2042,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         evaluationNanos += (Date.now() - began) * 1e6;
         if (!calls.size) {
           if (webSearchRequired && !webSearchAttempted) { await addRequiredResearchFallback(agentHistory); continue; }
+          if(queueOgsRepair(agentHistory))continue;
           break;
         }
         const protocolCalls = [...calls.values()].map(call => ({ id: call.id || call.uiId, type: 'function', function: { name: call.name, arguments: call.arguments || '{}' } }));
@@ -2073,7 +2095,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       const continuityTokens = estimateModelChatTokens(continuityContext, settings.ollamaUrl, input.model) + 128;
       trimAgentHistory(ollamaAgentHistory, continuityTokens);
       const requestMessages: Record<string, unknown>[] = [
-        { role: 'system', content: `${system}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
+        { role: 'system', content: `${system}${ogsRepairPrompt}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
         ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role, content, ...(images.length?{images:images.map(image=>image.slice(image.indexOf(',')+1))}:{}) })),
         ...ollamaAgentHistory
       ];
@@ -2081,7 +2103,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       let promptContextTokens = estimatedContextTokens, generatedContextTokens = 0;
       const reportContextUsage = () => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'context', usedContextTokens: Math.min(contextBudget, promptContextTokens + generatedContextTokens), maxContextTokens: contextBudget });
       reportContextUsage();
-      const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
+      const apiTools = !ogsRepairPrompt && nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
       const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: input.model, messages: requestMessages, stream: true, think: modelInformation.supportsThinking ? (typeof modelInformation.thinkingDefault === 'string' ? modelInformation.thinkingDefault : true) : false, ...(apiTools.length ? { tools: apiTools } : {}), options: { temperature: settings.temperature, num_ctx: contextBudget, num_predict: outputReserveTokens } }),
@@ -2121,7 +2143,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       const fallbackCalls = assistant.tool_calls as Array<{ id?: string; function: { name: string; arguments: Record<string, unknown> | string } }> | undefined;
       let calls = streamedCalls.size ? [...streamedCalls.values()].map(call => ({ id: call.id ?? call.uiId, uiId: call.uiId, function: { name: call.name, arguments: call.arguments } })) : (fallbackCalls ?? []).map(call => { const id = call.id ?? crypto.randomUUID(); return { id, uiId: id, function: call.function }; });
       if (!calls.length) {
-        const parsed = parseTextToolCalls(turnContent, webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools);
+        const parsed = parseTextToolCalls(turnContent, ogsRepairPrompt ? [] : webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools);
         if (parsed.calls.length) {
           const rawTurnContent = turnContent;
           textProtocolRound = true; turnContent = parsed.visibleText;
@@ -2134,6 +2156,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       } else if (!nativeToolCalling && turnContent && !(webSearchRequired && !webSearchAttempted)) { full += turnContent; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: turnContent }); }
       if (!calls?.length) {
         if (webSearchRequired && !webSearchAttempted) { await addRequiredResearchFallback(ollamaAgentHistory); continue; }
+        if(queueOgsRepair(ollamaAgentHistory))continue;
         break;
       }
       if (textProtocolRound) ollamaAgentHistory.push({ role: 'assistant', content: `${turnContent}\nRequested Orion tools:\n${textCallContext}` });
@@ -2143,7 +2166,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) as Record<string, unknown> : call.function.arguments ?? {}; } catch { args = {}; }
         const name = call.function.name;
         if (name === 'create_schedule' && typeof args.model !== 'string') args.model = input.model;
-        if (!availableTools?.some(t => t.function.name === name)) {
+        if (ogsRepairPrompt || !availableTools?.some(t => t.function.name === name)) {
           ollamaAgentHistory.push(textProtocolRound ? { role: 'user', orion_tool_result: true, content: `Orion tool result for ${name}: Rejected: unknown tool.` } : { role: 'tool', tool_name: name, content: `Rejected: unknown tool ${name}` }); continue;
         }
         const readKey = readToolNames.has(name) ? readCallKey(name, args) : '';
@@ -2598,7 +2621,7 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
     if (!created) return { output: `An equivalent task already exists as “${job.name}” (created by ${job.createdBy === 'agent' ? 'Agent' : 'you'}, ${job.enabled ? 'enabled' : 'disabled'}). No duplicate was added.`, success: true };
     return { output: `Created “${job.name}”. It runs at ${new Date(job.nextRunAt!).toLocaleString()} (${job.timezone}) while Orion is open.`, success: true };
   }
-  if (tool.name === 'search_orion_help') { const query = String(tool.input.query ?? '').trim(); return { output: query ? searchOrionHelp(query) : 'Provide the Orion feature or task you need help with.', success: Boolean(query) }; }
+  if (tool.name === 'search_orion_help') { const query = String(tool.input.query ?? '').trim(); return { output: query ? (/\b(?:ogs|orion graph|diagram|chart|radar|venn|mesh)\b/i.test(query)?OGS_PROMPT+'\n\n'+searchOrionHelp(query):searchOrionHelp(query)) : 'Provide the Orion feature or task you need help with.', success: Boolean(query) }; }
   if (tool.name === 'search_memory') {
     const query = String(tool.input.query ?? '').trim();
     if (!query) return { output: 'Provide a memory search query.', success: false };
