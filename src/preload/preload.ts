@@ -69,6 +69,7 @@ const api: OrionAPI = {
   dismissLlamaIntro: () => ipcRenderer.invoke('llama:dismiss-intro'),
   installLlama: () => ipcRenderer.invoke('llama:install'),
   llamaStatus: () => ipcRenderer.invoke('llama:status'),
+  checkModelCompatibility: id => ipcRenderer.invoke('models:check-compatibility', id),
   listGeneratedMedia: () => ipcRenderer.invoke('create:list-media') as Promise<GeneratedMedia[]>,
   openGeneratedFolder: () => ipcRenderer.invoke('create:open-folder'),
   generateImage: (prompt, modelId, kind, requestId) => ipcRenderer.invoke('create:generate', prompt, modelId, kind, requestId),

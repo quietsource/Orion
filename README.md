@@ -27,6 +27,7 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 - Orion Create, which can install a compact Vulkan-accelerated `stable-diffusion.cpp` runtime for Stable Diffusion image generation and Wan video generation. The runtime and chosen model weights are downloaded on demand.
 - Live CPU, RAM, GPU, and VRAM usage in the sidebar resource monitor. Image and video diffusion weights are explicitly assigned to Vulkan GPU memory.
 - Settings for model behavior, appearance, memory, startup, and the active system prompt.
+- Check compatibility on installed Orion-managed conversational model cards in Models → Manage. Requires the managed llama.cpp engine. Orion diagnoses compatibility and, when available, downloads and validates a newer official runtime for that model. Verified runtime profiles are applied automatically; unsupported models receive a clear explanation. Compatibility errors during chat trigger the same check automatically, with progress shown in the chat tool activity. New architectures still require implementation support in llama.cpp.
 - In-app release checks with download progress. Updates open the visible Windows installer or Linux system package installer, then close Orion. Portable Windows and AppImage updates open the downloaded version after Orion closes. Packages stay in Downloads, and release notes appear when the updated version starts.
 
 ## Requirements

@@ -11,7 +11,7 @@ import { Cron } from 'croner';
 import { OfficeParser } from 'officeparser';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
@@ -19,7 +19,7 @@ import type { MemoryChunk } from './memory';
 import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } from './contextBudget';
 import { isOrionHelpQuestion, searchOrionHelp } from './orionHelp';
 import { DiffusionManager } from './diffusion';
-import { LlamaManager } from './llama';
+import { LlamaManager, isModelCompatibilityError } from './llama';
 import { WorkspaceManager } from './workspace';
 import { nativeWorkspaceTools, parseTextToolCalls, runNativeWorkspaceTool } from './native-tools';
 import { createFocusCadence } from './focusCadence';
@@ -42,6 +42,7 @@ let ofsMemory: OFSClient | null = null;
 const ofsDeletedConversations = new Set<string>();
 let diffusionManager: DiffusionManager;
 let llamaManager: LlamaManager;
+let modelCompatibilityBusy = false;
 let workspaceManager: WorkspaceManager;
 let orionBrowser: BrowserWindow | null = null;
 type BrowserTab = { id: string; title: string; view: WebContentsView };
@@ -1089,6 +1090,7 @@ ipcMain.handle('models:download', async (_, repo: string, file: string, category
 });
 ipcMain.handle('models:cancel-download', async (_, id: string) => { const controller=modelDownloadControllers.get(String(id));controller?.abort(); });
 ipcMain.handle('models:delete', async (_, id: string) => {
+  if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before deleting models.');
   const all = await readInstalledModels(), item = all.find(model => model.id === id); if (!item) return;
   if(item.invokeKey)throw new Error('This model belongs to an older InvokeAI install and cannot be managed by Orion’s stable-diffusion.cpp backend.');
   const root = path.resolve(modelsRoot()), files = item.files?.length ? item.files : [item.path];
@@ -1115,12 +1117,27 @@ ipcMain.handle('llama:intro', async () => {
 ipcMain.handle('llama:dismiss-intro', async () => markLlamaIntroSeen());
 ipcMain.handle('llama:install', async () => { await markLlamaIntroSeen(); return llamaManager.install(); });
 ipcMain.handle('llama:status', async () => llamaManager.isInstalled());
+ipcMain.handle('models:check-compatibility', async (event, id: string) => {
+  if (!win || event.sender !== win.webContents) throw new Error('Compatibility checking is unavailable.');
+  if (modelCompatibilityBusy || activeAbort) throw new Error('Wait for the current chat or compatibility check to finish.');
+  modelCompatibilityBusy = true;
+  try {
+    if (!await llamaManager.isInstalled()) throw new Error('Install Orion’s managed llama.cpp engine first.');
+    if ((await diffusionManager.getState()).running) throw new Error('Wait for image or video generation to finish.');
+    const model = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
+    if (!model) throw new Error('Compatibility checking is available only for installed Orion conversational models.');
+    const root = path.resolve(modelsRoot()), modelPath = path.resolve(root, model.path);
+    if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
+    return await llamaManager.checkCompatibility(modelPath, Math.min((await getSettings()).contextWindow, 4096), modelMmprojPath(model, root));
+  } finally { modelCompatibilityBusy = false; }
+});
 ipcMain.handle('create:list-media', async () => (await readGeneratedMediaIndex()).slice(-12).reverse());
 ipcMain.handle('create:open-folder', async () => {
   const folder = creationsDir(); await fs.mkdir(folder, { recursive: true });
   const error = await shell.openPath(folder); if (error) throw new Error(`Could not open the creations folder: ${error}`);
 });
 ipcMain.handle('create:generate', async (_, prompt: string, modelId?: string, kind: 'image'|'video' = 'image', requestId?: string) => {
+  if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before generating media.');
   const settings = await getSettings();
   return generateAndIndexMedia(prompt, modelId || (kind === 'video' ? settings.defaultVideoModel : settings.defaultImageModel), kind, requestId);
 });
@@ -1337,7 +1354,8 @@ function modelMmprojPath(item: InstalledModel, root: string) {
   return companion ? path.resolve(root, companion) : undefined;
 }
 
-async function prepareModelToolSupport(model: string, context: number): Promise<string | undefined> {
+async function prepareModelToolSupport(model: string, context: number, loadManaged = (modelPath: string, context: number, mmproj?: string) => llamaManager.ensureServer(modelPath, context, mmproj)): Promise<string | undefined> {
+  if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before loading a chat model.');
   const key = `${settingsCache.ollamaUrl}\0${model}`;
   if (model.startsWith('orion-gguf:')) {
     const id = model.slice('orion-gguf:'.length);
@@ -1345,7 +1363,7 @@ async function prepareModelToolSupport(model: string, context: number): Promise<
     if (!installed) { installedToolSupport.set(key, false); return undefined; }
     const root = path.resolve(modelsRoot()), modelPath = path.resolve(root, installed.path);
     if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
-    const baseUrl = await llamaManager.ensureServer(modelPath, context, modelMmprojPath(installed, root));
+    const baseUrl = await loadManaged(modelPath, context, modelMmprojPath(installed, root));
     let supportsTools = false;
     try {
       const response = await fetch(`${baseUrl}/props`, { signal: AbortSignal.timeout(5000) });
@@ -1630,6 +1648,7 @@ ipcMain.handle('system:prompt', async (_event, model?: string, mode?: ToolMode) 
 });
 
 ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; model: string; messages: Message[]; think: boolean; thinkLevel?: string; agent: boolean; mode?: ToolMode; webSearch?: boolean }) => {
+  if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before starting a chat.');
   const settings = await getSettings();
   const allMemory = await readConversations();
   const conversation = allMemory.find(c => c.id === input.conversationId);
@@ -1655,7 +1674,40 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const installedConversational = remote ? [] : await readInstalledModels();
   const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
   const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
-  if (!remote) await prepareModelToolSupport(routedModel, contextBudget);
+  const checkedCompatibility = new Set<string>();
+  const loadManaged = async (modelPath: string, context: number, mmproj?: string, initialFailure?: Error): Promise<string> => {
+    try {
+      if (initialFailure) throw initialFailure;
+      return await llamaManager.ensureServer(modelPath, context, mmproj);
+    } catch (error) {
+      if (!isModelCompatibilityError(error)) throw error;
+      const failure = (message: string) => Object.assign(new Error(message), { name: 'ModelCompatibilityError' });
+      if (checkedCompatibility.has(modelPath)) throw failure(error instanceof Error ? error.message : String(error));
+      checkedCompatibility.add(modelPath);
+      const tool = { id: randomUUID(), name: 'model_compatibility', input: { model: path.basename(modelPath) }, description: 'Checking model compatibility', requiresApproval: false };
+      const publish = (phase: 'started' | 'updated' | 'finished', output: string, success = false) => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'tool', phase, tool, result: { output, success } });
+      publish('started', 'The managed model reported an incompatibility. Checking available repairs…');
+      modelCompatibilityBusy = true;
+      try {
+        const report = await llamaManager.checkCompatibility(modelPath, Math.min(context, 4096), mmproj, detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)));
+        const success = report.status === 'compatible' || report.status === 'repaired';
+        const detail = [report.detail, ...(report.actions ?? []), report.restoreWarning].filter(Boolean).join('\n');
+        publish('finished', detail, success);
+        if (!success) throw failure(report.detail);
+      } catch (checkError) {
+        if (!(checkError instanceof Error && checkError.name === 'ModelCompatibilityError')) publish('finished', checkError instanceof Error ? checkError.message : String(checkError));
+        throw failure(checkError instanceof Error ? checkError.message : String(checkError));
+      } finally { modelCompatibilityBusy = false; }
+      return llamaManager.ensureServer(modelPath, context, mmproj);
+    }
+  };
+  if (!remote) {
+    try { await prepareModelToolSupport(routedModel, contextBudget, loadManaged); }
+    catch (error) {
+      event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'error', content: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  }
   let nativeToolCalling = remote ? remote.provider.tools : installedToolSupport.get(`${settings.ollamaUrl}\0${routedModel}`) === true;
   // Project workspaces and their tool schemas are temporarily disabled.
   // The original handlers remain in place for a later re-enable.
@@ -1880,7 +1932,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       if (!managed && !remote) throw new Error('The selected Orion GGUF model is no longer installed. Open Models → Manage and refresh your models.');
       const modelRoot = path.resolve(modelsRoot()), modelPath = path.resolve(modelRoot, managed?.path ?? '.');
       if (!remote && !modelPath.startsWith(`${modelRoot}${path.sep}`)) throw new Error('The selected model path is invalid.');
-      const managedEndpoint = async () => `${await llamaManager.ensureServer(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
+      const managedEndpoint = async () => `${await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
       let repeatedLoopDetected = false;
       for (;;) {
         if (toolRounds++ >= 20) { event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: '\n\nI stopped this run after 20 tool rounds so it would not loop indefinitely. The tool results above are available if you want me to continue from them.' }); break; }
@@ -1901,7 +1953,14 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         const apiTools = nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
         const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,input.think,input.thinkLevel) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(routedManaged||routedModel.startsWith('orion-gguf:') ? input.think ? { reasoning_effort: input.thinkLevel && input.thinkLevel !== 'default' ? input.thinkLevel : 'medium' } : {} : {}), ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
         const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
-        const response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
+        let response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
+        if (!remote && !response.ok) {
+          const failure = new Error(await response.clone().text());
+          if (isModelCompatibilityError(failure)) {
+            await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot), failure);
+            response = await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
+          }
+        }
         if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. Check the model, API credentials, and provider compatibility.`);
         const reader = response.body.getReader(), decoder = new TextDecoder(); let turnContent = ''; let buffer = '', calls = new Map<number, { id: string; name: string; arguments: string; uiId: string }>(), finishReason = '', completionTokens = 0;
         const publishToolUpdate = (call: { id: string; name: string; arguments: string; uiId: string }, phase: 'started'|'updated') => {

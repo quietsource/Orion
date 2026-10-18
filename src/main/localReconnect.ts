@@ -9,6 +9,7 @@ export async function fetchWithLocalReconnect(endpoint: string | (() => Promise<
     try { return await fetch(typeof endpoint === 'function' ? await endpoint() : endpoint, init); }
     catch (error) {
       init.signal?.throwIfAborted();
+      if (error instanceof Error && error.name === 'ModelCompatibilityError') throw error;
       lastError = error;
       if (attempt + 1 < attempts) await delay(Math.min(5000, 350 * 2 ** attempt), undefined, { signal: init.signal ?? undefined });
     }

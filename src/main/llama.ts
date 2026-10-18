@@ -4,12 +4,17 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { DownloadProgress } from '../shared/types';
+import type { DownloadProgress, ModelCompatibilityReport } from '../shared/types';
 
 type Asset = { name: string; size: number; browser_download_url: string };
 type Release = { tag_name: string; prerelease: boolean; assets: Asset[] };
 type Hardware = { backend: string; label: string; driver: string };
-type State = { release: string; gpu: string; backend: string; serverBinary: string; cpuBinary: string; cudart?: string };
+type State = { release: string; gpu: string; backend: string; serverBinary: string; cpuBinary: string; cudart?: string; runtimeDirectory?: string; cpuRuntimeDirectory?: string };
+export function isModelCompatibilityError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/out of memory|not enough memory|failed to allocate|cannot allocate|corrupt|unexpected end|file.*missing|startup was cancelled|shutting down/i.test(message)) return false;
+  return /unknown (?:model )?architecture|unsupported (?:model |gguf )?(?:architecture|version)|architecture.*not supported|unknown pre.tokenizer|unknown model type|unsupported tensor type|chat.?template|jinja|tokenizer.*not supported/i.test(message);
+}
 type DownloadSink = (progress: DownloadProgress) => void;
 
 function run(executable: string, args: string[], timeout = 20000, env?: NodeJS.ProcessEnv) {
@@ -36,6 +41,19 @@ export class LlamaManager {
   private lifecycle: Promise<unknown> = Promise.resolve();
   private generation = 0;
   private disposed = false;
+  private serverLog = '';
+  private modelRuntimes: Record<string, State> | null = null;
+  private compatibilityManager: LlamaManager | null = null;
+  private async runtimeForModel(modelPath: string) {
+    if (!this.modelRuntimes) {
+      try {
+        const profiles = JSON.parse(await fs.readFile(path.join(this.root, 'model-runtimes.json'), 'utf8'));
+        this.modelRuntimes = profiles && typeof profiles === 'object' && !Array.isArray(profiles) ? profiles : {};
+      }
+      catch { this.modelRuntimes = {}; }
+    }
+    return this.modelRuntimes?.[modelPath] ?? await this.loadState();
+  }
 
   constructor(dataRoot: string, emit: DownloadSink) { this.root = path.join(dataRoot, 'orion', 'backends', 'llama.cpp'); this.stateFile = path.join(this.root, 'orion-state.json'); this.emit = emit; }
   private report(id: string, file: string, received: number, total: number, phase: DownloadProgress['phase'], error?: string) { this.emit({ id, repo: 'Orion llama.cpp', file, received, total, phase, ...(error ? { error } : {}) }); }
@@ -144,7 +162,7 @@ export class LlamaManager {
     if (this.installPromise) return this.installPromise;
     this.installPromise = this.doInstall().finally(() => { this.installPromise = null; }); return this.installPromise;
   }
-  private async doInstall() {
+  private async doInstall(previousRelease?: string) {
     const current = await this.loadState();
     if (current && await fs.access(current.serverBinary).then(() => true, () => false) && await fs.access(current.cpuBinary).then(() => true, () => false)) return;
     let gpu = await this.hardware(); const releaseResponse = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100', { headers: { 'user-agent': 'Orion-Local-AI/0.1', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30000) });
@@ -173,6 +191,7 @@ export class LlamaManager {
       }
     }
     if (!selected) throw new Error(`No llama.cpp runtime is published for ${process.platform}/${process.arch}.`);
+    if (previousRelease && (selected.release.tag_name === previousRelease || (/^b\d+$/.test(previousRelease) && /^b\d+$/.test(selected.release.tag_name) && Number(selected.release.tag_name.slice(1)) <= Number(previousRelease.slice(1))))) throw new Error('No newer compatible-platform llama.cpp release is available.');
     const installId = randomUUID(); await fs.mkdir(this.root, { recursive: true });
     const gpuRoot = path.join(this.root, 'runtime-gpu'), cpuRoot = path.join(this.root, 'runtime-cpu');
     await fs.rm(gpuRoot, { recursive: true, force: true }); await fs.rm(cpuRoot, { recursive: true, force: true });
@@ -186,7 +205,7 @@ export class LlamaManager {
     const deviceCheck = await run(gpuBinary, ['--list-devices'], 30000, deviceEnv).catch(() => null);
     let backend = gpu.backend;
     if (gpu.backend !== 'cpu' && gpu.backend !== 'metal' && (deviceCheck?.code !== 0 || !/CUDA|Vulkan|ROCm|SYCL|GPU/i.test(deviceCheck.stdout + deviceCheck.stderr))) { backend = 'cpu'; }
-    this.state = { release: selected.release.tag_name, gpu: gpu.label, backend, serverBinary: gpuBinary, cpuBinary };
+    this.state = { release: selected.release.tag_name, gpu: gpu.label, backend, serverBinary: gpuBinary, cpuBinary, runtimeDirectory: gpuRoot, cpuRuntimeDirectory: cpuBinary === gpuBinary ? gpuRoot : cpuRoot };
     await fs.writeFile(this.stateFile, JSON.stringify(this.state, null, 2), { mode: 0o600 });
   }
   private async freePort() { return new Promise<number>((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = (server.address() as { port: number }).port; server.close(error => error ? reject(error) : resolve(port)); }); }); }
@@ -201,7 +220,7 @@ export class LlamaManager {
     const check = () => { if (this.disposed || generation !== this.generation) throw new Error('llama.cpp startup was cancelled.'); };
     check();
     if (!await fs.stat(modelPath).then(s => s.isFile(), () => false)) throw new Error('The selected GGUF file is missing. Re-download it from Models.');
-    const state = await this.loadState() ?? (await this.install(), await this.loadState()); if (!state) throw new Error('llama.cpp backend did not install.');
+    const state = await this.runtimeForModel(modelPath) ?? (await this.install(), await this.loadState()); if (!state) throw new Error('llama.cpp backend did not install.');
     if (mmprojPath && !await fs.stat(mmprojPath).then(s => s.isFile(), () => false)) throw new Error('A required GGUF projector file is missing. Re-download the model from Models.');
     check();
     if (this.process && this.process.exitCode === null && !this.process.killed && this.activeModel === `${modelPath}\0${mmprojPath ?? ''}` && this.activeContext === context) {
@@ -213,10 +232,12 @@ export class LlamaManager {
     const args = ['--model', modelPath, '--host', '127.0.0.1', '--port', String(this.port), '--ctx-size', String(context), '--alias', 'orion-local', '--jinja', '--n-gpu-layers', state.backend === 'cpu' ? '0' : 'all'];
     if (mmprojPath) args.push('--mmproj', mmprojPath);
     const binaryRoot = path.relative(this.root, binary).split(path.sep)[0];
-    const runtimeRoot = binaryRoot === 'runtime-cpu' ? path.join(this.root, 'runtime-cpu') : path.join(this.root, 'runtime-gpu');
+    const runtimeRoot = (state.backend === 'cpu' ? state.cpuRuntimeDirectory : state.runtimeDirectory) ?? (binaryRoot === 'runtime-cpu' ? path.join(this.root, 'runtime-cpu') : path.join(this.root, 'runtime-gpu'));
     const env = await this.runtimeEnvironment(runtimeRoot);
     check();
-    const child = spawn(binary, args, { cwd: path.dirname(binary), env, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore' });
+    this.serverLog = '';
+    const child = spawn(binary, args, { cwd: path.dirname(binary), env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr?.on('data', chunk => { this.serverLog = (this.serverLog + String(chunk)).slice(-8000); });
     this.process = child;
     const spawnFailure: { error: Error | null } = { error: null };
     child.once('error', error => { spawnFailure.error = error; if (this.process === child) this.process = null; });
@@ -224,19 +245,88 @@ export class LlamaManager {
     const deadline = Date.now() + 8 * 60 * 1000;
     while (Date.now() < deadline) {
       check();
-      if (!this.process || this.process.killed) throw new Error(spawnFailure.error ? `Could not launch llama-server: ${spawnFailure.error.message}` : `llama-server stopped while loading the model (selected backend: ${state.backend}).`);
+      if (!this.process || this.process.killed) throw new Error(spawnFailure.error ? `Could not launch llama-server: ${spawnFailure.error.message}` : `llama-server stopped while loading the model (selected backend: ${state.backend}).\n${this.serverLog.trim()}`);
       const health = await fetch(`http://127.0.0.1:${this.port}/health`, { signal: AbortSignal.timeout(2500) }).then(r => r.ok).catch(() => false);
       if (health) { check(); return `http://127.0.0.1:${this.port}`; }
       await delay(1000);
     }
     await this.stopChild(); throw new Error('llama-server did not finish loading this model within eight minutes.');
   }
+  private async probeCompatibility(modelPath: string, context: number, mmprojPath?: string) {
+    const base = await this.ensureServer(modelPath, context, mmprojPath);
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'orion-local', messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 16, temperature: 0, stream: false }),
+      signal: AbortSignal.timeout(60000)
+    });
+    if (!response.ok) throw new Error(`Chat compatibility failed (HTTP ${response.status}): ${(await response.text()).slice(0, 1500)}`);
+    const result = await response.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>; usage?: { completion_tokens?: number } };
+    const message = result.choices?.[0]?.message;
+    if (!message || !(message.content?.trim() || message.reasoning_content?.trim() || (result.usage?.completion_tokens ?? 0) > 0)) throw new Error('The model did not produce any tokens during compatibility validation.');
+  }
+  async checkCompatibility(modelPath: string, context: number, mmprojPath?: string, progress: (detail: string) => void = () => {}, initialFailure?: Error): Promise<ModelCompatibilityReport> {
+    if (!await this.isInstalled()) throw new Error('Install Orion’s managed llama.cpp engine first.');
+    await this.lifecycle;
+    const previousModel = this.activeModel, previousContext = this.activeContext;
+    const state = await this.runtimeForModel(modelPath);
+    const actions: string[] = [];
+    let report: ModelCompatibilityReport;
+    try {
+      progress('Checking compatibility with the installed llama.cpp runtime…');
+      if (initialFailure) throw initialFailure;
+      await this.probeCompatibility(modelPath, context, mmprojPath);
+      report = { status: 'compatible', detail: 'Compatible with the installed llama.cpp runtime. No adaptation is needed.', runtimeRelease: state?.release ?? 'Unknown', checkedAt: Date.now(), actions };
+    } catch (error) {
+      const original = error instanceof Error ? error.message : String(error);
+      report = { status: 'error', detail: original, runtimeRelease: state?.release ?? 'Unknown', checkedAt: Date.now(), actions };
+      if (isModelCompatibilityError(error)) {
+        // Keep the working runtime intact. A replacement is assigned only to
+        // this model and only after loading AND chat inference are verified.
+        await this.stop();
+        const candidate = new LlamaManager(path.join(this.root, 'compatibility-runtimes', randomUUID()), this.emit);
+        this.compatibilityManager = candidate;
+        try {
+          progress('Model incompatibility detected. Checking for a newer official llama.cpp runtime…');
+          await candidate.doInstall(state?.release);
+          actions.push(`Downloaded official llama.cpp ${candidate.state!.release} into an isolated runtime.`);
+          progress('Verifying that the new runtime supports this model…');
+          await candidate.probeCompatibility(modelPath, context, mmprojPath);
+          await candidate.stop();
+          if (this.disposed) throw new Error('llama.cpp is shutting down.');
+          const updatedProfiles = { ...this.modelRuntimes, [modelPath]: candidate.state! };
+          const profileFile = path.join(this.root, 'model-runtimes.json');
+          const temporary = `${profileFile}.${randomUUID()}.tmp`;
+          await fs.writeFile(temporary, JSON.stringify(updatedProfiles, null, 2), { mode: 0o600 });
+          await fs.rename(temporary, profileFile);
+          this.modelRuntimes = updatedProfiles;
+          actions.push('Saved a verified, model-specific runtime profile. Other models retain their runtime.');
+          report = { status: 'repaired', canRepair: true, detail: 'This model was incompatible with its previous runtime. Orion made it compatible using a verified official runtime and will use that profile automatically.', runtimeRelease: candidate.state!.release, checkedAt: Date.now(), actions };
+          progress('Compatibility restored. The verified runtime profile has been saved.');
+        } catch (repairError) {
+          const reason = repairError instanceof Error ? repairError.message : String(repairError);
+          const unsupported = isModelCompatibilityError(repairError) || /No newer compatible-platform/.test(reason);
+          report = { status: unsupported ? 'unsupported' : 'error', canRepair: unsupported ? false : undefined, detail: unsupported ? `Not compatible with the installed runtime. Orion cannot make this model compatible using the available official runtimes; implementation support from llama.cpp is required.\n${reason}` : `The model is incompatible, but Orion could not finish checking or applying a repair.\n${reason}`, runtimeRelease: state?.release ?? 'Unknown', checkedAt: Date.now(), actions: [...actions, `Original incompatibility: ${original}`] };
+        } finally {
+          await candidate.dispose();
+          if (this.compatibilityManager === candidate) this.compatibilityManager = null;
+          if (report.status !== 'repaired') await fs.rm(candidate.root, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+    }
+    try {
+      if (previousModel) {
+        const [previousPath, previousProjector] = previousModel.split('\0');
+        await this.ensureServer(previousPath!, previousContext, previousProjector || undefined);
+      } else await this.stop();
+    } catch (error) { report.restoreWarning = `The previous model could not be restored: ${error instanceof Error ? error.message : String(error)}`; }
+    return report;
+  }
   async stop() {
     this.generation++;
     await this.stopChild();
     await this.lifecycle;
   }
-  async dispose() { this.disposed = true; await this.stop(); }
+  async dispose() { this.disposed = true; await this.compatibilityManager?.dispose(); await this.stop(); }
   private async stopChild() {
     const child = this.process;
     if (child && child.exitCode === null) {

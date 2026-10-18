@@ -1,6 +1,7 @@
 export type ApiProviderKind = 'openai-compatible'|'openai'|'anthropic'|'google'|'zai'|'moonshotai'|'opencode'|'opencode-go'|'openrouter';
 export interface ApiProvider { id: string; name: string; baseUrl: string; models: string[]; tools: boolean; kind?: ApiProviderKind; apiKey?: string; keyConfigured?: boolean; }
 export type Role = 'user' | 'assistant' | 'system';
+export interface ModelCompatibilityReport { status: 'compatible'|'repaired'|'unsupported'|'error'; detail: string; runtimeRelease: string; checkedAt: number; canRepair?: boolean; actions?: string[]; restoreWarning?: string; }
 export interface ToolCallRecord { id: string; name: string; description?: string; input: Record<string, unknown>; status: 'pending'|'running'|'completed'|'denied'|'error'; output?: string; imagePath?: string; mediaType?: 'image'|'video'; progress?: number; progressDetail?: string; }
 export interface WebResearchSource { title: string; url: string; snippet?: string; status: 'reading'|'read'|'error'; }
 export interface WebResearchStep { id: string; query: string; status: 'searching'|'reading'|'complete'|'error'; sources: WebResearchSource[]; error?: string; }
@@ -79,6 +80,7 @@ export interface OrionAPI {
   enterCreate(): Promise<{ state: BackendState; showInstallPrompt: boolean }>; getCreateEngineState(): Promise<BackendState>; installCreateEngine(): Promise<BackendState>;
   shouldShowLlamaIntro(): Promise<boolean>; dismissLlamaIntro(): Promise<void>; installLlama(): Promise<void>;
   llamaStatus(): Promise<boolean>;
+  checkModelCompatibility(id: string): Promise<ModelCompatibilityReport>;
   listGeneratedMedia(): Promise<GeneratedMedia[]>;
   openGeneratedFolder(): Promise<void>;
   generateImage(prompt: string, modelId?: string, kind?: 'image'|'video', requestId?: string): Promise<{ id: string; imagePath: string; mediaType: 'image'|'video' }>;

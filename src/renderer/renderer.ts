@@ -68,6 +68,8 @@ let activeView: 'Chat' | 'Models' | 'Create' = 'Chat';
 let chatMode: ToolMode = 'chat';
 let workspaceReview: WorkspaceReview | null = null;
 let modelTab: 'conversational'|'creative'|'manage'|'providers' = 'conversational', creativeCategory: 'image'|'video' = 'image';
+let managedLlamaInstalled = false, checkingModelId = '';
+const modelCompatibilityReports = new Map<string, import('../shared/types').ModelCompatibilityReport | string>();
 let modelQuery = '', hubModels: HubModel[] = [], installedModels: InstalledModel[] = [], activeHubRepo = '', activeHubFiles: HubFile[] = [], createState: BackendState | null = null, createEngineStateLoading = false;
 let hfTokenConfigured: boolean | null = null, hfTokenDraft = '', hfTokenStatus = '', hfTokenSaveTimer: number | undefined, hfTokenSaveRequest = 0, hfTokenConfigLoading = false;
 const popularHubCache = new Map<ModelCategory, { models: HubModel[]; nextUrl: string|null }>();
@@ -440,6 +442,37 @@ function renderProviders(page: HTMLElement) {
   } }).catch(error => { status.textContent = String(error); });
 }
 
+function appendCompatibilityCheck(card: HTMLElement, modelId: string) {
+  if (!managedLlamaInstalled) return;
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary model-compatibility-button';
+  button.textContent = checkingModelId === modelId ? 'Checking compatibility…' : 'Check compatibility';
+  button.disabled = Boolean(checkingModelId);
+  button.title = 'Check compatibility and automatically apply a verified model-specific runtime repair when available.';
+  button.onclick = async () => {
+    checkingModelId = modelId;
+    modelCompatibilityReports.delete(modelId);
+    renderModelsView();
+    try { modelCompatibilityReports.set(modelId, await window.orion.checkModelCompatibility(modelId)); }
+    catch (error) { modelCompatibilityReports.set(modelId, error instanceof Error ? error.message : String(error)); }
+    finally { checkingModelId = ''; if (activeView === 'Models' && modelTab === 'manage') renderModelsView(); }
+  };
+  card.append(button);
+  const report = modelCompatibilityReports.get(modelId);
+  if (report || checkingModelId === modelId) {
+    const result = document.createElement('div'); result.className = 'model-compatibility-result'; result.setAttribute('role', 'status');
+    if (!report) result.textContent = 'Checking compatibility and available runtime repairs. Downloads and validation may take several minutes.';
+    else if (typeof report === 'string') result.textContent = report;
+    else {
+      result.dataset.status = report.status;
+      const label = document.createElement('strong'); label.textContent = `${report.status === 'compatible' ? 'Compatible' : report.status === 'repaired' ? 'Made compatible' : report.status === 'unsupported' ? 'Cannot make compatible' : 'Could not finish check'} · llama.cpp ${report.runtimeRelease}`;
+      const detail = document.createElement('p'); detail.textContent = report.detail;
+      result.append(label, detail);
+      if (report.actions?.length) { const actions = document.createElement('p'); actions.textContent = report.actions.join('\n'); result.append(actions); }
+      if (report.restoreWarning) { const warning = document.createElement('p'); warning.textContent = report.restoreWarning; result.append(warning); }
+    }
+    card.append(result);
+  }
+}
 function renderModelsView() {
   const restoreScrollTop = chatScroller.scrollTop;
   if(modelTab !== 'providers' && hfTokenConfigured===null&&!hfTokenConfigLoading){hfTokenConfigLoading=true;void window.orion.getHuggingFaceTokenConfigured().then(configured=>{hfTokenConfigured=configured;hfTokenConfigLoading=false;if(activeView==='Models' && modelTab !== 'providers')renderModelsView();}).catch(()=>{hfTokenConfigured=false;hfTokenConfigLoading=false;});}
@@ -484,7 +517,7 @@ function renderModelsView() {
     const refresh=document.createElement('button');refresh.type='button';refresh.className='secondary';refresh.textContent='Refresh installed models';refresh.onclick=async()=>{installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();};page.append(refresh);
     const all=[...installedModels.map(model=>({id:model.id,name:model.invokeKey?model.file:model.repo,file:model.invokeKey?'Managed by native image/video engine':model.file,size:model.size,origin:'Orion',category:model.category==='conversational'?'conversational':'creative'})),...models.filter(model=>model.source!=='orion' && model.source!=='api').map(model=>({id:model.name,name:model.name,file:'',size:model.size,origin:'Ollama',category:'conversational'}))];
     all.sort((a,b)=>a.category===b.category?0:a.category==='conversational'?-1:1);
-    if(!all.length){results.textContent='No models are installed yet.';} else { let currentCategory=''; for(const item of all){if(currentCategory!==item.category){currentCategory=item.category;const sectionTitle=document.createElement('h2');sectionTitle.className='model-manage-heading';sectionTitle.textContent=currentCategory==='conversational'?'Conversational models':'Image / video models';results.append(sectionTitle);}const card=document.createElement('article');card.className='model-card';const top=document.createElement('div');top.className='model-card-top';const title=document.createElement('h2');title.textContent=item.name;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=item.origin;top.append(title,badge);card.append(top);const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=[item.file,modelSize(item.size)].filter(Boolean).join(' · ');card.append(meta);const del=document.createElement('button');del.type='button';del.className='secondary danger-button';del.textContent='Delete model';del.onclick=async()=>{if(!(await askConfirm(`Delete ${item.name} from this device?`, 'Delete model')))return;try{if(item.origin==='Ollama')await window.orion.deleteOllamaModel(item.id);else await window.orion.deleteInstalledModel(item.id);installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not delete model');}};card.append(del);results.append(card);} }
+    if(!all.length){results.textContent='No models are installed yet.';} else { let currentCategory=''; for(const item of all){if(currentCategory!==item.category){currentCategory=item.category;const sectionTitle=document.createElement('h2');sectionTitle.className='model-manage-heading';sectionTitle.textContent=currentCategory==='conversational'?'Conversational models':'Image / video models';results.append(sectionTitle);}const card=document.createElement('article');card.className='model-card';const top=document.createElement('div');top.className='model-card-top';const title=document.createElement('h2');title.textContent=item.name;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=item.origin;top.append(title,badge);card.append(top);const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=[item.file,modelSize(item.size)].filter(Boolean).join(' · ');card.append(meta);const del=document.createElement('button');del.type='button';del.className='secondary danger-button';del.textContent='Delete model';del.onclick=async()=>{if(!(await askConfirm(`Delete ${item.name} from this device?`, 'Delete model')))return;try{if(item.origin==='Ollama')await window.orion.deleteOllamaModel(item.id);else await window.orion.deleteInstalledModel(item.id);installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not delete model');}};del.disabled=Boolean(checkingModelId);card.append(del);if(item.origin==='Orion'&&item.category==='conversational')appendCompatibilityCheck(card,item.id);results.append(card);} }
   }
   page.append(results); chatBox.append(page); requestAnimationFrame(()=>{chatScroller.scrollTop=restoreScrollTop;});
 }
@@ -631,7 +664,7 @@ function renderMessage(active: Conversation, message: Message) {
       const label = document.createElement('span');
       label.className = 'tool-name';
       label.dataset.glyph = call.name === 'create_image' ? '✦' : /search|web_fetch|browser_open/i.test(call.name) ? '⌕' : /file|workspace|canvas/i.test(call.name) ? '▤' : /command|run/i.test(call.name) ? '›_' : '·';
-      const toolNames: Record<string, string> = { ask_user_question: 'Asked a question', workspace_list: 'Listed files', workspace_search: 'Searched files', workspace_read: 'Read file', workspace_write: 'Wrote file', workspace_edit: 'Edited file', workspace_run: 'Ran command', read_file: 'Read file', write_file: 'Wrote file', run_command: 'Ran command', search_files: 'Searched files', create_image: 'Created media', search_memory: 'Searched memory', search_web: 'Searched the web', browser_open: 'Opened browser', browser_control: 'Used browser' };
+      const toolNames: Record<string, string> = { model_compatibility: 'Checking model compatibility', ask_user_question: 'Asked a question', workspace_list: 'Listed files', workspace_search: 'Searched files', workspace_read: 'Read file', workspace_write: 'Wrote file', workspace_edit: 'Edited file', workspace_run: 'Ran command', read_file: 'Read file', write_file: 'Wrote file', run_command: 'Ran command', search_files: 'Searched files', create_image: 'Created media', search_memory: 'Searched memory', search_web: 'Searched the web', browser_open: 'Opened browser', browser_control: 'Used browser' };
       label.textContent = call.name === 'create_image' ? `Create ${call.mediaType ?? call.input.kind ?? 'image'}` : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
       const heading = document.createElement('span'); heading.className = 'tool-heading'; heading.append(label);
       const detailValue = call.name === 'workspace_run' || call.name === 'run_command' ? call.input.command
@@ -830,7 +863,7 @@ async function refreshModelControls(){
 }
 async function refreshModels(refreshProviders = false) { const [available] = await Promise.all([window.orion.listModels().catch(() => []), window.orion.ollamaStatus().then(connected => { ollamaConnected = connected; }).catch(() => { ollamaConnected = false; })]); models = available; setModels(); await refreshModelControls(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : ollamaConnected ? 'Connected' : 'Disconnected · Error'; if (activeView === 'Models' && (modelTab !== 'providers' || refreshProviders)) renderModelsView(); }
 const gigabytes = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
-async function refreshLlamaStatus() { try { $('llama-state').textContent = await window.orion.llamaStatus() ? 'Installed' : 'Not Installed'; } catch { $('llama-state').textContent = 'Unknown'; } }
+async function refreshLlamaStatus() { const previous = managedLlamaInstalled; try { managedLlamaInstalled = await window.orion.llamaStatus(); $('llama-state').textContent = managedLlamaInstalled ? 'Installed' : 'Not Installed'; } catch { managedLlamaInstalled = false; $('llama-state').textContent = 'Unknown'; } if (previous !== managedLlamaInstalled && activeView === 'Models' && modelTab === 'manage') renderModelsView(); }
 async function refreshCreateEngineStatus() { try { createState = await window.orion.getCreateEngineState(); } catch (error) { createState = { installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown' }; } }
 let systemResourcesPending=false;
 async function refreshSystemResources() { if(systemResourcesPending)return;systemResourcesPending=true;try { const info = await window.orion.getSystemInfo(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : info.ollama ? 'Connected' : 'Disconnected · Error'; $('cpu-label').textContent=info.cpuUsagePercent===null?'—':`${info.cpuUsagePercent}%`; $('ram-label').textContent = `${gigabytes(info.usedRamMB)} / ${gigabytes(info.totalRamMB)}`; $('gpu-label').textContent=info.gpuUsagePercent===null?'—':`${info.gpuUsagePercent}%`; $('vram-label').textContent = info.totalVramMB > 0 ? `${info.usedVramMB === null ? '—' : gigabytes(info.usedVramMB)} / ${gigabytes(info.totalVramMB)}` : 'Not detected'; ($('gpu-label') as HTMLElement).title=info.gpuUsagePercent===null?'GPU utilization is not reported by this driver.':'Current overall GPU utilization'; ($('vram-label') as HTMLElement).title = info.totalVramMB > 0 && info.usedVramMB === null ? 'GPU memory capacity is available, but current usage is not reported by this driver.' : ''; } catch { $('connection-state').textContent = 'Disconnected · Error'; } finally{systemResourcesPending=false;} }
@@ -965,7 +998,7 @@ document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => butt
   if(activeView==='Create'&&view!=='Create')clearCreatePageSession();
   if (view === 'Models') { modelTab='conversational';creativeCategory='image';modelQuery='';hubModels=popularHubCache.get('conversational')?.models??[];hubNextUrl=popularHubCache.get('conversational')?.nextUrl??null;popularHubError='';activeHubRepo='';activeHubFiles=[]; }
   activeView = view; updateActiveNav(view); renderMessages(true);
-  if (view === 'Models') { installedModels=await window.orion.listInstalledModels(); await refreshModels(); void loadPopularHubModels('conversational'); }
+  if (view === 'Models') { await refreshLlamaStatus(); installedModels=await window.orion.listInstalledModels(); await refreshModels(); void loadPopularHubModels('conversational'); }
   if (view === 'Create') { try { const entered=await window.orion.enterCreate(); createState=entered.state; installedModels=await window.orion.listInstalledModels(); await refreshGeneratedGallery(); renderMessages(true); if(entered.showInstallPrompt) ($('engine-install-dialog') as HTMLDialogElement).showModal(); } catch(error) { createState={installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown'};renderCreateView(); } }
 });
   $('canvas-open').onclick=()=>toggleCanvas();
