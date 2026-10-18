@@ -1,6 +1,6 @@
 const types = ['diagram','mesh','line','bar','pie','radar','venn'];
 export function looksLikeOgs(source: string): boolean {
-  if (/^\s*(diagram|mesh|line|bar|pie|radar|venn)(?:\s|$)/i.test(source)) return true;
+  if (/^\s*(diagram|mesh|line|bar|pie|radar|venn)(?:\s|:|$)/i.test(source)) return true;
   return /"type"\s*:\s*"(?:diagram|mesh|line|bar|pie|radar|venn)"/i.test(source) && /"(?:nodes|sets|series|values)"\s*:/.test(source);
 }
 const parts = (value: string) => value.split('|').map(item=>item.trim()).filter(Boolean);
@@ -12,7 +12,7 @@ function numeric(value: string): number {
 /** A small data language: no scripts, evaluation, or inferred numeric values. */
 function shorthand(source: string): Record<string, unknown> {
   const lines=source.trim().split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
-  const header=/^(diagram|mesh|line|bar|pie|radar|venn)(?:\s+(.*))?$/i.exec(lines.shift()??'');
+  const header=/^(diagram|mesh|line|bar|pie|radar|venn)(?:(?:\s*:\s*|\s+)(.*))?$/i.exec(lines.shift()??'');
   if(!header)throw Error('Start with a graph type, for example “venn Three sets”.');
   const type=header[1]!.toLowerCase(), graph:Record<string,unknown>={type,title:header[2]?.trim()||defaultTitle(type)};
   const rows=lines.map(line=>{const split=line.indexOf(':');return {raw:line,key:split<0?'':line.slice(0,split).trim(),value:split<0?line:line.slice(split+1).trim()};});

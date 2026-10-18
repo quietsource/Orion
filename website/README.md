@@ -46,4 +46,4 @@ After future website edits, run the preparation command again before pushing. If
 - `assets/social.png`: social sharing preview.
 - `assets/site.js`, `assets/site.css`: checked-in static browser assets, built with Bun.
 
-Download links fall back to release `0.1.8`. Update them in `index.html` when retiring that release. The page makes no claim that model inference is free of hardware requirements, that hosted APIs are local, or that model weights/generated media are encrypted.
+Download links fall back to release `0.1.9`. Update them in `index.html` when retiring that release. The page makes no claim that model inference is free of hardware requirements, that hosted APIs are local, or that model weights/generated media are encrypted.

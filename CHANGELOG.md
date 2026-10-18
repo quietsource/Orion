@@ -1,3 +1,7 @@
+# Orion 0.1.9 — More forgiving graph headings
+
+- Accept optional colons in simple OGS graph headings, so `venn: Three sets` and `bar: Weekly counts` render like their space-separated equivalents.
+
 # Orion 0.1.8 — Canvas, composer and video creation
 
 - Preserve tool and web-search chronology, including searches after question/answer tools.
