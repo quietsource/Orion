@@ -1,6 +1,9 @@
 # Orion 0.1.6 — Clearer update status
 
 - Corrected update status messages to describe downloading and opening the installer, matching the visible installation flow.
+- Kept the main chat area frameless, removing its enclosing outline and rounded corners while preserving layout spacing.
+- Added compatibility checks for installed managed conversational models. Orion can validate a newer official llama.cpp runtime and save it as a model-specific repair when supported.
+- Automatically check compatibility after managed model compatibility failures, showing progress and repair results through chat tool activity before retrying supported models.
 
 # Orion 0.1.5 — Cleaner chat activity and consistent model restoration
 

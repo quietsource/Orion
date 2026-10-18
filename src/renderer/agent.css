@@ -390,6 +390,14 @@ body.sidebar-collapsed .sidebar{position:fixed!important;inset:8px auto 8px 8px!
 /* Workspace selection, review and approval flows are temporarily disabled. */
 #command-palette,#workspace-review,#workspace-required,#chat-mode,#approval-strip{display:none!important}
 #settings-form>[hidden]{display:none!important}
+/* Keep the main chat frameless while preserving its layout spacing. */
+.app>.main{border-color:transparent;border-radius:0}
+.model-compatibility-button{margin-left:8px}
+.model-compatibility-result{margin-top:12px;max-height:220px;overflow:auto;color:var(--secondary);font-size:11px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.model-compatibility-result strong{font-size:11px;font-weight:500;color:var(--text)}
+.model-compatibility-result p{margin:5px 0 0}
+.model-compatibility-result[data-status="compatible"] strong,.model-compatibility-result[data-status="repaired"] strong{color:var(--success)}
+.model-compatibility-result[data-status="unsupported"] strong,.model-compatibility-result[data-status="error"] strong{color:var(--danger)}
 
 /* Compact, embedded chat activity for web research and tool calls. */
 .assistant-workflow{display:flex;flex-direction:column;gap:4px;margin:4px 0 14px 31px;padding:0;border:0;border-radius:0;background:transparent;overflow:visible}
