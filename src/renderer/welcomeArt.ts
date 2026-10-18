@@ -118,7 +118,7 @@ export function captureLiquidMetalStill(size = 2048, time = 1.8): string {
       }
     }
     if (right < left) throw new Error('The liquid-metal render is empty.');
-    const width = right - left + 1, height = bottom - top + 1, scale = size * .9 / Math.max(width, height);
+    const width = right - left + 1, height = bottom - top + 1, scale = size * .98 / Math.max(width, height);
     context.clearRect(0, 0, size, size);
     context.drawImage(canvas, left, top, width, height, (size - width * scale) / 2, (size - height * scale) / 2, width * scale, height * scale);
     return output.toDataURL('image/png');
