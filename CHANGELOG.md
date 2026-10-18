@@ -1,3 +1,13 @@
+# Orion 0.1.8 — Canvas, composer and video creation
+
+- Align the animated welcome and greeting with the composer center and lift the welcome group slightly above the composer.
+- Add a dedicated create_video chat tool using the same live media generation card and chat-model handoff as image creation. Image and video generation in Create share the same progress card.
+- Move model and context selectors into the composer beside attachments and token usage, with embedded controls and upward-opening Orion menus.
+- Use one fixed Orion appearance, remove theme selection and the Appearance settings tab, and clarify the system tray setting.
+- Add hover-revealed, draggable and keyboard-accessible sidebar resize handles with remembered widths. Canvas starts narrower.
+- Unify Canvas source editing, simplify selected-text notes and AI revisions, and reopen generated documents from chat.
+- Give the Canvas tool read, precise edit and reopen actions, preserving complete documents and unrelated content.
+
 # Orion 0.1.7 — Native graphs and a simpler composer
 
 - Added Orion Graph System (OGS): native chat diagrams, networks, line and bar charts, pie charts, radar charts, and Venn diagrams from compact model-authored data. Includes data views, copy, SVG export, and bounded local rendering.

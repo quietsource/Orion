@@ -1,6 +1,6 @@
 # Orion
 
-Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.7`.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The current release is `0.1.8`.
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
@@ -20,12 +20,13 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 
 - Chat with models from a local Ollama server, Orion-managed GGUF models using llama.cpp, or a configured OpenAI-compatible API provider.
 - Streamed answers and model-provided reasoning when the selected model and provider support it.
-- Conversation history, per-conversation Canvas content, file attachments, Markdown rendering, and live syntax highlighting.
+- Conversation history, per-conversation Canvas documents with direct editing, AI revisions and reopen controls, file attachments, Markdown rendering, and live syntax highlighting.
+- Resizable conversation and Canvas sidebars, with model and context selection in the composer.
 - Orion Graph System (OGS) for native chat diagrams, networks, line/bar/pie charts, radar charts, and Venn diagrams. Models describe data and connections; Orion handles rendering, accessible data views, and SVG export. See the [OGS guide](docs/orion-graph-system.md).
 - Automatic model reasoning with runtime defaults, and a compact composer docked to the bottom of chat.
 - Queue follow-up messages with Enter while a response is generating. Compact cards above the composer provide send-now and delete controls; queued messages run in order without replacing an unsent draft. Pending queues stay in memory for the current app session.
 - OrionFS (OFS) local memory. OFS stores attributed statements and their associations locally and recalls relevant memories without a separate embedding model or network service. Memory controls and saved memories are available in Settings.
-- General chat tools for web search and page reading, local application actions, questions, and Canvas. Tools run without per-action approval prompts. Project workspace tools are currently disabled.
+- General chat tools for web search and page reading, local application actions, questions, Canvas, and image/video creation with live progress cards. Tools run without per-action approval prompts. Project workspace tools are currently disabled.
 - Orion Browser controls for opening and reading HTTPS pages in Orion's browser.
 - Orion Create, which can install a compact Vulkan-accelerated `stable-diffusion.cpp` runtime for Stable Diffusion image generation and Wan video generation. The runtime and chosen model weights are downloaded on demand.
 - Live CPU, RAM, GPU, and VRAM usage in the sidebar resource monitor. Image and video diffusion weights are explicitly assigned to Vulkan GPU memory.

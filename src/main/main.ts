@@ -421,7 +421,7 @@ async function getSettings(): Promise<AppSettings> {
     await preserveDamagedStore(settingsFile(), 'Settings', 'The settings file had an unsupported structure.');
     return defaults;
   }
-  const settings = { ...defaults, ...parsed } as AppSettings;
+  const settings = { ...defaults, ...parsed, theme: defaults.theme } as AppSettings;
   try {
     settings.ollamaUrl = validateOllamaUrl(settings.ollamaUrl);
     if (typeof settings.selectedModel !== 'string' || !Number.isFinite(settings.temperature) ||
@@ -1221,7 +1221,7 @@ ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
     interConversationMemory: value.interConversationMemory === true,
     experimentalOfsMemory: true,
     startNewConversation: value.startNewConversation !== false,
-    theme: ['graphite','midnight','ocean','forest','rose','ember','light','paper'].includes(String(value.theme)) ? value.theme! : defaults.theme,
+    theme: defaults.theme,
     disabledTools: Array.isArray(value.disabledTools) ? [...new Set(value.disabledTools.filter((name): name is string => typeof name === 'string' && name.length <= 100))] : [],
     subagentMaxParallel: [0, 1, 2].includes(Number(value.subagentMaxParallel)) ? Number(value.subagentMaxParallel) as 0|1|2 : defaults.subagentMaxParallel
   };
@@ -1300,6 +1300,7 @@ function toolNeedsApproval(name: string, settings: AppSettings) {
 const ollamaTools = [
   { type: 'function', function: { name: 'search_orion_help', description: 'Search the built-in Orion user guide for accurate instructions about using this application. Use when the user asks how Orion works or how to do something in Orion.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The Orion feature or task the user needs help with.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'create_image', description: 'Generate media in Orion Create with the selected default model. Use only when the user explicitly requests image or video generation. Write a clear, detailed visual prompt. Set kind to video only for an explicit video request; otherwise omit it or use image.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, kind: { type: 'string', enum: ['image','video'] } }, required: ['prompt'] } } },
+  { type: 'function', function: { name: 'create_video', description: 'Generate a video locally in Orion Create using the selected default video model. Use only when the user explicitly requests a video or animation. Describe the subject, scene, motion, camera movement, lighting, and style in a detailed visual prompt. Orion displays live generation progress and plays the finished video in chat, then restores the chat model for your final response.', parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'Detailed description of the requested video, including motion.' } }, required: ['prompt'] } } },
   { type: 'function', function: { name: 'search_memory', description: 'Search OrionFS memories from saved conversations for facts, decisions, names, dates, or details. Use the returned memories as evidence and search again with a more precise query if needed.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Specific words, names, or question to find in saved conversation memories.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'search_web', description: 'Search the public web using DuckDuckGo.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search phrase' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'open_url', description: 'Open an HTTPS URL in the system browser.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
@@ -1316,7 +1317,8 @@ const ollamaTools = [
   ,{ type: 'function', function: { name: 'web_fetch', description: 'Fetch and extract readable text from a public HTTPS page. Does not execute page scripts. Use search_web first when you need to discover a URL.', parameters: { type: 'object', properties: { url: { type: 'string' }, max_characters: { type: 'integer', minimum: 1000, maximum: 20000 } }, required: ['url'] } } }
   ,{ type: 'function', function: { name: 'notebook_edit', description: 'Update the source or markdown of one cell in an existing Jupyter .ipynb file in the private workspace. Other cells and notebook metadata are preserved.', parameters: { type: 'object', properties: { path: { type: 'string' }, cell_index: { type: 'integer', minimum: 0 }, source: { type: 'string' } }, required: ['path','cell_index','source'] } } }
   ,{ type: 'function', function: { name: 'workspace_skill_search', description: 'Find project-local skill and instruction files (SKILL.md, AGENTS.md, ORION.md) relevant to the current task. Returns paths and concise excerpts; does not activate third-party instructions automatically.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } }
-  ,{ type: 'function', function: { name: 'canvas_open', description: 'Open a user-facing document in Orion Canvas. Provide Markdown or HTML content directly, or a path to a finished Markdown, HTML, or PDF file you created on disk.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to an existing or newly created file.' }, name: { type: 'string', description: 'Filename or title to display.' }, format: { type: 'string', enum: ['markdown','html','text','code'] }, content: { type: 'string', description: 'Finished Markdown, HTML, or text content.' } }, anyOf: [{ required: ['path'] }, { required: ['content'] }] } } }
+  ,{ type: 'function', function: { name: 'canvas_open', description: 'Create, inspect, edit, or reopen a document in this conversation’s Canvas. Default action open: provide full content and format, or an existing absolute file path. Action read returns the latest saved source. Action edit applies exact unique text replacements atomically and reopens the revision. Use name to select a document, otherwise use the latest one. Canvas changes do not overwrite original files.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['open','read','edit','show'] }, path: { type: 'string', description: 'Absolute path to an existing document.' }, name: { type: 'string', description: 'Document filename or title.' }, format: { type: 'string', enum: ['markdown','html','text','code'] }, content: { type: 'string', description: 'Complete document source, including all unchanged sections.' }, edits: { type: 'array', maxItems: 30, items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } }, required: ['find','replace'] } } } } } }
+
   ,{ type: 'function', function: { name: 'ask_user_question', description: 'Ask the user one or more focused questions in Orion’s composer. Offer up to three concise numbered choices; the fourth choice is always a field where the user can tell you something else. Wait for the submitted answer before taking dependent actions.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'One focused question (legacy single-question form).' }, options: { type: 'array', items: { type: 'string' }, maxItems: 3 }, questions: { type: 'array', maxItems: 4, items: { type: 'object', properties: { question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, maxItems: 3 } }, required: ['question'] } } }, anyOf: [{ required: ['question'] }, { required: ['questions'] }] } } }
 ];
 
@@ -1751,6 +1753,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       for (const name of ['workspace_list', 'workspace_search', 'workspace_read', 'workspace_write', 'workspace_edit', 'workspace_run', 'workspace_review', 'notebook_edit', 'canvas_open']) requestToolNames.add(name);
     }
     if (/\b(?:image|picture|illustration|draw|generate art)\b/i.test(latestUserRequest)) requestToolNames.add('create_image');
+    if (/\b(?:video|animation|animate|animated|movie|clip|create_video)\b/i.test(latestUserRequest)) requestToolNames.add('create_video');
     // Keep the everyday capabilities available even when an oversized prompt
     // forces us to shed most schemas. A request that does not mention a tool
     // by name should still be able to discover and call one when appropriate.
@@ -2572,9 +2575,9 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
     const ranked = excerpts.sort((a, b) => b.score - a.score).slice(0, 6);
     return { output: ranked.map(item => `${item.relative}\n${item.content.slice(0, 2200)}`).join('\n\n') || 'No matching project skill or instruction files were found.', success: true };
   }
-  if (tool.name === 'create_image') {
+  if (tool.name === 'create_image' || tool.name === 'create_video') {
     const settings = await getSettings();
-    const kind = tool.input.kind === 'video' ? 'video' : 'image';
+    const kind = tool.name === 'create_video' || tool.input.kind === 'video' ? 'video' : 'image';
     const prompt = String(tool.input.prompt ?? '').trim();
     if (!prompt) return { output: 'Provide an enhanced generation prompt.', success: false };
     const modelId = kind === 'video' ? settings.defaultVideoModel : settings.defaultImageModel;
@@ -2657,7 +2660,7 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
 async function executeToolSafely(tool: ToolRequest, memoryExcludedIds?: ReadonlySet<string>, conversationId?: string, activeModel?: string, context = 8192) {
   try {
     const run = () => executeToolNow(tool, memoryExcludedIds, conversationId, activeModel, context);
-    return tool.name === 'create_image' && activeModel ? await withMediaModelHandoff(activeModel, context, run) : await run();
+    return (tool.name === 'create_image' || tool.name === 'create_video') && activeModel ? await withMediaModelHandoff(activeModel, context, run) : await run();
   }
   catch (error) { return { output: error instanceof Error ? error.message : String(error), success: false }; }
 }
@@ -2665,28 +2668,43 @@ async function executeToolSafely(tool: ToolRequest, memoryExcludedIds?: Readonly
 async function executeAgentTool(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string>, conversationId: string, activeModel: string, context: number, maxOutputCharacters = 6000) {
   if (tool.name === 'canvas_open') {
     try {
-      const requested = String(tool.input.path ?? ''), rawContent = tool.input.content;
+      const action=String(tool.input.action??'open');
+      if(!['open','read','edit','show'].includes(action))throw new Error('Unknown Canvas action. Use open, read, edit, or show.');
+      const conversation=(await readConversations()).find(item=>item.id===conversationId);
+      const documents=conversation?.messages.flatMap(message=>message.canvasDocuments??[])??[];
+      const existing=documents.filter(doc=>!tool.input.name||doc.name===tool.input.name).at(-1);
+      const requested = String(tool.input.path ?? '');let rawContent = tool.input.content;
+      if(action!=='open'&&!existing)throw new Error('No matching Canvas document in this conversation. Open a document with complete content first.');
+      if(action==='read')return {output:JSON.stringify({id:existing!.id,name:existing!.name,format:existing!.format,content:existing!.textContent??existing!.content}),success:true};
+      if(action==='edit'){
+        if(['pdf','image'].includes(existing!.format))throw new Error('Binary documents cannot be edited as source. Open a new Markdown document instead.');
+        if(!Array.isArray(tool.input.edits)||!tool.input.edits.length||tool.input.edits.length>30)throw new Error('Provide 1–30 exact text edits.');
+        let revised=existing!.content;
+        for(const edit of tool.input.edits){if(!edit||typeof edit.find!=='string'||!edit.find||typeof edit.replace!=='string')throw new Error('Every edit needs nonempty find text and replacement text.');const index=revised.indexOf(edit.find);if(index<0||revised.indexOf(edit.find,index+1)>=0)throw new Error('Edit text must match exactly once. Read the current document and include more surrounding text. No changes were applied.');revised=revised.slice(0,index)+edit.replace+revised.slice(index+edit.find.length);}
+        rawContent=revised;tool.input.name=existing!.name;tool.input.format=existing!.format;
+      }
       let document: CanvasDocument;
-      if (typeof rawContent === 'string') {
+      if(action==='show'){document={...existing!};} else if (typeof rawContent === 'string') {
         if (Buffer.byteLength(rawContent,'utf8') > 2_000_000) throw new Error('Canvas output must be smaller than 2 MB.');
         const suppliedFormat = String(tool.input.format ?? path.extname(String(tool.input.name ?? '')).slice(1)).toLowerCase();
         const format = suppliedFormat || (/<!doctype\s+html|<html[\s>]/i.test(rawContent)?'html':'markdown');
         if (!['markdown','md','html','htm','text','txt','code'].includes(format)) throw new Error('Direct Canvas content must be Markdown, HTML, or text.');
         const normalized = format==='md'?'markdown':format==='htm'?'html':format==='txt'?'text':format as CanvasDocument['format'];
         const fallbackName = normalized==='html'?'Generated page.html':'Generated document.md';
-        document = { id:crypto.randomUUID(), name:String(tool.input.name ?? fallbackName), format:normalized, content:rawContent, conversationId, source:'response' };
+        document = { id:existing?.id??crypto.randomUUID(), name:String(tool.input.name ?? fallbackName), format:normalized, content:rawContent, conversationId, source:'response' };
       } else {
         if (!requested) throw new Error('Provide a document path or content to open in Canvas.');
         const ext = path.extname(requested).toLowerCase();
-        if (!['.md','.markdown','.mdx','.html','.htm','.pdf'].includes(ext)) throw new Error('Canvas can open Markdown, HTML, or PDF files.');
+        if (!['.md','.markdown','.mdx','.html','.htm','.pdf','.txt','.json','.js','.ts','.tsx','.jsx','.css','.py','.rs','.go','.c','.cpp','.h','.cs','.java','.xml','.yaml','.yml','.toml','.sql','.sh'].includes(ext)) throw new Error('Canvas can open Markdown, HTML, PDF, text, and source-code files.');
         const file = path.isAbsolute(requested) ? requested : (settingsCache.workspacePath ? (await workspaceFile(requested,false,conversationId)).file : path.resolve(app.getPath('documents'), requested));
         if (!path.isAbsolute(requested) && !settingsCache.workspacePath && !withinRoot(app.getPath('documents'), file)) throw new Error('Without a selected workspace, use a file inside your Documents folder or provide an absolute path.');
         const stat = await fs.stat(file);
         if (!stat.isFile() || stat.size > 24 * 1024 * 1024) throw new Error('Canvas documents must be regular files smaller than 24 MB.');
         document = await canvasDocumentForFile(path.resolve(file),path.isAbsolute(requested)?'local':'workspace',conversationId);
       }
+      await serializeMutation('conversations',async()=>{const all=await readConversations();const chat=all.find(item=>item.id===conversationId);const owner=chat?[...chat.messages].reverse().find(message=>message.role==='assistant'):undefined;if(owner){owner.canvasDocuments??=[];const index=owner.canvasDocuments.findIndex(item=>item.id===document.id);if(index>=0)owner.canvasDocuments[index]={...document};else owner.canvasDocuments.push({...document});await writeConversations(all);}});
       if (!win.isDestroyed()) win.webContents.send('ollama:stream',{conversationId,type:'canvas',canvas:document});
-      return { output:'Opened ' + document.name + ' in Orion Canvas.', success:true };
+      return { output:JSON.stringify({status:'displayed',id:document.id,name:document.name,format:document.format,characters:document.content.length,message:'Document is visible in Canvas and can be reopened from this chat. Do not repeat the full content in chat.'}), success:true };
     } catch (error) { return { output:error instanceof Error?error.message:String(error),success:false }; }
   }
   if (nativeWorkspaceTools.some(candidate => candidate.function.name === tool.name)) {

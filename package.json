@@ -1,6 +1,6 @@
 {
   "name": "orion-local-ai",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "packageManager": "bun@1.4.3",
   "description": "Local-first conversational AI workspace",
@@ -44,7 +44,9 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
       "package.json"
     ],
     "asar": true,

@@ -7,7 +7,7 @@ import 'highlight.js/styles/github-dark.css';
 import DOMPurify from 'dompurify';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
-function applyTheme(theme: AppSettings['theme']) { document.documentElement.dataset.theme = theme; document.body.dataset.theme = theme; document.documentElement.style.colorScheme = theme === 'light' || theme === 'paper' ? 'light' : 'dark'; }
+function applyTheme() { document.documentElement.dataset.theme = 'graphite'; document.body.dataset.theme = 'graphite'; document.documentElement.style.colorScheme = 'dark'; }
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolCallRecord, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, BackendState, GeneratedMedia, WorkspaceReview, WorkspaceStatus, ToolMode, WebResearchSource, AppUpdateState } from '../shared/types';
 import './style.css';
 import './agent.css';
@@ -17,6 +17,8 @@ import { installComposerFrame } from './composerFrame';
 import { createWelcomeArt } from './welcomeArt';
 import { MessageQueue } from '../shared/messageQueue';
 import './messageQueue.css';
+import { installPanelLayout } from './panelLayout';
+import { installComposerSelects } from './composerSelect';
 installOgsActions();
 
 const $ = <T extends HTMLElement>(id: string) => {
@@ -31,6 +33,8 @@ for (const [file, language] of Object.entries(languageModules)) {
 }
 const chatBox = $('messages'), chatScroller = $('chat'), historyBox = $('history'), promptBox = $('prompt') as HTMLTextAreaElement, composer = $('composer');
 installComposerFrame(composer);
+installPanelLayout();
+installComposerSelects();
 const queueContainer = document.createElement('section'); queueContainer.className = 'message-queue'; queueContainer.hidden = true; queueContainer.setAttribute('aria-label', 'Queued messages');
 composer.before(queueContainer);
 const approvalControl = document.createElement('select');
@@ -278,18 +282,22 @@ function safeWebResearchSource(input: WebResearchSource): WebResearchSource | nu
     status: input.status === 'reading' || input.status === 'read' || input.status === 'error' ? input.status : 'error'
   };
 }
+let canvasSelectedQuote='';
 let canvasMode:'source'|'preview'|'diff'='preview';
 function syncCanvasToggle(){const open=!($('canvas-sidebar') as HTMLElement).hidden,button=$('canvas-open'),arrow=$('canvas-toggle-arrow'),anchor=$('canvas-toggle-anchor'),header=$('canvas-header');button.setAttribute('aria-pressed',String(open));button.setAttribute('aria-label',open?'Hide Canvas':'Show Canvas');button.title=open?'Hide Canvas':'Show Canvas';button.classList.remove('active');arrow?.setAttribute('d',open?'M12 12l5 4-5 4':'M12 12l-5 4 5 4');if(open)header.insertBefore(button,header.firstChild);else anchor.parentElement?.insertBefore(button,anchor);}
-function storeCanvasSession() { const key=canvasDocument?.conversationId;if(!key||!canvasDocument)return;canvasSessions.set(key,{document:{...canvasDocument},notes:canvasNotes.map(note=>({...note})),previous:canvasPrevious,previousNotes:canvasPreviousNotes.map(note=>({...note})),mode:canvasMode}); }
-function switchCanvasConversation(conversationId?:string) { storeCanvasSession();pendingCanvasReview=null;canvasReviewAttachment=undefined;const session=conversationId?canvasSessions.get(conversationId):undefined;if(!session){canvasDocument=null;canvasNotes=[];canvasPrevious=null;canvasPreviousNotes=[];$('canvas-sidebar').hidden=true;document.body.classList.remove('canvas-open');syncCanvasToggle();return;}canvasDocument={...session.document};canvasNotes=session.notes.map(note=>({...note}));canvasPrevious=session.previous;canvasPreviousNotes=session.previousNotes.map(note=>({...note}));canvasMode=session.mode;$('canvas-name').textContent=canvasDocument.name;$('canvas-sidebar').hidden=false;document.body.classList.add('canvas-open');syncCanvasToggle();renderCanvas(); }
-function showCanvas(documentValue:CanvasDocument, mode:'source'|'preview'|'diff'='preview') { const conversationId=documentValue.conversationId??current?.id;if(!conversationId||current?.id!==conversationId)return;canvasDocument={...documentValue,conversationId}; canvasMode=mode; canvasNotes=[]; canvasPrevious=null;canvasPreviousNotes=[]; $('canvas-name').textContent=documentValue.name; $('canvas-sidebar').hidden=false; document.body.classList.add('canvas-open'); syncCanvasToggle();renderCanvas();storeCanvasSession(); }
+let canvasSaveTimer:ReturnType<typeof setTimeout>|undefined;
+function storeCanvasSession() { const key=canvasDocument?.conversationId;if(!key||!canvasDocument)return;
+  if(current?.id===key){const doc=canvasDocument;let owner=[...current.messages].reverse().find(message=>message.canvasDocuments?.some(item=>item.id===doc.id));if(!owner)owner=[...current.messages].reverse().find(message=>message.role==='assistant');if(owner){owner.canvasDocuments??=[];const index=owner.canvasDocuments.findIndex(item=>item.id===doc.id);if(index>=0)owner.canvasDocuments[index]={...doc};else owner.canvasDocuments.push({...doc});const conversation=current;if(canvasSaveTimer)clearTimeout(canvasSaveTimer);canvasSaveTimer=setTimeout(()=>void save(conversation),350);}}
+canvasSessions.set(key,{document:{...canvasDocument},notes:canvasNotes.map(note=>({...note})),previous:canvasPrevious,previousNotes:canvasPreviousNotes.map(note=>({...note})),mode:canvasMode}); }
+function switchCanvasConversation(conversationId?:string) { storeCanvasSession();pendingCanvasReview=null;canvasReviewAttachment=undefined;const saved=current&&current.id===conversationId?current.messages.flatMap(message=>message.canvasDocuments??[]).at(-1):undefined;const session=conversationId?(canvasSessions.get(conversationId)??(saved?{document:saved,notes:[],previous:null,previousNotes:[],mode:'preview' as const}:undefined)):undefined;if(!session){canvasDocument=null;canvasNotes=[];canvasPrevious=null;canvasPreviousNotes=[];$('canvas-sidebar').hidden=true;document.body.classList.remove('canvas-open');syncCanvasToggle();return;}canvasDocument={...session.document};canvasNotes=session.notes.map(note=>({...note}));canvasPrevious=session.previous;canvasPreviousNotes=session.previousNotes.map(note=>({...note}));canvasMode=session.mode;$('canvas-name').textContent=canvasDocument.name;$('canvas-sidebar').hidden=false;document.body.classList.add('canvas-open');syncCanvasToggle();renderCanvas(); }
+function showCanvas(documentValue:CanvasDocument, mode:'source'|'preview'|'diff'='preview') { const conversationId=documentValue.conversationId??current?.id;if(!conversationId)return;if(current?.id!==conversationId){canvasSessions.set(conversationId,{document:{...documentValue,conversationId},notes:[],previous:null,previousNotes:[],mode});return;}canvasDocument={...documentValue,conversationId}; canvasMode=mode; canvasNotes=[]; canvasPrevious=null;canvasPreviousNotes=[]; $('canvas-name').textContent=documentValue.name; $('canvas-sidebar').hidden=false; document.body.classList.add('canvas-open'); syncCanvasToggle();renderCanvas();storeCanvasSession(); }
 function toggleCanvas(){const panel=$('canvas-sidebar');panel.hidden=!panel.hidden;document.body.classList.toggle('canvas-open',!panel.hidden);syncCanvasToggle();if(!panel.hidden)renderCanvas();}
 function renderCanvas() {
   const doc=canvasDocument, body=$('canvas-body'), editor=$('canvas-editor') as HTMLTextAreaElement;
-  if(!doc){const empty=document.createElement('div');empty.className='canvas-empty';const icon=document.createElement('div');icon.className='canvas-empty-icon';icon.textContent='▤';const title=document.createElement('strong');title.textContent='Canvas is ready';const help=document.createElement('span');help.textContent='Canvas is always available. Use the Canvas button on an AI code block, ask Orion to open or create a document, or drop a file here.';empty.append(icon,title,help);body.replaceChildren(empty);editor.hidden=true;document.querySelector('.canvas-toolbar')?.setAttribute('hidden','');document.querySelector('.canvas-feedback')?.setAttribute('hidden','');$('canvas-copy').setAttribute('disabled','');$('canvas-download').setAttribute('disabled','');return;}document.querySelector('.canvas-toolbar')?.removeAttribute('hidden');document.querySelector('.canvas-feedback')?.removeAttribute('hidden');$('canvas-copy').removeAttribute('disabled');$('canvas-download').removeAttribute('disabled');
-  $('canvas-name').textContent=doc.name; editor.hidden=doc.format==='pdf'||doc.format==='image';editor.value=editor.hidden?'':doc.content; $('canvas-format-tools').toggleAttribute('hidden',doc.format!=='html');
+  if(!doc){const empty=document.createElement('div');empty.className='canvas-empty';const icon=document.createElement('div');icon.className='canvas-empty-icon';icon.textContent='▤';const title=document.createElement('strong');title.textContent='Canvas is ready';const help=document.createElement('span');help.textContent='Canvas is always available. Use the Canvas button on an AI code block, ask Orion to open or create a document, or drop a file here.';empty.append(icon,title,help);editor.remove();body.replaceChildren(empty);body.append(editor);editor.hidden=true;document.querySelector('.canvas-toolbar')?.setAttribute('hidden','');document.querySelector('.canvas-feedback')?.setAttribute('hidden','');$('canvas-copy').setAttribute('disabled','');$('canvas-download').setAttribute('disabled','');return;}document.querySelector('.canvas-toolbar')?.removeAttribute('hidden');document.querySelector('.canvas-feedback')?.removeAttribute('hidden');$('canvas-copy').removeAttribute('disabled');$('canvas-download').removeAttribute('disabled');
+  $('canvas-undo').toggleAttribute('disabled',canvasPrevious===null);$('canvas-name').textContent=doc.name; editor.hidden=canvasMode!=='source'||doc.format==='pdf'||doc.format==='image';editor.value=editor.hidden?'':doc.content; $('canvas-format-tools').toggleAttribute('hidden',doc.format==='pdf'||doc.format==='image');
   $('canvas-code').classList.toggle('active',canvasMode==='source');$('canvas-preview').classList.toggle('active',canvasMode==='preview');
-  body.replaceChildren();
+  editor.remove();body.replaceChildren();body.append(editor);
   if(canvasMode==='diff'&&canvasPrevious!==null){
     const panes=document.createElement('div');panes.className='canvas-diff';
     const left=document.createElement('section');left.className='canvas-diff-pane';const lh=document.createElement('h4');lh.textContent='Before · your edits and notes';const lp=document.createElement('pre');lp.textContent=canvasPrevious;left.append(lh,lp);if(canvasPreviousNotes.length){const noteWrap=document.createElement('div');noteWrap.className='canvas-diff-notes';for(const note of canvasPreviousNotes){const item=document.createElement('p');item.textContent=`${note.kind==='remove'?'Remove':'Comment'}${note.quote?` · “${note.quote}”`:''}: ${note.text}`;noteWrap.append(item);}left.append(noteWrap);}
@@ -303,7 +311,7 @@ function renderCanvas() {
   } else if(doc.format==='markdown'&&canvasMode==='preview'){
     const preview=document.createElement('article');preview.className='canvas-markdown';preview.replaceChildren(safeMarkdownFragment(doc.content));body.append(preview);
   } else {
-    const source=document.createElement('textarea');source.className='canvas-code-view';source.readOnly=true;source.value=doc.content;source.setAttribute('aria-label','Document source');body.append(source);
+    const source=document.createElement('textarea');source.className='canvas-code-view';source.readOnly=true;source.value=doc.content;source.setAttribute('aria-label','Document source');if(canvasMode!=='source')body.append(source);
   }
   const notes=$('canvas-notes');notes.replaceChildren(...canvasNotes.map((note,index)=>{const row=document.createElement('div');row.className='canvas-note-item';const label=document.createElement('b');label.textContent=note.kind==='remove'?'Remove':'Comment';const copy=document.createElement('span');copy.textContent=`${note.quote?`“${note.quote.slice(0,90)}” · `:''}${note.text}`;const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='Remove note';remove.onclick=()=>{canvasNotes.splice(index,1);renderCanvas();};row.append(label,copy,remove);return row;}));
 }
@@ -674,9 +682,9 @@ function renderMessage(active: Conversation, message: Message) {
       title.className = 'tool-title';
       const label = document.createElement('span');
       label.className = 'tool-name';
-      label.dataset.glyph = call.name === 'create_image' ? '✦' : /search|web_fetch|browser_open/i.test(call.name) ? '⌕' : /file|workspace|canvas/i.test(call.name) ? '▤' : /command|run/i.test(call.name) ? '›_' : '·';
+      label.dataset.glyph = (call.name === 'create_image' || call.name === 'create_video') ? '✦' : /search|web_fetch|browser_open/i.test(call.name) ? '⌕' : /file|workspace|canvas/i.test(call.name) ? '▤' : /command|run/i.test(call.name) ? '›_' : '·';
       const toolNames: Record<string, string> = { model_compatibility: 'Checking model compatibility', ask_user_question: 'Asked a question', workspace_list: 'Listed files', workspace_search: 'Searched files', workspace_read: 'Read file', workspace_write: 'Wrote file', workspace_edit: 'Edited file', workspace_run: 'Ran command', read_file: 'Read file', write_file: 'Wrote file', run_command: 'Ran command', search_files: 'Searched files', create_image: 'Created media', search_memory: 'Searched memory', search_web: 'Searched the web', browser_open: 'Opened browser', browser_control: 'Used browser' };
-      label.textContent = call.name === 'create_image' ? `Create ${call.mediaType ?? call.input.kind ?? 'image'}` : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
+      label.textContent = (call.name === 'create_image' || call.name === 'create_video') ? `Create ${call.mediaType ?? (call.name === 'create_video' ? 'video' : call.input.kind ?? 'image')}` : toolNames[call.name] ?? call.name.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ').replaceAll('-', ' ');
       const heading = document.createElement('span'); heading.className = 'tool-heading'; heading.append(label);
       const detailValue = call.name === 'workspace_run' || call.name === 'run_command' ? call.input.command
         : call.name === 'workspace_search' || call.name === 'search_files' || call.name === 'search_memory' || call.name === 'search_web' ? call.input.query
@@ -688,7 +696,7 @@ function renderMessage(active: Conversation, message: Message) {
       title.append(heading);
       const status = document.createElement('span');
       status.className = `tool-status ${call.status}`;
-      status.textContent = call.status === 'running' ? (call.name === 'create_image' && call.imagePath ? 'Restoring model' : 'Running') : call.status === 'pending' ? 'Needs approval' : call.status === 'completed' ? 'Completed' : call.status === 'denied' ? 'Declined' : 'Failed';
+      status.textContent = call.status === 'running' ? ((call.name === 'create_image' || call.name === 'create_video') && call.imagePath ? 'Restoring model' : 'Running') : call.status === 'pending' ? 'Needs approval' : call.status === 'completed' ? 'Completed' : call.status === 'denied' ? 'Declined' : 'Failed';
       title.title = status.textContent;
       title.append(status);
       card.append(title);
@@ -709,13 +717,13 @@ function renderMessage(active: Conversation, message: Message) {
       }
       if (!body.childNodes.length) { const empty = document.createElement('p'); empty.className = 'tool-call-description'; empty.textContent = 'No additional input.'; body.append(empty); }
       card.append(body); event.append(card);
-      if (call.output !== undefined && call.name !== 'create_image') {
+      if (call.output !== undefined && call.name !== 'create_image' && call.name !== 'create_video') {
         const result = document.createElement('div'); result.className = 'tool-result-inline';
         result.replaceChildren(safeMarkdownFragment(call.output, live));
         wireCodeButtons(result, active);
         event.append(result);
       }
-      if (call.name === 'create_image') {
+      if ((call.name === 'create_image' || call.name === 'create_video')) {
         const generation=document.createElement('div');generation.className='tool-generation-card';
         const visual=document.createElement('div');visual.className=`generation-visual tool-generation-stage${call.imagePath?' is-complete':''}`;visual.setAttribute('role','status');visual.setAttribute('aria-label',call.imagePath?'Generated media ready':call.status==='running'?'Generating media':'Media generation');
         if(call.imagePath&&call.mediaType){const loading=generationDotField();visual.append(loading);const percent=document.createElement('span');percent.className='generation-percent';percent.textContent=call.status==='running'?'Restoring model…':'Ready';visual.append(percent);void generatedMediaUrl(call.imagePath).then(src=>{if(!visual.isConnected)return;const media=call.mediaType==='video'?document.createElement('video'):document.createElement('img');media.className='generation-output tool-generation-output';if(media instanceof HTMLVideoElement){media.controls=true;media.playsInline=true;}else media.alt='Generated with Orion';media.src=src;visual.replaceChildren(media);}).catch(()=>undefined);}
@@ -741,6 +749,7 @@ function renderMessage(active: Conversation, message: Message) {
   body.dataset.contentLength = String(message.content.length);
   wireCodeButtons(body, active);
   article.append(body);
+  for(const doc of message.canvasDocuments??[]){const open=document.createElement('button');open.type='button';open.className='canvas-reopen';open.textContent='▤  '+doc.name+' · Open in Canvas';open.onclick=()=>showCanvas(doc);article.append(open);}
   const footer = document.createElement('div'); footer.className = 'message-footer';
   const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'message-copy'; copy.textContent = 'Copy'; copy.onclick = async () => { await navigator.clipboard.writeText(message.content); copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy', 1200); }; footer.append(copy); if(message.role==='assistant'){const html=message.content.match(/```(?:html|htm)\s*([\s\S]*?)```/i),md=message.content.match(/```(?:markdown|md)\s*([\s\S]*?)```/i),plainDoc=!html&&!md&&message.content.trim().startsWith('# ')&&message.content.length>250;if(html||md||plainDoc){const open=document.createElement('button');open.type='button';open.className='message-copy';open.textContent='Open in Canvas';open.onclick=()=>showCanvas({id:crypto.randomUUID(),name:html?'Generated page.html':'Generated document.md',format:html?'html':'markdown',content:html?html[1]!.trim():md?md[1]!.trim():message.content,conversationId:active.id,source:'response'});footer.append(open);}}
   if (message.role === 'assistant' && message.generationMs !== undefined) { const elapsed = document.createElement('span'); elapsed.className = 'message-metric'; elapsed.textContent = `${(message.generationMs / 1000).toFixed(1)}s`; footer.append(elapsed); }
@@ -842,7 +851,7 @@ async function refreshModelControls(){
  const max=Math.min(131072,Math.max(1024,info.contextLength)),values=[1024,2048,4096,8192,16384,32768,65536,131072].filter(n=>n<=max);
  if(!values.includes(settings.contextWindow)&&settings.contextWindow<=max)values.push(settings.contextWindow);values.sort((a,b)=>a-b);
  select.replaceChildren(...values.map(n=>new Option(Math.round(n/1024)+'K',String(n))));
- if(settings.contextWindow>max){settings.contextWindow=max;await window.orion.saveSettings(settings);}select.value=String(settings.contextWindow);$('context-meter').textContent='— / '+Math.round(settings.contextWindow/1024)+'K';
+ if(settings.contextWindow>max){settings.contextWindow=max;await window.orion.saveSettings(settings);}select.value=String(settings.contextWindow);select.dispatchEvent(new Event('orion:select-sync'));$('context-meter').textContent='— / '+Math.round(settings.contextWindow/1024)+'K';
 }
 async function refreshModels(refreshProviders = false) { const [available] = await Promise.all([window.orion.listModels().catch(() => []), window.orion.ollamaStatus().then(connected => { ollamaConnected = connected; }).catch(() => { ollamaConnected = false; })]); models = available; setModels(); await refreshModelControls(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : ollamaConnected ? 'Connected' : 'Disconnected · Error'; if (activeView === 'Models' && (modelTab !== 'providers' || refreshProviders)) renderModelsView(); }
 const gigabytes = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
@@ -934,7 +943,14 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   await save(target, true); if (current?.id === target.id) renderMessages(true);
   off = window.orion.onStream(e => {
     if (e.conversationId !== target.id) return;
-    if(e.type==='canvas'&&e.canvas){showCanvas(e.canvas);return;}
+    if(e.type==='canvas'&&e.canvas){
+      const message=target.messages.at(-1);
+      if(message){message.canvasDocuments??=[];const index=message.canvasDocuments.findIndex(doc=>doc.id===e.canvas!.id||doc.name===e.canvas!.name);if(index>=0)message.canvasDocuments[index]=e.canvas;else message.canvasDocuments.push(e.canvas);}
+      const review=pendingCanvasReview;
+      showCanvas(e.canvas);
+      if(review&&review.document.conversationId===target.id){if(current?.id===target.id){canvasPrevious=review.edited;canvasPreviousNotes=review.notes;storeCanvasSession();}pendingCanvasReview=null;}
+      void save(target);if(current?.id===target.id)renderMessages();return;
+    }
     const assistant = target.messages.at(-1); if (!assistant) return;
     if (e.type === 'reasoning') generationStatus = 'Thinking…';
     else if (e.type === 'token' || e.type === 'replace') generationStatus = 'Writing response…';
@@ -950,12 +966,12 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     if (e.type === 'done') {
       assistant.generationMs = performance.now() - generationStarted; if (e.tokensPerSecond !== undefined) assistant.tokensPerSecond = e.tokensPerSecond;
       const review=pendingCanvasReview;
-      if(review&&target.id===review.document.conversationId){
+      if(review&&target.id===review.document.conversationId&&assistant.content.trim()){
         const updated=revisedCanvasText(assistant.content),binarySource=review.document.format==='pdf'||review.document.format==='image';
         canvasPrevious=review.edited||review.document.textContent||`Original ${review.document.format} file (${review.document.name})`;canvasPreviousNotes=review.notes;
         const revisedName=binarySource?`${review.document.name}.revised.md`:review.document.name,revisedPath=binarySource&&review.document.path?`${review.document.path}.revised.md`:review.document.path;
-        canvasDocument={...review.document,name:revisedName,format:binarySource?'markdown':review.document.format,content:updated,textContent:undefined,attachment:undefined,path:revisedPath};canvasNotes=[];canvasMode='diff';pendingCanvasReview=null;renderCanvas();storeCanvasSession();
-        if(review.document.source==='workspace'&&revisedPath)void window.orion.saveCanvasRevision(target.id,revisedPath,updated).then(()=>showNotice('The revised document is in the workspace review. Approve the review to apply it to your project folder.','Canvas revision ready')).catch(error=>showNotice(error instanceof Error?error.message:String(error),'Could not stage Canvas revision'));
+        canvasDocument={...review.document,name:revisedName,format:binarySource?'markdown':review.document.format,content:updated,textContent:undefined,attachment:undefined,path:revisedPath};canvasNotes=[];canvasMode='preview';pendingCanvasReview=null;assistant.canvasDocuments=[{...canvasDocument}];if(current?.id===target.id){$('canvas-sidebar').hidden=false;document.body.classList.add('canvas-open');syncCanvasToggle();renderCanvas();storeCanvasSession();}
+
       }
       void save(target);
     }
@@ -1047,15 +1063,32 @@ document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => butt
   if (view === 'Models') { await refreshLlamaStatus(); installedModels=await window.orion.listInstalledModels(); await refreshModels(); void loadPopularHubModels('conversational'); }
   if (view === 'Create') { try { const entered=await window.orion.enterCreate(); createState=entered.state; installedModels=await window.orion.listInstalledModels(); await refreshGeneratedGallery(); renderMessages(true); if(entered.showInstallPrompt) ($('engine-install-dialog') as HTMLDialogElement).showModal(); } catch(error) { createState={installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown'};renderCreateView(); } }
 });
+  $('canvas-body').addEventListener('pointerup',()=>{const editor=$('canvas-editor') as HTMLTextAreaElement;const selection=window.getSelection();canvasSelectedQuote=!editor.hidden?editor.value.slice(editor.selectionStart,editor.selectionEnd):(selection?.anchorNode&&$('canvas-body').contains(selection.anchorNode)?selection.toString():'');});
+  $('canvas-note').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('canvas-give').click();}});
   $('canvas-open').onclick=()=>toggleCanvas();
     const canvasBody=$('canvas-body');canvasBody.addEventListener('dragover',event=>{event.preventDefault();canvasBody.classList.add('canvas-drop-active');});canvasBody.addEventListener('dragleave',()=>canvasBody.classList.remove('canvas-drop-active'));canvasBody.addEventListener('drop',async event=>{event.preventDefault();canvasBody.classList.remove('canvas-drop-active');const file=(event as DragEvent).dataTransfer?.files[0];if(!file)return;const filePath=window.orion.getPathForFile(file);if(!filePath)return;try{showCanvas(await window.orion.openCanvasPath(filePath));}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not open dropped file');}});
   $('canvas-code').onclick=()=>{canvasMode='source';renderCanvas();};$('canvas-preview').onclick=()=>{canvasMode='preview';renderCanvas();};
+  $('canvas-undo').onclick=()=>{if(!canvasDocument||canvasPrevious===null)return;const latest=canvasDocument.content;canvasDocument.content=canvasPrevious;canvasPrevious=latest;canvasMode='preview';renderCanvas();storeCanvasSession();};
   $('canvas-copy').onclick=async()=>{if(!canvasDocument)return;try{await navigator.clipboard.writeText(canvasDocument.format==='pdf'?'PDF files cannot be copied as text.':canvasDocument.content);showNotice('Canvas content copied.','Copied');}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not copy');}};
   $('canvas-download').onclick=()=>{if(!canvasDocument)return;const doc=canvasDocument,blob=new Blob([doc.format==='pdf'?Uint8Array.from(atob(doc.content),c=>c.charCodeAt(0)):doc.content],{type:doc.format==='pdf'?'application/pdf':doc.format==='html'?'text/html;charset=utf-8':doc.format==='markdown'?'text/markdown;charset=utf-8':'text/plain;charset=utf-8'});const anchor=document.createElement('a');anchor.href=URL.createObjectURL(blob);anchor.download=doc.name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),1000);};
   $('canvas-editor').addEventListener('input',()=>{if(canvasDocument){canvasDocument.content=($('canvas-editor') as HTMLTextAreaElement).value;storeCanvasSession();}});
-  $('canvas-comment').onclick=()=>{if(!canvasDocument)return;const input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!text){showNotice('Write a short comment first.','Add a comment');return;}const editor=$('canvas-editor') as HTMLTextAreaElement,quote=editor.hidden?'':editor.value.slice(editor.selectionStart,editor.selectionEnd);canvasNotes.push({kind:'comment',quote,text});input.value='';renderCanvas();storeCanvasSession();};
-  $('canvas-remove').onclick=()=>{if(!canvasDocument)return;const editor=$('canvas-editor') as HTMLTextAreaElement,quote=editor.hidden?'':editor.value.slice(editor.selectionStart,editor.selectionEnd),input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!quote&&!text){showNotice('Select the text you want removed, or describe what should be removed in the comment field.','Choose text to remove');return;}canvasNotes.push({kind:'remove',quote,text:text||'Please remove this part.'});input.value='';renderCanvas();storeCanvasSession();};
-  $('canvas-give').onclick=async()=>{if(!canvasDocument||streaming)return;const doc={...canvasDocument},notes=[...canvasNotes],edited=doc.format==='pdf'||doc.format==='image'?(doc.textContent??''):($('canvas-editor') as HTMLTextAreaElement).value;pendingCanvasReview={document:doc,notes,edited};canvasReviewAttachment=doc.attachment;const notesText=notes.length?notes.map((note,index)=>`${index+1}. ${note.kind==='remove'?'REMOVE':'COMMENT'}${note.quote?` on this exact text: “${note.quote}”`:''}: ${note.text}`).join('\n'):'No inline comments.';promptBox.value=`Revise the attached document using my edits and notes. Return the complete revised document source only, without an outer code fence or explanation. Preserve the document's purpose and structure.\n\nFile: ${doc.name}\nFormat: ${doc.format}\n\nMy inline notes:\n${notesText}\n\nCurrent edited document source:\n${edited.slice(0,1_500_000)}`;await sendMessage();};
+  $('canvas-comment').onclick=()=>{if(!canvasDocument)return;const input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!text){showNotice('Write a short comment first.','Add a comment');return;}const editor=$('canvas-editor') as HTMLTextAreaElement,quote=canvasSelectedQuote||(!editor.hidden?editor.value.slice(editor.selectionStart,editor.selectionEnd):'');canvasNotes.push({kind:'comment',quote,text});input.value='';canvasSelectedQuote='';renderCanvas();storeCanvasSession();};
+  $('canvas-remove').onclick=()=>{if(!canvasDocument)return;const editor=$('canvas-editor') as HTMLTextAreaElement,quote=canvasSelectedQuote||(!editor.hidden?editor.value.slice(editor.selectionStart,editor.selectionEnd):''),input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!quote&&!text){showNotice('Select the text you want removed, or describe what should be removed in the comment field.','Choose text to remove');return;}canvasNotes.push({kind:'remove',quote,text:text||'Please remove this part.'});input.value='';canvasSelectedQuote='';renderCanvas();storeCanvasSession();};
+  $('canvas-give').onclick=async()=>{
+    if(!canvasDocument||streaming)return;
+    const input=$('canvas-note') as HTMLInputElement,request=input.value.trim();
+    if(!request&&!canvasNotes.length){input.focus();return;}
+    const doc={...canvasDocument},notes=canvasNotes.map(note=>({...note}));
+    if(request)notes.push({kind:'comment',quote:canvasSelectedQuote,text:request});
+    const edited=doc.format==='pdf'||doc.format==='image'?(doc.textContent??''):doc.content;
+    pendingCanvasReview={document:doc,notes,edited};canvasReviewAttachment=doc.attachment;
+    const notesText=notes.map((note,index)=>String(index+1)+'. '+(note.kind==='remove'?'REMOVE':'CHANGE')+(note.quote?' on this exact text: “'+note.quote+'”':'')+': '+note.text).join('\n');
+    if(canvasSaveTimer){clearTimeout(canvasSaveTimer);canvasSaveTimer=undefined;}if(current)await save(current);
+    const draft=promptBox.value;
+    promptBox.value='Revise this Canvas document using my instructions below. Preserve everything unrelated. Use canvas_open with the complete revised content, name, and format to display the finished revision in Canvas. Do not supply partial content or placeholders. If you cannot call the tool, return the complete revised document source only.\n\nFile: '+doc.name+'\nFormat: '+doc.format+'\n\nRequested changes:\n'+notesText+'\n\nCurrent document source:\n'+edited;
+    input.value='';canvasSelectedQuote='';
+    try{await sendMessage();}finally{if(!promptBox.value){promptBox.value=draft;promptBox.dispatchEvent(new Event('input',{bubbles:true}));}}
+  };
   $('attach').onclick = async () => {
     try {
       attachments = await window.orion.selectFiles();
@@ -1125,7 +1158,6 @@ function organizeSettingsPanel() {
   const subagentHelp = all.find(node => node.matches('.muted') && node.textContent?.startsWith('The first subagent'));
   const systemPrompt = all.find(node => node.matches('#settings-system-prompt') || node.querySelector('#settings-system-prompt'));
   const groups: Array<{ name: string; ids: string[]; extras: HTMLElement[]; description: string }> = [
-    { name: 'Appearance', ids: ['theme'], extras: [], description: 'Choose the color theme used throughout Orion.' },
     { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
     { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
     { name: 'Startup', ids: ['keep-in-tray', 'start-new-conversation'], extras: [], description: 'Choose what Orion does when its window closes or opens.' },
@@ -1159,9 +1191,8 @@ async function loadSettingsSystemPrompt() {
   try { output.textContent = await window.orion.getSystemPrompt(($('model') as HTMLSelectElement).value, chatMode); }
   catch (error) { output.textContent = `Could not load the system prompt: ${error instanceof Error ? error.message : String(error)}`; }
 }
-$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); settings = await window.orion.settings(); ($('theme') as HTMLSelectElement).value = settings.theme; await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
-($('theme') as HTMLSelectElement).onchange = event => applyTheme((event.currentTarget as HTMLSelectElement).value as AppSettings['theme']);
-settingsDialog.addEventListener('close', () => applyTheme(settings.theme));
+$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
+settingsDialog.addEventListener('close', () => applyTheme());
 $('workspace-browse').onclick = async () => { const selected = await window.orion.selectWorkspace(); if (selected) ($('workspace-path') as HTMLInputElement).value = selected; };
 $('rebuild-memory').onclick = () => { $('memory-progress').textContent = 'Re-indexing saved conversations…'; void window.orion.rebuildMemory(); };
 const embeddingButton = $('install-memory-embedding') as HTMLButtonElement;
@@ -1169,7 +1200,7 @@ embeddingButton.onclick = async () => { embeddingButton.disabled = true; $('memo
 window.orion.onMemoryProgress(progress => { $('memory-progress').textContent = progress.error ? `Memory re-index failed: ${progress.error}` : progress.status ?? (progress.completed >= progress.total ? `Memory index ready · ${progress.total} conversations indexed.` : `Indexing conversations · ${progress.completed} / ${progress.total}`); void renderMemoryUsage(); });
 $('settings-close').addEventListener('click', () => settingsDialog.close());
 $('settings-cancel').addEventListener('click', () => settingsDialog.close());
-$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.theme = ($('theme') as HTMLSelectElement).value as AppSettings['theme']; settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(settings.theme); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
+$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
 window.orion.onDownloadProgress(progress=>{downloadProgress.set(progress.id,progress);if(progress.phase!=='downloading')cancellingModelDownloads.delete(progress.id);renderDownloadActivity();if(progress.repo==='Orion llama.cpp'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshLlamaStatus(),2500);if(progress.phase!=='downloading')window.setTimeout(()=>{downloadProgress.delete(progress.id);renderDownloadActivity();},progress.phase==='complete'?6000:progress.phase==='cancelled'?3500:12000);});
 const invokeDialog=$('engine-install-dialog') as HTMLDialogElement;
 async function startEngineInstall() {
@@ -1517,7 +1548,7 @@ $('job-form').addEventListener('submit', async e => {
   } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; }
 });
 function ensureStartupPreferenceControl() { if (document.getElementById('start-new-conversation')) return; const label = document.createElement('label'); label.className = 'job-check';const input=document.createElement('input');input.id='start-new-conversation';input.type='checkbox';const description=document.createElement('span');description.textContent='Start a new conversation when Orion opens (otherwise restore the last chat).';label.append(input,description);$('keep-in-tray').closest('label')?.before(label); }
-async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(settings.theme); conversations = await window.orion.listConversations(); await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
+async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(); conversations = await window.orion.listConversations(); await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
 ensureStartupPreferenceControl();
 window.history.scrollRestoration = 'manual';
 void init();
