@@ -17,7 +17,8 @@
     "start": "bunx --bun electron .",
     "typecheck": "bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json",
     "dist": "bun run build && bunx --bun electron-builder && bun run checksums",
-    "checksums": "bun scripts/write-checksums.mjs"
+    "checksums": "bun scripts/write-checksums.mjs",
+    "icons": "bun scripts/generate-app-icons.mjs"
   },
   "dependencies": {
     "croner": "^10.0.1",
@@ -58,6 +59,10 @@
       {
         "from": "LICENSE",
         "to": "LICENSE"
+      },
+      {
+        "from": "build/icons/orion-512.png",
+        "to": "icons/orion-512.png"
       }
     ],
     "mac": {

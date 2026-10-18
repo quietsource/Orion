@@ -98,6 +98,34 @@ function gpuRenderer(canvas: HTMLCanvasElement): { draw(time: number): void; dis
   }
 }
 
+/** The official icon is a frozen frame of the same geometry and lighting. */
+export function captureLiquidMetalStill(size = 2048, time = 1.8): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const renderer = gpuRenderer(canvas);
+  if (!renderer) throw new Error('WebGL is required to render the official liquid-metal icon.');
+  try {
+    renderer.draw(time);
+    const output = document.createElement('canvas'); output.width = size; output.height = size;
+    const context = output.getContext('2d');
+    if (!context) throw new Error('Could not prepare transparent icon output.');
+    context.drawImage(canvas, 0, 0);
+    const pixels = context.getImageData(0, 0, size, size).data;
+    let left = size, top = size, right = -1, bottom = -1;
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      if (pixels[(y * size + x) * 4 + 3]! > 2) {
+        left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y);
+      }
+    }
+    if (right < left) throw new Error('The liquid-metal render is empty.');
+    const width = right - left + 1, height = bottom - top + 1, scale = size * .9 / Math.max(width, height);
+    context.clearRect(0, 0, size, size);
+    context.drawImage(canvas, left, top, width, height, (size - width * scale) / 2, (size - height * scale) / 2, width * scale, height * scale);
+    return output.toDataURL('image/png');
+  }
+  finally { renderer.dispose(); }
+}
+
 /** An actual deforming surface, rather than an image moved by CSS. */
 export function createWelcomeArt() {
   disposeCurrent?.();

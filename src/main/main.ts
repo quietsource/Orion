@@ -501,11 +501,12 @@ function quitOrion() {
   app.quit();
 }
 
+function orionIconPath(size: 32 | 512 = 512) {
+  return app.isPackaged ? path.join(process.resourcesPath, 'icons', 'orion-'+size+'.png') : path.join(app.getAppPath(), 'build/icons/orion-'+size+'.png');
+}
 function ensureTray() {
   if (tray) return true;
-  const iconPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'icons', 'orion-32.png')
-    : path.join(app.getAppPath(), 'build/icons/orion-32.png');
+  const iconPath = orionIconPath(32);
   try {
     const icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) throw new Error(`Tray icon is missing: ${iconPath}`);
@@ -529,7 +530,7 @@ function ensureTray() {
 
 function createWindow() {
   const appRoot = app.getAppPath();
-  win = new BrowserWindow({ width: 1440, height: 940, minWidth: 820, minHeight: 620, backgroundColor: '#09090b', title: 'Orion', frame: false, autoHideMenuBar: true, webPreferences: { preload: path.join(appRoot, 'dist/preload/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  win = new BrowserWindow({ icon: orionIconPath(), width: 1440, height: 940, minWidth: 820, minHeight: 620, backgroundColor: '#09090b', title: 'Orion', frame: false, autoHideMenuBar: true, webPreferences: { preload: path.join(appRoot, 'dist/preload/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   win.removeMenu();
   win.on('close', event => {
     if (appQuitting || closeHandling) return;
@@ -650,7 +651,7 @@ function closeBrowserTab(id: string) {
 }
 function ensureBuiltInBrowser() {
   if (orionBrowser && !orionBrowser.isDestroyed()) return orionBrowser;
-  orionBrowser = new BrowserWindow({ width: 1180, height: 820, minWidth: 720, minHeight: 480, show: false, title: 'Orion Browser', webPreferences: { preload: path.join(app.getAppPath(), 'dist/preload/browserPreload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  orionBrowser = new BrowserWindow({ icon: orionIconPath(), width: 1180, height: 820, minWidth: 720, minHeight: 480, show: false, title: 'Orion Browser', webPreferences: { preload: path.join(app.getAppPath(), 'dist/preload/browserPreload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   orionBrowser.on('resize', browserPageBounds);
   orionBrowser.on('closed', () => { const tabs = [...browserTabs.values()]; browserTabs.clear(); activeBrowserTabId = null; orionBrowser = null; for (const tab of tabs) if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); });
   void orionBrowser.loadFile(path.join(app.getAppPath(), 'dist/renderer/browser.html')).then(() => updateBrowserUi());

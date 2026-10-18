@@ -1,5 +1,6 @@
 # Orion 0.1.8 — Canvas, composer and video creation
 
+- Replace the application, installer, window, and tray icons with a transparent still of Orion’s native liquid-metal artwork.
 - Prevent background model loading: disable historical schedule dispatch at startup and make system-prompt inspection metadata-only. Models load when generation or an explicit compatibility check is requested.
 
 - Align the animated welcome and greeting with the composer center and lift the welcome group slightly above the composer.
