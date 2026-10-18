@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+test/
+*.log
+.DS_Store
+
+tool-directive/
+.npm-audit-report.json
+
+/.release-staging-*/
+/.release-final-*/
