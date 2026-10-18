@@ -1963,13 +1963,14 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role: role === 'system' ? 'user' : role, content, ...(images.length?{images}:{}) })),
           ...agentHistory
         ];
-        const estimatedContextTokens = requestMessages.reduce((total, message) => total + estimateModelChatTokens(JSON.stringify(message), settings.ollamaUrl, input.model) + 4, toolSchemaPromptTokens + 4);
+        if(ogsRepairPrompt)requestMessages.splice(0,requestMessages.length,{role:'system',content:OGS_PROMPT+ogsRepairPrompt},{role:'user',content:'Output only the corrected ogs fenced block now. Use the simple line format.'});
+      const estimatedContextTokens = requestMessages.reduce((total, message) => total + estimateModelChatTokens(JSON.stringify(message), settings.ollamaUrl, input.model) + 4, (ogsRepairPrompt?0:toolSchemaPromptTokens) + 4);
         let promptContextTokens = estimatedContextTokens, generatedContextTokens = 0;
         const reportContextUsage = () => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'context', usedContextTokens: Math.min(contextBudget, promptContextTokens + generatedContextTokens), maxContextTokens: contextBudget });
         reportContextUsage();
         const began = Date.now();
         const apiTools = !ogsRepairPrompt && nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
-        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, settings.temperature, outputReserveTokens,modelInformation.supportsThinking) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: settings.temperature, max_tokens: outputReserveTokens, ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
+        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, ogsRepairPrompt?0.2:settings.temperature, ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens,ogsRepairPrompt?false:modelInformation.supportsThinking) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: ogsRepairPrompt?0.2:settings.temperature, max_tokens: ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens, ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
         const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
         let response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
         if (!remote && !response.ok) {
@@ -1979,7 +1980,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
             response = await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
           }
         }
-        if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. Check the model, API credentials, and provider compatibility.`);
+        if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. ${(await response.text()).slice(0,1800) || "The server returned no error details."}`);
         const reader = response.body.getReader(), decoder = new TextDecoder(); let turnContent = ''; let buffer = '', calls = new Map<number, { id: string; name: string; arguments: string; uiId: string }>(), finishReason = '', completionTokens = 0;
         const publishToolUpdate = (call: { id: string; name: string; arguments: string; uiId: string }, phase: 'started'|'updated') => {
           if (!call.name) return;
@@ -2099,14 +2100,15 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role, content, ...(images.length?{images:images.map(image=>image.slice(image.indexOf(',')+1))}:{}) })),
         ...ollamaAgentHistory
       ];
-      const estimatedContextTokens = requestMessages.reduce((total, message) => total + estimateModelChatTokens(JSON.stringify(message), settings.ollamaUrl, input.model) + 4, toolSchemaPromptTokens + 4);
+      if(ogsRepairPrompt)requestMessages.splice(0,requestMessages.length,{role:'system',content:OGS_PROMPT+ogsRepairPrompt},{role:'user',content:'Output only the corrected ogs fenced block now. Use the simple line format.'});
+      const estimatedContextTokens = requestMessages.reduce((total, message) => total + estimateModelChatTokens(JSON.stringify(message), settings.ollamaUrl, input.model) + 4, (ogsRepairPrompt?0:toolSchemaPromptTokens) + 4);
       let promptContextTokens = estimatedContextTokens, generatedContextTokens = 0;
       const reportContextUsage = () => event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'context', usedContextTokens: Math.min(contextBudget, promptContextTokens + generatedContextTokens), maxContextTokens: contextBudget });
       reportContextUsage();
       const apiTools = !ogsRepairPrompt && nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
       const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: input.model, messages: requestMessages, stream: true, think: modelInformation.supportsThinking ? (typeof modelInformation.thinkingDefault === 'string' ? modelInformation.thinkingDefault : true) : false, ...(apiTools.length ? { tools: apiTools } : {}), options: { temperature: settings.temperature, num_ctx: contextBudget, num_predict: outputReserveTokens } }),
+        body: JSON.stringify({ model: input.model, messages: requestMessages, stream: true, think: !ogsRepairPrompt && modelInformation.supportsThinking ? (typeof modelInformation.thinkingDefault === 'string' ? modelInformation.thinkingDefault : true) : false, ...(apiTools.length ? { tools: apiTools } : {}), options: { temperature: ogsRepairPrompt?0.2:settings.temperature, num_ctx: contextBudget, num_predict: ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens } }),
         signal: requestAbort.signal
       }, 'Ollama chat');
       if (!response.ok || !response.body) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);

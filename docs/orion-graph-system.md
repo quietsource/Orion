@@ -1,10 +1,29 @@
 # Orion Graph System (OGS)
 
-OGS is Orion's native visual format for chat. A model writes a small JSON object in a fenced `ogs` block. Orion validates the data and renders an SVG locally. No remote renderer, JavaScript from the model, graph language runtime, or image generation model is needed.
+OGS is Orion's native visual format for chat. A model writes simple data lines in a fenced `ogs` block. Existing JSON graphs remain supported. Orion validates the data and renders an SVG locally. No remote renderer, JavaScript from the model, graph language runtime, or image generation model is needed.
 
-Graphs remain part of their conversation's message content. They render during streaming when the JSON is complete and again when a saved conversation opens. Incomplete streamed graphs show a receiving state; invalid completed graphs show a specific correction and their source. Copy OGS copies the data, View data exposes the original values and relationships, and Save SVG exports a standalone vector image.
+Graphs remain part of their conversation's message content. They render during streaming as their data arrives and again when a saved conversation opens. Incomplete streamed graphs show a receiving state; invalid completed graphs show a specific correction and their source. Copy OGS copies the data, View data exposes the original values and relationships, and Save SVG exports a standalone vector image.
 
-Every graph needs `type` and `title`. Optional `description` explains the visual. Text is limited to 240 characters per field. Blocks are limited to 60,000 characters; diagrams support 48 nodes and 96 edges; charts support 32 categories and 6 series. Large diagrams scroll rather than clipping labels. Pie charts use one series; radar charts use 3–12 categories. Inputs are finite numbers with an absolute value no greater than one trillion. These bounds keep local rendering predictable.
+Each graph needs a type; Orion supplies a display title if one is omitted. Optional `description` explains the visual. Text is limited to 240 characters per field. Blocks are limited to 60,000 characters; diagrams support 48 nodes and 96 edges; charts support 32 categories and 6 series. Large diagrams scroll rather than clipping labels. Pie charts use one series; radar charts use 3–12 categories. Inputs are finite numbers with an absolute value no greater than one trillion. These bounds keep local rendering predictable.
+
+## Simple format (preferred for local models)
+
+The first line is the type and optional title. Numeric values are never invented or filled in by Orion.
+
+```ogs
+venn Three sets
+sets: Set A | Set B | Set C
+1&2: A and B
+1&3: A and C
+2&3: B and C
+1&2&3: A and B and C
+```
+
+In this format, set numbers start at **1**. In existing JSON graphs, indices still start at **0**.
+
+For charts, use a first line such as `bar Weekly counts`, then one `Label: number` per line. Replace bar with line, pie, or radar. For multiple series, use `labels: Mon | Tue` then `Team A: 10 | 20`. For connections use `diagram Request flow` or `mesh Network`, followed by lines such as `Input -> Model -> Answer`.
+
+Graph-shaped JSON fences also render as graphs. Missing titles and empty optional display fields are normalized locally. A narrowly scoped recovery accepts recognizable malformed Venn overlap objects while preserving explicit set names and index/label pairs. Unreadable or invalid relationships still fail validation. Remaining errors trigger at most two isolated correction requests after the current model turn finishes, without prior tool-call history.
 
 ## Directed diagrams
 
