@@ -409,7 +409,8 @@ async function schedulerTickLocked() {
   } catch (error) { console.error('Orion scheduler tick failed:', error); }
   finally { scheduleTickBusy = false; }
 }
-function schedulerTick() { return serializeMutation('schedules', schedulerTickLocked); }
+// Schedules are paused. Historical jobs must never dispatch background inference.
+function schedulerTick() { return Promise.resolve(); }
 async function getSettings(): Promise<AppSettings> {
   let contents: string;
   try { contents = await readEncryptedText(settingsFile()); }
@@ -542,7 +543,7 @@ function createWindow() {
       return dialog.showMessageBox(owner, {
         type: 'warning',
         message: 'Orion could not create a system tray icon.',
-        detail: 'Scheduled tasks cannot continue after closing Orion. Keep the window open, or quit and stop those tasks.',
+        detail: 'Orion cannot stay in the system tray. Keep the window open, or quit Orion completely.',
         buttons: ['Keep Orion open', 'Quit Orion'],
         defaultId: 0,
         cancelId: 0
@@ -573,7 +574,7 @@ function createWindow() {
     }
   });
   win.webContents.on('render-process-gone', (_event, details) => console.error(`Orion renderer process exited: ${details.reason} (${details.exitCode})`));
-  win.webContents.once('did-finish-load', () => { void schedulerTick(); });
+  // Startup does not dispatch historical schedules or warm any model.
   if (process.env.VITE_DEV_SERVER_URL) void win.loadURL(process.env.VITE_DEV_SERVER_URL); else void win.loadFile(path.join(appRoot, 'dist/renderer/index.html'));
 }
 ipcMain.handle('window:action', (event, action: string) => {
@@ -742,7 +743,7 @@ else {
     const startupSettings = await getSettings();
     void getOrionFS(startupSettings).getStats().catch(error => console.error('OrionFS startup load failed:', error));
     void indexOFSConversationBatch(startupSettings);
-    schedulerTimer = setInterval(() => { if (!appQuitting) void schedulerTick(); }, 15_000);
+    // No scheduler timer while schedules are disabled.
     app.on('activate', showMainWindow);
     readyForSecondInstance = true;
     if (secondInstancePending) showMainWindow();
@@ -1631,7 +1632,9 @@ ipcMain.handle('system:prompt', async (_event, model?: string, mode?: ToolMode) 
   settingsCache = currentSettings;
   const activeModel = typeof model === 'string' && model ? model : currentSettings.selectedModel;
   const remote = resolveProviderModel(await readProviders(), activeModel);
-  if (!remote) await prepareModelToolSupport(activeModel, currentSettings.contextWindow);
+  // Prompt inspection is read-only: never start llama-server or warm a model.
+  // Ollama /api/show reads stored metadata without loading inference weights.
+  if (!remote && activeModel && !activeModel.startsWith('orion-gguf:')) await getModelInformation(activeModel);
   const activeMode: ToolMode = 'chat';
   const promptTools = toolsForModel();
   const native = remote ? remote.provider.tools : installedToolSupport.get(`${currentSettings.ollamaUrl}\0${activeModel}`) === true;

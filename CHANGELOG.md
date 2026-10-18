@@ -1,5 +1,7 @@
 # Orion 0.1.8 — Canvas, composer and video creation
 
+- Prevent background model loading: disable historical schedule dispatch at startup and make system-prompt inspection metadata-only. Models load when generation or an explicit compatibility check is requested.
+
 - Align the animated welcome and greeting with the composer center and lift the welcome group slightly above the composer.
 - Add a dedicated create_video chat tool using the same live media generation card and chat-model handoff as image creation. Image and video generation in Create share the same progress card.
 - Move model and context selectors into the composer beside attachments and token usage, with embedded controls and upward-opening Orion menus.
