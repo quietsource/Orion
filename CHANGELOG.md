@@ -1,3 +1,16 @@
+# Orion 0.1.7 — Native graphs and a simpler composer
+
+- Added Orion Graph System (OGS): native chat diagrams, networks, line and bar charts, pie charts, radar charts, and Venn diagrams from compact model-authored data. Includes data views, copy, SVG export, and bounded local rendering.
+- Structured model instructions around the model's own trained identity, complete implementations, accurate evidence, and the exact tools available for each request.
+- Required complete requested code without placeholders, stubs, TODO substitutions, or intentionally reduced implementations.
+- Removed the plan/checklist card and its tools.
+- Made reasoning automatic through model capabilities and runtime defaults; removed composer thinking and reasoning-level controls.
+- Removed the Web button and footer tagline. Docked the composer to the bottom of chat with a thin outline, no bottom border, and outward curved lower corners.
+- Replaced the welcome text with a live liquid-metal surface on a transparent background. Its 3D geometry and reflections evolve continuously, with reduced-motion support and animation suspended when hidden.
+- Unified the composer body and lower corners in one vector surface for smooth curves, consistent fill, and exact bottom-edge alignment.
+- Added conversation-scoped message queues above the composer: Enter queues during generation, messages continue in order, and each compact card has send-now and delete controls. Send-now waits for cancellation before dispatching; drafts and attachments are retained.
+- Centered a smaller liquid-metal welcome form and subtle greeting above the composer, and removed empty-chat scrolling at desktop and narrow window sizes.
+
 # Orion 0.1.6 — Clearer update status
 
 - Corrected update status messages to describe downloading and opening the installer, matching the visible installation flow.

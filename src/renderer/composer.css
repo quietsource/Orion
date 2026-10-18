@@ -1,0 +1,10 @@
+/* One vector surface draws the fill and the continuous open-bottom outline. */
+.app>.main{border:0;margin-bottom:0;height:calc(100vh - 8px)}
+.composer-wrap{padding:28px 58px 0;bottom:0;background:linear-gradient(to bottom,transparent,var(--bg) 28px)}
+:root[data-theme] .composer,:root[data-theme] .composer:focus-within{--composer-flare:34px;--composer-frame:var(--border);--composer-dock:var(--composer-bg,var(--surface));position:relative;padding:11px 13px 14px;border:0!important;border-radius:0;background:transparent!important;box-shadow:none!important;outline:none!important;isolation:isolate}
+:root[data-theme] .composer:focus-within{--composer-frame:var(--accent)}
+.composer::before,.composer::after{content:none!important}
+.composer-frame{position:absolute;top:0;left:calc(0px - var(--composer-flare));width:calc(100% + var(--composer-flare) + var(--composer-flare));height:100%;overflow:visible;pointer-events:none;z-index:-1}
+.composer-frame-fill{fill:var(--composer-dock)}.composer-frame-outline{fill:none;stroke:var(--composer-frame);stroke-width:1;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:round}
+.composer textarea{height:58px;padding:7px 5px;max-height:180px}.composer-bottom{gap:8px;padding:3px 1px 0}.composer .send{margin-left:auto}.composer .context-meter{margin-left:0}.chat-inner{padding-bottom:165px}
+@media(max-width:760px){.composer-wrap{padding:24px 44px 0;background:linear-gradient(to bottom,transparent,var(--bg) 24px)}:root[data-theme] .composer,:root[data-theme] .composer:focus-within{--composer-flare:28px;padding-bottom:12px}}

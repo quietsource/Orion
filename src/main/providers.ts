@@ -2,7 +2,7 @@ import type { ApiProvider } from '../shared/types';
 
 export type ChatFunctionTool = { type?: string; function: { name: string; description: string; parameters: Record<string, unknown> } };
 
-export function createProviderChatRequest(provider: ApiProvider, model: string, messages: Array<Record<string, unknown>>, tools: ChatFunctionTool[], temperature: number, maxTokens: number, thinking = false, thinkingLevel = 'default') {
+export function createProviderChatRequest(provider: ApiProvider, model: string, messages: Array<Record<string, unknown>>, tools: ChatFunctionTool[], temperature: number, maxTokens: number, thinking = false) {
   const system = String(messages.find(message => message.role === 'system')?.content ?? '');
   if (provider.kind === 'anthropic') {
     const source = messages.filter(message => message.role !== 'system');
@@ -29,7 +29,7 @@ export function createProviderChatRequest(provider: ApiProvider, model: string, 
       }
     }
     const adaptive=/claude-(?:opus|sonnet)-4-(?:6|7|8)/i.test(model);
-    const thinkingConfig=thinking?adaptive?{thinking:{type:'adaptive'},output_config:{effort:thinkingLevel==='default'?'medium':thinkingLevel}}: {thinking:{type:'enabled',budget_tokens:Math.max(1024,Math.min(12000,Math.floor(maxTokens*0.55)))}}:{};
+    const thinkingConfig=thinking?adaptive?{thinking:{type:'adaptive'}}: {thinking:{type:'enabled',budget_tokens:Math.max(1024,Math.min(12000,Math.floor(maxTokens*0.55)))}}:{};
     return { url: `${provider.baseUrl.replace(/\/+$/, '')}/messages`, body: { model, system, messages: contents, max_tokens: maxTokens, temperature:thinking&&!adaptive?1:temperature, stream: true, ...thinkingConfig, ...(tools.length ? { tools: tools.map(tool => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters })) } : {}) } };
   }
   if (provider.kind === 'google') {
@@ -58,12 +58,10 @@ export function createProviderChatRequest(provider: ApiProvider, model: string, 
         contents.push({role:message.role==='assistant'?'model':'user',parts:parts.length?parts:[{text:''}]});
       }
     }
-    const thinkingConfig=thinking?(/gemini-3/i.test(model)?{thinkingLevel:thinkingLevel==='default'?'high':thinkingLevel}:{thinkingBudget:thinkingLevel==='high'?24576:thinkingLevel==='medium'||thinkingLevel==='default'?8192:1024}):(/gemini-2\.5/i.test(model)?{thinkingBudget:0}:{});
-    return { url: `${provider.baseUrl.replace(/\/+$/, '')}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, body: { contents, ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}), ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }] } : {}), generationConfig: { temperature, maxOutputTokens: maxTokens, ...(Object.keys(thinkingConfig).length?{thinkingConfig}:{}) } } };
+    return { url: `${provider.baseUrl.replace(/\/+$/, '')}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, body: { contents, ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}), ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }] } : {}), generationConfig: { temperature, maxOutputTokens: maxTokens } } };
   }
   const visionMessages=messages.map(message=>{const images=Array.isArray(message.images)?message.images as string[]:[];if(!images.length)return message;const content:Array<Record<string,unknown>>=[];if(String(message.content??''))content.push({type:'text',text:String(message.content??'')});for(const url of images)content.push({type:'image_url',image_url:{url}});const{images:_images,...rest}=message;return{...rest,content};});
-  const reasoning=/^(gpt-5|o[134](?:-|$))/i.test(model)?{reasoning_effort:thinking?(thinkingLevel==='default'?'medium':thinkingLevel):'none'}:thinking&&thinkingLevel!=='default'?{reasoning_effort:thinkingLevel}:{};
-  return { url: `${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, body: { model, messages:visionMessages, stream: true, stream_options: { include_usage: true }, temperature, max_tokens: maxTokens, ...reasoning, ...(tools.length ? { tools, tool_choice: 'auto' } : {}) } };
+  return { url: `${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, body: { model, messages:visionMessages, stream: true, stream_options: { include_usage: true }, temperature, max_tokens: maxTokens, ...(tools.length ? { tools, tool_choice: 'auto' } : {}) } };
 }
 
 export function normalizeProvider(value: ApiProvider): ApiProvider {

@@ -167,7 +167,6 @@ body.sidebar-collapsed .history-new-chat{display:none!important}
 .tool-approval-actions button{min-height:29px;padding:4px 10px;font-size:11px}
 .composer.asking-user{padding:14px 15px 12px;border-color:color-mix(in srgb,var(--accent) 34%,#292930);background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 7%,#121216),#121216 58%);box-shadow:0 14px 45px #0005,0 0 0 1px color-mix(in srgb,var(--accent) 7%,transparent)}
 .composer.asking-user>.attachments,.composer.asking-user>#prompt,.composer.asking-user>.composer-bottom{display:none}
-.composer.asking-user+.composer-hint{opacity:.55}
 .user-question{display:grid;gap:10px;padding:2px 1px 1px}
 .user-question[hidden]{display:none}
 .user-question-head{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px}

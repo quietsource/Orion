@@ -41,14 +41,14 @@ export interface OrionAPI {
   deleteProvider(id: string): Promise<void>;
   discoverProviderModels(provider: ApiProvider): Promise<string[]>;
   windowAction(action: 'minimize' | 'toggle-maximize' | 'close'): Promise<void>;
-  getModelInfo(model: string): Promise<{ contextLength: number; supportsThinking: boolean; thinkingValues?: Array<boolean|string>; thinkingDefault?: boolean|string }> ;
+  getModelInfo(model: string): Promise<{ contextLength: number; supportsThinking: boolean; thinkingDefault?: boolean|string }> ;
   listModels(): Promise<{ name: string; size: number; details?: Record<string, unknown>; capabilities?: string[]; source?: 'ollama'|'orion'|'api' }[]>;
   ollamaStatus(): Promise<boolean>;
   listConversations(): Promise<Conversation[]>; storageWarning(): Promise<string|null>; getConversation(id: string): Promise<Conversation | null>;
   saveConversation(conversation: Conversation, indexMemory?: boolean): Promise<void>; memoryStats(conversationId?: string): Promise<{ indexedTokens: number; limitTokens: number; chunks: number; embeddedChunks: number; embeddingModel: string|null; semantic: boolean; recoveryWarning: string|null; rebuilding: boolean; engine?: 'orion'|'ofs'; activeMemories?: number; workingTurns?: number; links?: number; databaseBytes?: number }>; rebuildMemory(): Promise<void>; deleteConversation(id: string): Promise<void>;
   settings(): Promise<AppSettings>; saveSettings(settings: AppSettings): Promise<void>; getSystemPrompt(model?: string, mode?: ToolMode): Promise<string>;
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
-  streamChat(input: { conversationId: string; model: string; messages: Message[]; think: boolean; thinkLevel?: string; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
+  streamChat(input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
   cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; type: 'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
   installMemoryEmbedding(): Promise<void>;
   onMemoryProgress(callback: (progress: { completed: number; total: number; status?: string; error?: string }) => void): () => void;

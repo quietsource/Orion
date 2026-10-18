@@ -13,14 +13,14 @@ export const ORION_SUBAGENT_MODEL = {
 
 export const SUBAGENT_PROMPTS: Record<OrionSubagentRole, string> = {
   research: [
-    'You are Orion Research, a local read-only research subagent.',
+    'Retain your trained model identity. Your task in Orion is local read-only research.',
     'Investigate the assigned question using only supplied conversation context and OrionFS memory excerpts.',
     'Never edit files, execute commands, make network requests, or broaden the assignment.',
     'Return a concise answer grounded in the supplied evidence and identify any memory excerpts you rely on.',
     'Separate verified facts from inference. State what you could not verify. Do not invent results.',
   ].join(' '),
   quality_control: [
-    'You are Orion Quality Control, a local read-only reviewer for a coding agent.',
+    'Retain your trained model identity. Your task in Orion is a local read-only code review.',
     'Review the supplied material for correctness, regressions, unsafe behavior, and missing verification.',
     'Use only supplied evidence. Never edit files or execute commands.',
     'Report only actionable findings, ordered by severity, with file paths, line references, and a short reason.',

@@ -11,6 +11,13 @@ function applyTheme(theme: AppSettings['theme']) { document.documentElement.data
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolCallRecord, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, BackendState, GeneratedMedia, WorkspaceReview, WorkspaceStatus, ToolMode, WebResearchSource, AppUpdateState } from '../shared/types';
 import './style.css';
 import './agent.css';
+import { hydrateOgs, installOgsActions } from './ogs';
+import './composer.css';
+import { installComposerFrame } from './composerFrame';
+import { createWelcomeArt } from './welcomeArt';
+import { MessageQueue } from '../shared/messageQueue';
+import './messageQueue.css';
+installOgsActions();
 
 const $ = <T extends HTMLElement>(id: string) => {
   const element = document.getElementById(id);
@@ -23,13 +30,14 @@ for (const [file, language] of Object.entries(languageModules)) {
   hljs.registerLanguage(name, language as Parameters<typeof hljs.registerLanguage>[1]);
 }
 const chatBox = $('messages'), chatScroller = $('chat'), historyBox = $('history'), promptBox = $('prompt') as HTMLTextAreaElement, composer = $('composer');
+installComposerFrame(composer);
+const queueContainer = document.createElement('section'); queueContainer.className = 'message-queue'; queueContainer.hidden = true; queueContainer.setAttribute('aria-label', 'Queued messages');
+composer.before(queueContainer);
 const approvalControl = document.createElement('select');
 approvalControl.className = 'approval-selector'; approvalControl.setAttribute('aria-label', 'Tool approval level');
 approvalControl.title = 'Tool approvals are currently disabled'; approvalControl.disabled = true; approvalControl.hidden = true;
 for (const [value, label] of [['all', 'Ask all'], ['external', 'Ask on changes'], ['none', 'Never ask']] as const) approvalControl.add(new Option(label, value));
 document.querySelector('#approval')?.closest('label')?.remove();
-const composerHint = document.querySelector<HTMLElement>('.composer-hint');
-if (composerHint) composerHint.textContent = 'Local & Private';
 const conversationMap = $('conversation-map'), conversationMapItems = $('conversation-map-items');
 let conversationMapKey = '';
 const autoDetectLanguages = ['javascript','typescript','python','json','bash','xml','css','markdown','c','cpp','csharp','diff','go','graphql','ini','java','kotlin','less','lua','makefile','perl','objectivec','php','plaintext','python-repl','r','ruby','rust','scss','shell','sql','swift','yaml','vbnet','wasm'];
@@ -56,10 +64,14 @@ function closeOpenMarkdownFence(source: string) {
 const marked = new Marked({ gfm: true, breaks: true, extensions: [
   { name: 'blockMath', level: 'block', start(source) { const index=source.indexOf('$$'); return index < 0 ? undefined : index; }, tokenizer(source) { const match=/^\$\$([\s\S]+?)\$\$(?:\r?\n|$)/.exec(source); if(!match)return; return {type:'blockMath',raw:match[0],text:match[1]!}; }, renderer(token) { return `<div class="math-block">${katex.renderToString((token as unknown as {text:string}).text,{displayMode:true,throwOnError:false,strict:'ignore'})}</div>`; } },
   { name: 'inlineMath', level: 'inline', start(source) { const index=source.indexOf('$'); return index < 0 ? undefined : index; }, tokenizer(source) { if(source.startsWith('$$'))return; const match=/^\$((?:\\.|[^$\\\n])+?)\$(?!\$)/.exec(source); if(!match)return; return {type:'inlineMath',raw:match[0],text:match[1]!}; }, renderer(token) { return `<span class="math-inline">${katex.renderToString((token as unknown as {text:string}).text,{throwOnError:false,strict:'ignore'})}</span>`; } }
-], renderer: { code({ text, lang }) { const validLang = lang && hljs.getLanguage(lang) ? lang : ''; const highlighted = validLang ? hljs.highlight(text, { language: validLang }).value : hljs.highlightAuto(text, autoDetectLanguages).value; const escapedLang = (lang || 'Code').replace(/[<>&"']/g, ''); const lines = Math.max(1, text.replace(/\n$/, '').split('\n').length); return `<div class="code-block"><div class="code-header"><button class="open-code-canvas" type="button" data-canvas-content="${encodeURIComponent(text)}" data-canvas-lang="${escapedLang}">Canvas</button><span class="code-lang">${escapedLang}</span><button class="copy-code" data-copy="${encodeURIComponent(text)}">Copy</button></div><div class="code-content"><div class="line-numbers">${Array.from({ length: lines }, (_, i) => i + 1).join('<br>')}</div><pre><code class="hljs">${highlighted}</code></pre></div></div>`; } } });
-let conversations: Conversation[] = [], current: Conversation | null = null, settings: AppSettings, models: { name: string; size: number; details?: Record<string, unknown>; capabilities?: string[]; source?: 'ollama'|'orion'|'api' }[] = [], attachments: Array<{ name: string; path: string; content: string; mimeType: string; kind: 'image'|'document'; attachment?: MessageAttachment }> = [], streaming = false, ollamaConnected = false, webSearchMode = false, generationStatus = '';
-let thinkingModel='';
+], renderer: { code({ text, lang }) { if (lang?.trim().toLowerCase() === 'ogs') return `<div data-ogs="${encodeURIComponent(text)}"></div>`; const validLang = lang && hljs.getLanguage(lang) ? lang : ''; const highlighted = validLang ? hljs.highlight(text, { language: validLang }).value : hljs.highlightAuto(text, autoDetectLanguages).value; const escapedLang = (lang || 'Code').replace(/[<>&"']/g, ''); const lines = Math.max(1, text.replace(/\n$/, '').split('\n').length); return `<div class="code-block"><div class="code-header"><button class="open-code-canvas" type="button" data-canvas-content="${encodeURIComponent(text)}" data-canvas-lang="${escapedLang}">Canvas</button><span class="code-lang">${escapedLang}</span><button class="copy-code" data-copy="${encodeURIComponent(text)}">Copy</button></div><div class="code-content"><div class="line-numbers">${Array.from({ length: lines }, (_, i) => i + 1).join('<br>')}</div><pre><code class="hljs">${highlighted}</code></pre></div></div>`; } } });
+let conversations: Conversation[] = [], current: Conversation | null = null, settings: AppSettings, models: { name: string; size: number; details?: Record<string, unknown>; capabilities?: string[]; source?: 'ollama'|'orion'|'api' }[] = [], attachments: Array<{ name: string; path: string; content: string; mimeType: string; kind: 'image'|'document'; attachment?: MessageAttachment }> = [], streaming = false, ollamaConnected = false, generationStatus = '';
 let canvasReviewAttachment:MessageAttachment|undefined;
+type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment };
+type SendOutcome = 'complete'|'cancelled'|'failed'|'unavailable';
+const messageQueue = new MessageQueue<QueuedMessage>();
+let activeChatTask: Promise<SendOutcome> | null = null, queueInterruptPending = false, queueAutoPaused = false;
+let generationIdle: Promise<void> = Promise.resolve(), resolveGenerationIdle: (() => void) | undefined;
 let canvasDocument: CanvasDocument|null=null, canvasNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], canvasPrevious:string|null=null, canvasPreviousNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], pendingCanvasReview:{document:CanvasDocument;notes:Array<{kind:'comment'|'remove';quote:string;text:string}>;edited:string}|null=null;
 type CanvasSession = { document: CanvasDocument; notes: Array<{kind:'comment'|'remove';quote:string;text:string}>; previous: string|null; previousNotes: Array<{kind:'comment'|'remove';quote:string;text:string}>; mode: 'source'|'preview'|'diff' };
 const canvasSessions = new Map<string, CanvasSession>();
@@ -146,11 +158,11 @@ function restoreChatAnchor(anchor: { id: string; top: number } | null) {
   if (node) chatScroller.scrollTop += node.getBoundingClientRect().top - chatScroller.getBoundingClientRect().top - anchor.top;
 }
 function captureNestedScroll(root: HTMLElement) {
-  return [...root.querySelectorAll<HTMLElement>('.reasoning-content,.tool-output,.code-content,pre')].map((node,index)=>({index,top:node.scrollTop,pinned:node.scrollHeight-node.clientHeight-node.scrollTop<=16}));
+  return [...root.querySelectorAll<HTMLElement>('.reasoning-content,.tool-output,.code-content,pre,.ogs-viewport,.ogs-data')].map((node,index)=>({index,top:node.scrollTop,left:node.scrollLeft,open:node instanceof HTMLDetailsElement ? node.open : undefined,pinned:node.scrollHeight-node.clientHeight-node.scrollTop<=16}));
 }
 function restoreNestedScroll(root: HTMLElement, saved: ReturnType<typeof captureNestedScroll>) {
-  const nodes=[...root.querySelectorAll<HTMLElement>('.reasoning-content,.tool-output,.code-content,pre')];
-  nodes.forEach((node,index)=>{const state=saved.find(item=>item.index===index);if(!state||state.pinned)node.scrollTop=node.scrollHeight;else node.scrollTop=state.top;});
+  const nodes=[...root.querySelectorAll<HTMLElement>('.reasoning-content,.tool-output,.code-content,pre,.ogs-viewport,.ogs-data')];
+  nodes.forEach((node,index)=>{const state=saved.find(item=>item.index===index);if(node instanceof HTMLDetailsElement && state?.open!==undefined)node.open=state.open;if(node.matches('.ogs-viewport,.ogs-data')){node.scrollTop=state?.top??0;node.scrollLeft=state?.left??0;}else if(!state||state.pinned)node.scrollTop=node.scrollHeight;else node.scrollTop=state.top;});
 }
 function scheduleRender(structureChanged = false) {
   streamStructureChanged ||= structureChanged;
@@ -193,9 +205,7 @@ function scheduleRender(structureChanged = false) {
         }
       }
       const updatedMessage=[...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(node=>node.dataset.messageId===message.id);
-      if(updatedMessage)restoreNestedScroll(updatedMessage,nestedScroll);
-      renderAgentTaskCard(current);
-      if (shouldFollow) requestAnimationFrame(() => { if (followsLatestMessage) chatScroller.scrollTop = chatScroller.scrollHeight; });
+      if(updatedMessage)restoreNestedScroll(updatedMessage,nestedScroll);      if (shouldFollow) requestAnimationFrame(() => { if (followsLatestMessage) chatScroller.scrollTop = chatScroller.scrollHeight; });
       else requestAnimationFrame(() => restoreChatAnchor(scrollAnchor));
       return;
     }
@@ -206,6 +216,8 @@ function scheduleRender(structureChanged = false) {
 const now = () => Date.now(); const id = () => crypto.randomUUID();
 const versionLabel = document.querySelector<HTMLElement>('.version'); if (versionLabel) versionLabel.textContent = `Orion · ${__ORION_VERSION__}`;
 function setComposerStreaming(active: boolean) {
+  if (active && !streaming) generationIdle = new Promise(resolve => { resolveGenerationIdle = resolve; });
+  if (!active) { resolveGenerationIdle?.(); resolveGenerationIdle = undefined; }
   streaming = active;
   generationStatus = active ? 'Waiting for the model…' : '';
   promptBox.setAttribute('aria-busy', String(active));
@@ -214,8 +226,6 @@ function updateChatModeUi() {
   promptBox.disabled = false;
   const sendButton = $('send') as HTMLButtonElement;
   sendButton.disabled = false;
-  const hint = document.querySelector<HTMLElement>('.composer-hint');
-  if (hint) hint.textContent = 'Local & Private · Conversation-first AI';
 }
 chatScroller.addEventListener('wheel', event => {
   const direction = event.deltaY < 0 ? -1 : event.deltaY > 0 ? 1 : 0;
@@ -253,6 +263,7 @@ function safeMarkdownFragment(source: string, lightweight = false) {
   if (!lightweight && markdownCache.has(source)) return markdownCache.get(source)!.cloneNode(true) as DocumentFragment;
   const normalized = normalizeMarkdownTables(lightweight ? closeOpenMarkdownFence(source) : source);
   const fragment = DOMPurify.sanitize(marked.parse(normalized) as string, { USE_PROFILES: { html: true }, RETURN_DOM_FRAGMENT: true }) as DocumentFragment;
+  hydrateOgs(fragment, lightweight);
   if (!lightweight && source.length < 100_000) { if (markdownCache.size >= 32) markdownCache.delete(markdownCache.keys().next().value!); markdownCache.set(source, fragment.cloneNode(true) as DocumentFragment); }
   return fragment;
 }
@@ -305,7 +316,7 @@ const contextMenu = $('context-menu');
 function hideContextMenu() { contextMenu.hidden = true; contextMenu.replaceChildren(); }
 function showContextMenu(x: number, y: number, actions: Array<{ label: string; run: () => void | Promise<void>; danger?: boolean }>) { contextMenu.replaceChildren(); for (const action of actions) { const button = document.createElement('button'); button.type = 'button'; button.textContent = action.label; if (action.danger) button.classList.add('danger'); button.onclick = () => { hideContextMenu(); void action.run(); }; contextMenu.append(button); } contextMenu.hidden = false; contextMenu.style.left = `${Math.max(8, Math.min(x, innerWidth - contextMenu.offsetWidth - 8))}px`; contextMenu.style.top = `${Math.max(8, Math.min(y, innerHeight - contextMenu.offsetHeight - 8))}px`; }
 document.addEventListener('pointerdown', event => { if (!contextMenu.contains(event.target as Node)) hideContextMenu(); });
-document.addEventListener('contextmenu', event => { const target = event.target as HTMLElement; const conversationButton = target.closest<HTMLButtonElement>('.conversation'); if (conversationButton) { event.preventDefault(); const conversation = conversations.find(item => item.id === conversationButton.dataset.id); if (conversation) showContextMenu(event.clientX, event.clientY, [{ label: 'Open conversation', run: () => conversationButton.click() }, { label: 'Delete conversation…', danger: true, run: async () => { if (await askConfirm(`Delete “${conversation.title}”?`, 'Delete conversation')) { await window.orion.deleteConversation(conversation.id); conversations = conversations.filter(item => item.id !== conversation.id); if (current?.id === conversation.id) { switchCanvasConversation(undefined); current = null; } renderHistory(); renderMessages(true); } } }]); return; } const selection = getSelection()?.toString() ?? ''; const editable = target.closest('textarea:not([readonly]),input:not([type=checkbox]):not([type=number]):not([readonly])'); const actions: Array<{ label: string; run: () => void | Promise<void> }> = []; if (selection) actions.push({ label: 'Copy', run: () => navigator.clipboard.writeText(selection) }); if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) { const input = editable; actions.push({ label: 'Cut', run: async () => { const a = input.selectionStart ?? 0, b = input.selectionEnd ?? a; await navigator.clipboard.writeText(input.value.slice(a, b)); input.setRangeText('', a, b, 'start'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Paste', run: async () => { const text = await navigator.clipboard.readText(); input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? input.selectionStart ?? 0, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Select all', run: () => input.select() }); } if (actions.length) { event.preventDefault(); showContextMenu(event.clientX, event.clientY, actions); } });
+document.addEventListener('contextmenu', event => { const target = event.target as HTMLElement; const conversationButton = target.closest<HTMLButtonElement>('.conversation'); if (conversationButton) { event.preventDefault(); const conversation = conversations.find(item => item.id === conversationButton.dataset.id); if (conversation) showContextMenu(event.clientX, event.clientY, [{ label: 'Open conversation', run: () => conversationButton.click() }, { label: 'Delete conversation…', danger: true, run: async () => { if (await askConfirm(`Delete “${conversation.title}”?`, 'Delete conversation')) { await window.orion.deleteConversation(conversation.id); messageQueue.discardConversation(conversation.id); conversations = conversations.filter(item => item.id !== conversation.id); if (current?.id === conversation.id) { switchCanvasConversation(undefined); current = null; } renderHistory(); renderMessages(true); } } }]); return; } const selection = getSelection()?.toString() ?? ''; const editable = target.closest('textarea:not([readonly]),input:not([type=checkbox]):not([type=number]):not([readonly])'); const actions: Array<{ label: string; run: () => void | Promise<void> }> = []; if (selection) actions.push({ label: 'Copy', run: () => navigator.clipboard.writeText(selection) }); if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) { const input = editable; actions.push({ label: 'Cut', run: async () => { const a = input.selectionStart ?? 0, b = input.selectionEnd ?? a; await navigator.clipboard.writeText(input.value.slice(a, b)); input.setRangeText('', a, b, 'start'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Paste', run: async () => { const text = await navigator.clipboard.readText(); input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? input.selectionStart ?? 0, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Select all', run: () => input.select() }); } if (actions.length) { event.preventDefault(); showContextMenu(event.clientX, event.clientY, actions); } });
 
 function createMessage(role: Message['role'], content: string): Message { return { id: id(), role, content, createdAt: now() }; }
 function newConversation() { if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); current = { id: id(), title: 'New conversation', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; switchCanvasConversation(current.id); conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
@@ -784,26 +795,6 @@ function positionConversationMap(messageCount: number) {
   conversationMap.style.top = `${Math.max(0, chatRect.top - mainRect.top + 12)}px`;
   conversationMap.style.bottom = `${Math.max(0, mainRect.bottom - anchor)}px`;
 }
-function renderAgentTaskCard(active: Conversation|null) {
-  const card=document.getElementById('agent-task-card');if(!card)return;
-  card.replaceChildren();
-  if(activeView!=='Chat'||!active){card.hidden=true;return;}
-  const calls=active.messages.flatMap(message=>message.toolCalls??[]);
-  const planCall=[...calls].reverse().find(call=>call.name==='plan_update'&&call.output);
-  const todoCall=[...calls].reverse().find(call=>call.name==='todo_update'&&call.output);
-  type PlanSnapshot={status?:string;plan?:string};type TodoSnapshot={id?:string;text?:string;done?:boolean};
-  let plan:PlanSnapshot|null=null, todos:TodoSnapshot[]|null=null;
-  try{if(planCall)plan=JSON.parse(planCall.output!) as PlanSnapshot;}catch{}
-  try{if(todoCall){const parsed=JSON.parse(todoCall.output!);if(Array.isArray(parsed))todos=parsed as TodoSnapshot[];}}catch{}
-  if(!plan?.plan&&!todos){card.hidden=true;return;}
-  card.hidden=false;
-  const panel=document.createElement('div');panel.className='agent-task-panel';
-  const heading=document.createElement('strong');heading.className='agent-task-heading';heading.textContent=plan?.plan?'Current plan':'Task checklist';
-  const status=document.createElement('span');status.className='agent-task-status';status.textContent=plan?.status==='complete'?'Complete':'In progress';panel.append(heading,status);
-  if(plan?.plan){const list=document.createElement('ol');list.className='agent-task-list';for(const line of plan.plan.split(/\r?\n/).map(value=>value.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim()).filter(Boolean)){const row=document.createElement('li');row.textContent=line;list.append(row);}panel.append(list);}
-  if(todos?.length){const list=document.createElement('ul');list.className='agent-task-list';for(const item of todos){const row=document.createElement('li');row.className=item.done?'is-done':'';row.textContent=`${item.done?'✓':'○'} ${item.text??'Task'}`;list.append(row);}panel.append(list);}
-  card.append(panel);
-}
 // Keep the midpoint anchor aligned when the window, header, or composer changes size.
 const conversationMapResizeObserver = new ResizeObserver(() => {
   positionConversationMap(current?.messages.filter(message => message.role === 'user').length ?? 0);
@@ -813,20 +804,17 @@ if (mainPanel) conversationMapResizeObserver.observe(mainPanel);
 conversationMapResizeObserver.observe(chatScroller);
 function renderMessages(forceScroll = false) {
   document.body.classList.remove('models-view','create-view');
+  document.body.classList.toggle('chat-empty', activeView === 'Chat' && !current?.messages.length);
+  renderMessageQueue();
   $('model-selector-wrap').hidden = false; $('create-composer-wrap').hidden = true;
-  const active = current;
-  renderAgentTaskCard(active);
-  renderConversationMap(current);
+  const active = current;  renderConversationMap(current);
   if (activeView === 'Create') { renderCreateView(); return; }
   if (activeView === 'Models') { renderModelsView(); return; }
   const shouldFollow = forceScroll || followsLatestMessage;
   const scrollAnchor = shouldFollow ? null : captureChatAnchor();
   chatBox.replaceChildren();
   if (!active?.messages.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    const title=document.createElement('h1');title.textContent='Welcome to Orion.';const tagline=document.createElement('p');tagline.textContent='Private AI, running on your own machine.';empty.append(title,tagline);
-    chatBox.append(empty);
+    chatBox.append(createWelcomeArt());
   } else {
     for (const message of active.messages) chatBox.append(renderMessage(active, message));
   }
@@ -847,19 +835,14 @@ function modelSelectorLabel(model: (typeof models)[number]) { if (model.source =
 function assistantModelLabel(name: string) { const model = models.find(candidate => candidate.name === name); if (model) return modelSelectorLabel(model); const id = name.startsWith('orion-gguf:') ? name.slice('orion-gguf:'.length) : ''; const installed = id ? installedModels.find(candidate => candidate.id === id) : undefined; if (installed) return orionModelLabel(installed.repo, installed.file); return name.startsWith('orion-gguf:') ? 'Local GGUF model' : name || 'Orion'; }
 function setModels() { const select = $('model') as HTMLSelectElement; const choices = chatModels(); select.replaceChildren(); if (!models.length) { select.add(new Option(ollamaConnected ? 'No models installed' : 'Ollama unavailable · Settings', '')); return; } if (!choices.length) { select.add(new Option('No chat models installed', '')); return; } for (const model of choices) { const label = modelSelectorLabel(model); const option = new Option(`${label}  ·  ${model.source === 'api' ? 'API' : `${(model.size/1e9).toFixed(1)} GB`}`, model.name); option.title = label; select.add(option); } select.value = settings.selectedModel && choices.some(model => model.name === settings.selectedModel) ? settings.selectedModel : choices[0]!.name; select.title = modelSelectorLabel(choices.find(model => model.name === select.value) ?? choices[0]!); settings.selectedModel = select.value; }
 async function refreshModelControls(){
- const select=$('context-window') as HTMLSelectElement, think=$('think') as HTMLInputElement, control=$('think-control'), level=$('think-level') as HTMLSelectElement;
- const info:Awaited<ReturnType<typeof window.orion.getModelInfo>>=await window.orion.getModelInfo(settings.selectedModel).catch(()=>({contextLength:131072,supportsThinking:false}));
+ const select=$('context-window') as HTMLSelectElement;
+ const model=settings.selectedModel;
+ const info:Awaited<ReturnType<typeof window.orion.getModelInfo>>=await window.orion.getModelInfo(model).catch(()=>({contextLength:131072,supportsThinking:false}));
+ if(model!==settings.selectedModel)return;
  const max=Math.min(131072,Math.max(1024,info.contextLength)),values=[1024,2048,4096,8192,16384,32768,65536,131072].filter(n=>n<=max);
  if(!values.includes(settings.contextWindow)&&settings.contextWindow<=max)values.push(settings.contextWindow);values.sort((a,b)=>a-b);
- select.replaceChildren(...values.map(n=>new Option(`${Math.round(n/1024)}K`,String(n))));
- if(settings.contextWindow>max){settings.contextWindow=max;await window.orion.saveSettings(settings);}select.value=String(settings.contextWindow);$('context-meter').textContent=`— / ${Math.round(settings.contextWindow/1024)}K`;
- const modelChanged=thinkingModel!==settings.selectedModel;thinkingModel=settings.selectedModel;const supported=info.supportsThinking===true;think.disabled=!supported;control.title=supported?'Enable or disable model reasoning':'Thinking is unavailable for this model';
- if(!supported){think.checked=false;level.replaceChildren(new Option('Default','default'));level.hidden=true;return;}
- const modelValues=(info.thinkingValues??[]).filter((value):value is string=>typeof value==='string');
- const choices=['default',...['low','medium','high'].filter(value=>modelValues.includes(value))];
- const old=level.value||'default';level.replaceChildren(...choices.map(value=>new Option(value==='default'?'Default':value[0]!.toUpperCase()+value.slice(1),value)));
- level.value=choices.includes(old)?old:'default';if(modelChanged)think.checked=info.thinkingDefault!==false;
- const hasLevels=choices.length>1;level.hidden=!hasLevels||!think.checked;level.disabled=!think.checked;
+ select.replaceChildren(...values.map(n=>new Option(Math.round(n/1024)+'K',String(n))));
+ if(settings.contextWindow>max){settings.contextWindow=max;await window.orion.saveSettings(settings);}select.value=String(settings.contextWindow);$('context-meter').textContent='— / '+Math.round(settings.contextWindow/1024)+'K';
 }
 async function refreshModels(refreshProviders = false) { const [available] = await Promise.all([window.orion.listModels().catch(() => []), window.orion.ollamaStatus().then(connected => { ollamaConnected = connected; }).catch(() => { ollamaConnected = false; })]); models = available; setModels(); await refreshModelControls(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : ollamaConnected ? 'Connected' : 'Disconnected · Error'; if (activeView === 'Models' && (modelTab !== 'providers' || refreshProviders)) renderModelsView(); }
 const gigabytes = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
@@ -867,23 +850,85 @@ async function refreshLlamaStatus() { const previous = managedLlamaInstalled; tr
 async function refreshCreateEngineStatus() { try { createState = await window.orion.getCreateEngineState(); } catch (error) { createState = { installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown' }; } }
 let systemResourcesPending=false;
 async function refreshSystemResources() { if(systemResourcesPending)return;systemResourcesPending=true;try { const info = await window.orion.getSystemInfo(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : info.ollama ? 'Connected' : 'Disconnected · Error'; $('cpu-label').textContent=info.cpuUsagePercent===null?'—':`${info.cpuUsagePercent}%`; $('ram-label').textContent = `${gigabytes(info.usedRamMB)} / ${gigabytes(info.totalRamMB)}`; $('gpu-label').textContent=info.gpuUsagePercent===null?'—':`${info.gpuUsagePercent}%`; $('vram-label').textContent = info.totalVramMB > 0 ? `${info.usedVramMB === null ? '—' : gigabytes(info.usedVramMB)} / ${gigabytes(info.totalVramMB)}` : 'Not detected'; ($('gpu-label') as HTMLElement).title=info.gpuUsagePercent===null?'GPU utilization is not reported by this driver.':'Current overall GPU utilization'; ($('vram-label') as HTMLElement).title = info.totalVramMB > 0 && info.usedVramMB === null ? 'GPU memory capacity is available, but current usage is not reported by this driver.' : ''; } catch { $('connection-state').textContent = 'Disconnected · Error'; } finally{systemResourcesPending=false;} }
+function renderMessageQueue() {
+  const entries = current ? messageQueue.list(current.id) : [];
+  queueContainer.hidden = activeView !== 'Chat' || !entries.length;
+  queueContainer.replaceChildren();
+  for (const entry of entries) {
+    const card = document.createElement('article'); card.className = 'queued-message'; card.dataset.queueId = entry.id;
+    const copy = document.createElement('div'); copy.className = 'queued-message-copy';
+    const text = document.createElement('span'); text.className = 'queued-message-text'; text.textContent = entry.content; text.title = entry.content; copy.append(text);
+    const count = entry.attachments.length + (entry.canvasAttachment ? 1 : 0);
+    if (count) { const files = document.createElement('span'); files.className = 'queued-message-files'; files.textContent = `${count} attachment${count === 1 ? '' : 's'}`; copy.append(files); }
+    const actions = document.createElement('div'); actions.className = 'queued-message-actions';
+    const send = document.createElement('button'); send.type = 'button'; send.dataset.queueSend = entry.id; send.title = 'Send now'; send.setAttribute('aria-label', 'Send queued message now'); send.disabled = queueInterruptPending;
+    send.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"/></svg>';
+    send.onclick = () => { void sendQueuedNow(entry.id); };
+    const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.queueDelete = entry.id; remove.title = 'Delete queued message'; remove.setAttribute('aria-label', 'Delete queued message');
+    remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg>';
+    remove.onclick = () => { messageQueue.remove(entry.id); renderMessageQueue(); };
+    actions.append(send, remove); card.append(copy, actions); queueContainer.append(card);
+  }
+}
+function drainMessageQueue() {
+  if (activeChatTask || streaming || queueInterruptPending || queueAutoPaused) return;
+  let next = messageQueue.takeNext();
+  while (next && !conversations.some(conversation => conversation.id === next!.conversationId)) next = messageQueue.takeNext();
+  renderMessageQueue();
+  if (next) { void launchSubmission(next); return; }
+  const scheduled = waitingScheduledJobs.shift(); if (scheduled) void runScheduledJob(scheduled);
+}
+async function launchSubmission(entry: QueuedMessage) {
+  if (activeChatTask || streaming || queueInterruptPending) { messageQueue.restore(entry); renderMessageQueue(); return; }
+  const task = Promise.resolve().then(() => sendMessageNow(entry)); activeChatTask = task;
+  try {
+    const outcome = await task;
+    if (outcome === 'unavailable') messageQueue.restore(entry);
+    if (outcome !== 'complete' && !queueInterruptPending) queueAutoPaused = true;
+  } catch (error) {
+    queueAutoPaused = true; messageQueue.restore(entry);
+    console.error('Could not dispatch message:', error);
+  } finally {
+    if (activeChatTask === task) activeChatTask = null;
+    renderMessageQueue(); drainMessageQueue();
+  }
+}
+async function sendQueuedNow(messageId: string) {
+  if (queueInterruptPending || !messageQueue.get(messageId)) return;
+  queueInterruptPending = true; renderMessageQueue();
+  try {
+    const pending = activeChatTask, idle = generationIdle;
+    if (streaming) await window.orion.cancelStream();
+    if (pending) await pending.catch(() => undefined); else if (streaming) await idle;
+    const entry = messageQueue.remove(messageId); if (!entry) return;
+    if (current?.id === entry.conversationId) entry.model = ($('model') as HTMLSelectElement).value || entry.model;
+    queueAutoPaused = false; queueInterruptPending = false; renderMessageQueue();
+    void launchSubmission(entry);
+  } catch (error) { showNotice(error instanceof Error ? error.message : String(error), 'Could not send queued message'); }
+  finally { queueInterruptPending = false; renderMessageQueue(); }
+}
 async function sendMessage() {
-  if (!commandPalette.hidden) closeCommandPalette();
-  const content = promptBox.value.trim(); if (!content || streaming) return;
-  activeView = 'Chat'; updateActiveNav('Chat');
+  const content = promptBox.value.trim(); if (!content) return;
   if (!current) newConversation(); if (!current) return;
+  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment };
+  attachments = []; canvasReviewAttachment = undefined; $('attachments').replaceChildren(); promptBox.value = ''; promptBox.dispatchEvent(new Event('input', { bubbles: true }));
+  if (streaming || activeChatTask || queueInterruptPending) { messageQueue.push(entry); renderMessageQueue(); promptBox.focus(); return; }
+  queueAutoPaused = false; await launchSubmission(entry);
+}
+async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
+  if (!commandPalette.hidden) closeCommandPalette();
+  const content = entry.content;
+  const target = conversations.find(conversation => conversation.id === entry.conversationId); if (!target) return 'failed';
   await workspaceSettingsWrite;
-  const target = current;
-  if (!chatModels().length) { await refreshModels(); if (!chatModels().length) { showNotice(models.length ? 'No chat-capable Ollama model is installed. Install a completion model, then refresh the model list.' : 'Add an API provider in Model browser → Providers, or install a local model.', 'Ollama unavailable'); return; } }
-  const imageRefs=[...attachments.flatMap(file=>file.attachment?[file.attachment]:[]),...(canvasReviewAttachment?[canvasReviewAttachment]:[])];canvasReviewAttachment=undefined;
-  let userText = content + (attachments.length ? `\n\nAttached files:\n${attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
-  const useWebSearch = webSearchMode;
-  if (useWebSearch) { webSearchMode = false; const searchButton = $('search-open') as HTMLButtonElement; searchButton.setAttribute('aria-pressed', 'false'); searchButton.classList.remove('active'); searchButton.title = 'Search the web before Orion answers your next message'; }
-  attachments = []; $('attachments').replaceChildren(); promptBox.value = '';
-  const userMessage=createMessage('user', userText);if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = ($('model') as HTMLSelectElement).value;
+  if (!chatModels().length) { await refreshModels(); if (!chatModels().length) { showNotice(models.length ? 'No chat-capable Ollama model is installed. Install a completion model, then refresh the model list.' : 'Add an API provider in Model browser → Providers, or install a local model.', 'Ollama unavailable'); return 'unavailable'; } }
+  if (!chatModels().some(model => model.name === entry.model)) { showNotice('The selected model is no longer available. Choose an installed model before sending this message.', 'Model unavailable'); return 'unavailable'; }
+  const imageRefs=[...entry.attachments.flatMap(file=>file.attachment?[file.attachment]:[]),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
+  const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
+  const userMessage=createMessage('user', userText);if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
   if (target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
   target.messages.push(createMessage('assistant', '')); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
   const generationStarted = performance.now();
+  let outcome: SendOutcome = 'complete';
   let off: () => void = () => undefined;
   try {
   await save(target, true); if (current?.id === target.id) renderMessages(true);
@@ -941,13 +986,14 @@ async function sendMessage() {
       if (current?.id === target.id) scheduleRender(true);
 
     }
-    if (e.type === 'error') assistant.content += `\n\n> **Orion error:** ${e.content}`;
-    if (e.type === 'cancelled' && !assistant.content) assistant.content = '_Generation stopped._';
+    if (e.type === 'error') { outcome = 'failed'; assistant.content += `\n\n> **Orion error:** ${e.content}`; }
+    if (e.type === 'cancelled') { outcome = 'cancelled'; if (!assistant.content) assistant.content = '_Generation stopped._'; }
     if (current?.id === target.id) scheduleRender();
   });
-  const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), think: ($('think') as HTMLInputElement).checked, thinkLevel: ($('think-level') as HTMLSelectElement).value, agent: true, mode: chatMode, webSearch: useWebSearch });
+  const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: true, mode: chatMode });
   const completedAssistant = target.messages.at(-1); if (completedAssistant) { completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (e) {
+    outcome = 'failed';
     const assistant = target.messages.at(-1);
     if (assistant && !assistant.content) assistant.content = `Orion error: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -955,13 +1001,13 @@ async function sendMessage() {
     setComposerStreaming(false); $('send').textContent = '↑'; $('send').setAttribute('title','Send');
     try { await save(target, true); } catch (error) { console.error('Could not save conversation:', error); }
     if (current?.id === target.id) { renderMessages(); }
-    const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next);
   }
+  return outcome;
 }
 
-$('send').addEventListener('click', () => { if (streaming) void window.orion.cancelStream(); else void sendMessage(); });
+$('send').addEventListener('click', () => { if (streaming) { queueAutoPaused = true; void window.orion.cancelStream(); } else void sendMessage(); });
 // Orion is intentionally conversation-first: there is no Chat/Code mode switch.
-promptBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }); $('command-close').onclick = closeCommandPalette; $('new-chat').onclick = newConversation;
+promptBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void sendMessage(); } }); $('command-close').onclick = closeCommandPalette; $('new-chat').onclick = newConversation;
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'p') { event.preventDefault(); event.stopPropagation(); void openCommandPalette(); return; }
   if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && event.target === promptBox && !promptBox.value.trim()) { event.preventDefault(); event.stopPropagation(); void openCommandPalette(); return; }
@@ -1010,7 +1056,6 @@ document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => butt
   $('canvas-comment').onclick=()=>{if(!canvasDocument)return;const input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!text){showNotice('Write a short comment first.','Add a comment');return;}const editor=$('canvas-editor') as HTMLTextAreaElement,quote=editor.hidden?'':editor.value.slice(editor.selectionStart,editor.selectionEnd);canvasNotes.push({kind:'comment',quote,text});input.value='';renderCanvas();storeCanvasSession();};
   $('canvas-remove').onclick=()=>{if(!canvasDocument)return;const editor=$('canvas-editor') as HTMLTextAreaElement,quote=editor.hidden?'':editor.value.slice(editor.selectionStart,editor.selectionEnd),input=$('canvas-note') as HTMLInputElement,text=input.value.trim();if(!quote&&!text){showNotice('Select the text you want removed, or describe what should be removed in the comment field.','Choose text to remove');return;}canvasNotes.push({kind:'remove',quote,text:text||'Please remove this part.'});input.value='';renderCanvas();storeCanvasSession();};
   $('canvas-give').onclick=async()=>{if(!canvasDocument||streaming)return;const doc={...canvasDocument},notes=[...canvasNotes],edited=doc.format==='pdf'||doc.format==='image'?(doc.textContent??''):($('canvas-editor') as HTMLTextAreaElement).value;pendingCanvasReview={document:doc,notes,edited};canvasReviewAttachment=doc.attachment;const notesText=notes.length?notes.map((note,index)=>`${index+1}. ${note.kind==='remove'?'REMOVE':'COMMENT'}${note.quote?` on this exact text: “${note.quote}”`:''}: ${note.text}`).join('\n'):'No inline comments.';promptBox.value=`Revise the attached document using my edits and notes. Return the complete revised document source only, without an outer code fence or explanation. Preserve the document's purpose and structure.\n\nFile: ${doc.name}\nFormat: ${doc.format}\n\nMy inline notes:\n${notesText}\n\nCurrent edited document source:\n${edited.slice(0,1_500_000)}`;await sendMessage();};
-  $('think').addEventListener('change',()=>{const level=$('think-level') as HTMLSelectElement;const enabled=($('think') as HTMLInputElement).checked;level.hidden=!enabled||level.options.length<2;level.disabled=!enabled;});
   $('attach').onclick = async () => {
     try {
       attachments = await window.orion.selectFiles();
@@ -1125,8 +1170,6 @@ window.orion.onMemoryProgress(progress => { $('memory-progress').textContent = p
 $('settings-close').addEventListener('click', () => settingsDialog.close());
 $('settings-cancel').addEventListener('click', () => settingsDialog.close());
 $('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.theme = ($('theme') as HTMLSelectElement).value as AppSettings['theme']; settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(settings.theme); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
-const searchButton = $('search-open') as HTMLButtonElement;
-searchButton.onclick = () => { webSearchMode = !webSearchMode; searchButton.setAttribute('aria-pressed', String(webSearchMode)); searchButton.classList.toggle('active', webSearchMode); searchButton.title = webSearchMode ? 'Web search is on · Orion will research before answering' : 'Search the web before Orion answers your next message'; promptBox.focus(); };
 window.orion.onDownloadProgress(progress=>{downloadProgress.set(progress.id,progress);if(progress.phase!=='downloading')cancellingModelDownloads.delete(progress.id);renderDownloadActivity();if(progress.repo==='Orion llama.cpp'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshLlamaStatus(),2500);if(progress.phase!=='downloading')window.setTimeout(()=>{downloadProgress.delete(progress.id);renderDownloadActivity();},progress.phase==='complete'?6000:progress.phase==='cancelled'?3500:12000);});
 const invokeDialog=$('engine-install-dialog') as HTMLDialogElement;
 async function startEngineInstall() {
@@ -1170,6 +1213,18 @@ chatBox.addEventListener('click', async e => { const b = (e.target as HTMLElemen
 const pendingApprovals = new Map<string, ToolRequest>();
 const approvalStrip = $('tool-approval');
 const composerWrap = document.querySelector<HTMLElement>('.composer-wrap');
+if (composerWrap) {
+  let dockHeight = -1;
+  const dockObserver = new ResizeObserver(() => {
+    const padding = Number.parseFloat(getComputedStyle(composerWrap).paddingTop) || 0;
+    const height = Math.ceil(composerWrap.getBoundingClientRect().height - padding);
+    if (height === dockHeight) return; dockHeight = height;
+    const anchor = followsLatestMessage ? null : captureChatAnchor();
+    document.querySelector<HTMLElement>('.main')?.style.setProperty('--chat-dock-height', `${height}px`);
+    requestAnimationFrame(() => { if (followsLatestMessage) chatScroller.scrollTop = chatScroller.scrollHeight; else restoreChatAnchor(anchor); });
+  });
+  dockObserver.observe(composerWrap);
+}
 if (composerWrap && approvalStrip.parentElement !== composerWrap) composerWrap.insertBefore(approvalStrip, composerWrap.firstChild);
 const approvalChoice = document.createElement('select');
 approvalChoice.id = 'tool-approval-choice'; approvalChoice.setAttribute('aria-label', 'Choose how to handle this tool request'); approvalChoice.title = 'Choose how to handle this tool request';
@@ -1322,7 +1377,7 @@ let appInitialized = false;
 const waitingScheduledJobs: ScheduledJob[] = [];
 let scheduledJobActive = false;
 async function runScheduledJob(job: ScheduledJob) {
-  if (!appInitialized || streaming || scheduledJobActive) { waitingScheduledJobs.push(job); return; }
+  if (!appInitialized || streaming || activeChatTask || queueInterruptPending || scheduledJobActive) { waitingScheduledJobs.push(job); return; }
   setComposerStreaming(true); scheduledJobActive = true; const sendButton = $('send') as HTMLButtonElement; sendButton.disabled = true;
   const created = now(), target: Conversation = { id: id(), title: `Schedule: ${job.name}`, model: job.model, createdAt: created, updatedAt: created, messages: [createMessage('user', `${job.prompt}\n\n[Scheduled run: ${new Date().toLocaleString()}]`), createMessage('assistant', '')] };
   conversations.unshift(target); const generationStarted = performance.now(); let failed = false, off: () => void = () => undefined;
@@ -1350,7 +1405,7 @@ async function runScheduledJob(job: ScheduledJob) {
       if (e.type === 'cancelled') { failed = true; if (!assistant.content) assistant.content = '_Scheduled run was stopped._'; }
       scheduleSave(target);
     });
-    const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), think: false, agent: job.agent });
+    const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: job.agent });
     const completedAssistant = target.messages.at(-1); if (completedAssistant) { completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (error) {
     failed = true; const assistant = target.messages.at(-1);
@@ -1363,7 +1418,7 @@ async function runScheduledJob(job: ScheduledJob) {
     try { await window.orion.completeScheduledJob(job.id, failed ? 'error' : 'completed', assistant?.content || assistant?.reasoning || '(No text response)', target.id); }
     catch (error) { console.error('Could not update scheduled task status:', error); }
     if (($('schedules-dialog') as HTMLDialogElement).open) void renderScheduledJobs();
-    const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next);
+    drainMessageQueue();
   }
 }
 window.orion.onScheduledJob(job => { void renderScheduledJobs(); void runScheduledJob(job); });
