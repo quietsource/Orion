@@ -6,7 +6,7 @@ Orion is built with Electron and TypeScript. Bun is used to install dependencies
 
 ## Demo
 
-https://github.com/user-attachments/assets/d7c1c74b-128a-4517-bbcf-be5ce9eeb2bc
+https://github.com/user-attachments/assets/4aa7f610-f0c9-4b78-84ed-e233e043577e
 
 ## Platform support
 
