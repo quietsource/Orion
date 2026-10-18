@@ -89,6 +89,12 @@ export interface OFSConfig {
 }
 
 export interface OFSTurnSource { conversationId: string; messageId: string; createdAt?: number; }
+export interface OFSSnapshot {
+  version: 1; createdAt: number; workingMemory: ChatTurn[];
+  memories: Array<Record<string, unknown>>; links: Array<Record<string, unknown>>;
+  turns: Array<Record<string, unknown>>; metadata: Array<Record<string, unknown>>;
+}
+export interface OFSRecallPolicy { pinnedIds?: string[]; conversationIds?: string[]; memoryIds?: string[]; excludedIds?: string[]; strict?: boolean }
 
 export interface ExtractedKnowledge {
   facts: {
@@ -466,25 +472,30 @@ export class OrionFS {
     query: string,
     maxTokens: number,
     conversationId = "__global__",
-    excludedMessageIds: string[] = []
+    excludedMessageIds: string[] = [],
+    policy?: OFSRecallPolicy
   ): Promise<ActivatedMemory[]> {
     if (this.closed || maxTokens <= 0) return [];
     const startTime = performance.now();
     const queryVec = encodeLocal(query);
     const now = Date.now();
     const excluded = new Set(excludedMessageIds);
-    const allowed = (cached: { conversationId: string; sourceMessageId: string | null }) =>
-      !excluded.has(cached.sourceMessageId ?? '') && (conversationId === '__all__' || cached.conversationId === conversationId || cached.conversationId === '__global__');
+    const scopes = new Set(policy?.conversationIds ?? []), explicit = new Set(policy?.memoryIds ?? []), blocked = new Set(policy?.excludedIds ?? []);
+    const linkScopes = [...new Set([...scopes, ...[...explicit].map(id => this.vectorCache.get(id)?.conversationId).filter((id): id is string => Boolean(id))])];
+    const allowed = (cached: { conversationId: string; sourceMessageId: string | null }, id = '') =>
+      !blocked.has(id) && !excluded.has(cached.sourceMessageId ?? '') &&
+      (policy ? (!policy.strict || scopes.has(cached.conversationId) || explicit.has(id)) : (conversationId === '__all__' || cached.conversationId === conversationId || cached.conversationId === '__global__'));
 
     // STEP 1: Fast In-Memory Vector Scan
     const directScores = new Map<string, number>();
     const seedEntities = new Map<string, number>();
 
     for (const [id, cached] of this.vectorCache.entries()) {
-      if (!allowed(cached)) continue;
+      if (!allowed(cached, id)) continue;
       const sim = cosineSimilarity(queryVec, cached.vec);
+      if(policy?.pinnedIds?.includes(id)) directScores.set(id, 2);
       if (sim > 0.2) {
-        directScores.set(id, sim * 0.9);
+        directScores.set(id, Math.max(directScores.get(id)??0, sim * 0.9));
         if (sim > 0.35) {
           for (const ent of cached.entities) {
             seedEntities.set(ent, Math.max(seedEntities.get(ent) || 0, sim));
@@ -507,9 +518,10 @@ export class OrionFS {
           .query(
             `SELECT target, weight FROM ofs_links
              WHERE source = $ent AND ($allConversations = 1 OR conversation_id IN ($conversationId, '__global__'))
+               AND ($policy = 0 OR conversation_id IN (SELECT value FROM json_each($scopes)))
              ORDER BY weight DESC LIMIT 8`
           )
-          .all({ $ent: entity, $conversationId: conversationId, $allConversations: conversationId === "__all__" ? 1 : 0 }) as { target: string; weight: number }[];
+          .all({ $ent: entity, $conversationId: conversationId, $allConversations: conversationId === "__all__" ? 1 : 0, $policy: policy?.strict ? 1 : 0, $scopes: JSON.stringify(linkScopes) }) as { target: string; weight: number }[];
 
         for (const n of neighbors) {
           const propagatedEnergy =
@@ -530,7 +542,7 @@ export class OrionFS {
     const candidateIds = new Set<string>(directScores.keys());
 
     for (const [id, cached] of this.vectorCache.entries()) {
-      if (!allowed(cached)) continue;
+      if (!allowed(cached, id)) continue;
       for (const ent of cached.entities) {
         if (activatedEntities.has(ent)) {
           candidateIds.add(id);
@@ -755,16 +767,45 @@ export class OrionFS {
   // LIFECYCLE UTILITIES
   // --------------------------------------------------------------------------
 
-  public getStats(conversationId?: string): { activeMemories: number; workingTurns: number; indexedTokens: number; links: number; databaseBytes: number } {
-    const scopeSql = conversationId ? ` AND conversation_id = ?` : "";
-    const params = conversationId ? [conversationId] : [];
+  public getStats(conversationId?: string, policy?: OFSRecallPolicy, excludedSources: string[] = []): { activeMemories: number; workingTurns: number; indexedTokens: number; links: number; databaseBytes: number } {
+    const scopeSql = policy?.strict ? ` AND (conversation_id IN (SELECT value FROM json_each(?)) OR id IN (SELECT value FROM json_each(?))) AND id NOT IN (SELECT value FROM json_each(?)) AND (source_message_id IS NULL OR source_message_id NOT IN (SELECT value FROM json_each(?)))` : conversationId ? ` AND conversation_id = ?` : "";
+    const params = policy?.strict ? [JSON.stringify(policy.conversationIds??[]),JSON.stringify(policy.memoryIds??[]),JSON.stringify(policy.excludedIds??[]),JSON.stringify(excludedSources)] : conversationId ? [conversationId] : [];
     const memories = this.db.query(`SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(content)), 0) AS chars FROM ofs_memories WHERE superseded_by IS NULL${scopeSql}`).all(...params) as { count: number; chars: number }[];
-    const links = this.db.query(`SELECT COUNT(*) AS count FROM ofs_links${conversationId ? " WHERE conversation_id = ?" : ""}`).all(...params) as { count: number }[];
+    const links = this.db.query(`SELECT COUNT(*) AS count FROM ofs_links${policy?.strict ? " WHERE conversation_id IN (SELECT value FROM json_each(?))" : conversationId ? " WHERE conversation_id = ?" : ""}`).all(...(policy?.strict?[JSON.stringify(policy.conversationIds??[])]:conversationId?[conversationId]:[])) as { count: number }[];
     let databaseBytes = 0;
     for (const suffix of ['', '-wal', '-shm']) {
       try { databaseBytes += statSync(this.config.dbPath + suffix).size; } catch { /* WAL files are optional. */ }
     }
     return { activeMemories: memories[0]?.count ?? 0, workingTurns: this.workingMemory.length, indexedTokens: Math.ceil((memories[0]?.chars ?? 0) / 3.8), links: links[0]?.count ?? 0, databaseBytes };
+  }
+
+  public async exportSnapshot(): Promise<OFSSnapshot> {
+    await this.ingestionQueue;
+    const memories = this.db.query('SELECT * FROM ofs_memories ORDER BY id').all().map(row => ({ ...row, embedding: Buffer.from(row.embedding as Uint8Array).toString('base64') }));
+    return { version: 1, createdAt: Date.now(), workingMemory: structuredClone(this.workingMemory), memories,
+      links: this.db.query('SELECT * FROM ofs_links ORDER BY conversation_id, source, target, relation').all(),
+      turns: this.db.query('SELECT * FROM ofs_ingested_turns ORDER BY source_message_id').all(),
+      metadata: this.db.query('SELECT * FROM ofs_metadata ORDER BY key').all() };
+  }
+
+  public async importSnapshot(snapshot: OFSSnapshot, remap?: { from: string; to: string }): Promise<void> {
+    await this.ingestionQueue;
+    if (snapshot.version !== 1 || !Array.isArray(snapshot.memories) || !Array.isArray(snapshot.links) || !Array.isArray(snapshot.turns) || !Array.isArray(snapshot.metadata)) throw new Error('Unsupported OrionFS checkpoint.');
+    const groups = [['ofs_memories', snapshot.memories], ['ofs_links', snapshot.links], ['ofs_ingested_turns', snapshot.turns], ['ofs_metadata', snapshot.metadata]] as const;
+    this.db.transaction(() => {
+      this.db.exec('DELETE FROM ofs_memories_fts; DELETE FROM ofs_memories; DELETE FROM ofs_links; DELETE FROM ofs_ingested_turns; DELETE FROM ofs_metadata;');
+      for (const [table, rows] of groups) {
+        const columns = (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(column => column.name);
+        for (const row of rows) {
+          const keys = columns.filter(key => Object.hasOwn(row, key));
+          const values = keys.map(key => key === 'embedding' ? new Uint8Array(Buffer.from(String(row[key]), 'base64')) : key === 'conversation_id' && remap && row[key] === remap.from ? remap.to : row[key]);
+          this.db.run(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`, values);
+        }
+      }
+      this.db.exec('INSERT INTO ofs_memories_fts (id,content,entities) SELECT id,content,entities FROM ofs_memories;');
+    })();
+    this.workingMemory = structuredClone(snapshot.workingMemory ?? []);
+    this.vectorCache.clear(); this.warmVectorCache();
   }
 
   public listMemories(limit = 50, offset = 0) {

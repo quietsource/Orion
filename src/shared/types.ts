@@ -8,7 +8,7 @@ export interface WebResearchStep { id: string; query: string; status: 'searching
 export interface WebResearchActivity { status: 'planning'|'searching'|'reading'|'complete'|'error'; steps: WebResearchStep[]; }
 export interface WebResearchEvent { stepId: string; phase: 'planning'|'searching'|'reading'|'source'|'complete'|'error'; query?: string; source?: WebResearchSource; error?: string; }
 export interface MessageAttachment { id: string; name: string; mimeType: string; kind: 'image'|'document'; }
-export interface Message { id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
+export interface Message { memoryUsed?: Array<{id:string;conversationId:string;messageId:string;text:string}>; assumptionIds?: string[]; id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
 export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }
@@ -35,7 +35,8 @@ export interface CreateProgress { id: string; phase: string; detail: string; per
 export interface GeneratedMedia { id: string; prompt: string; modelId: string; path: string; mediaType: 'image'|'video'; createdAt: number; }
 export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'installing'|'error'; version?: string; notes?: string; received?: number; total?: number; detail?: string; }
 export interface OrionAPI {
-  listOFSMemories(offset?: number): Promise<{ total: number; items: Array<{ id: string; content: string; type: string; entities: string[]; importance: number; createdAt: number; conversationId: string; sourceMessageId: string | null }> }>;
+  memoryHistory: import('./memoryHistory').MemoryHistoryAPI;
+  listOFSMemories(offset?: number, conversationId?: string): Promise<{ total: number; items: Array<{ id: string; content: string; type: string; entities: string[]; importance: number; createdAt: number; conversationId: string; sourceMessageId: string | null }> }>;
   listProviders(): Promise<ApiProvider[]>;
   saveProvider(provider: ApiProvider): Promise<void>;
   deleteProvider(id: string): Promise<void>;
@@ -49,7 +50,7 @@ export interface OrionAPI {
   settings(): Promise<AppSettings>; saveSettings(settings: AppSettings): Promise<void>; getSystemPrompt(model?: string, mode?: ToolMode): Promise<string>;
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
   streamChat(input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
-  cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; type: 'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
+  cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
   installMemoryEmbedding(): Promise<void>;
   onMemoryProgress(callback: (progress: { completed: number; total: number; status?: string; error?: string }) => void): () => void;
   searchWeb(query: string): Promise<{ title: string; url: string; snippet: string }[]>;

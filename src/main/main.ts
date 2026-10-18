@@ -15,6 +15,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
+import { MemoryHistory } from './memoryHistory';
 import type { MemoryChunk } from './memory';
 import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } from './contextBudget';
 import { isOrionHelpQuestion, searchOrionHelp } from './orionHelp';
@@ -41,6 +42,34 @@ for (const stream of [process.stdout, process.stderr]) stream.on('error', error 
 let win: BrowserWindow;
 const agentRunMemory = new AgentRunMemory();
 let ofsMemory: OFSClient | null = null;
+let memoryHistory: MemoryHistory | undefined;
+let chatPreparing = false;
+function getMemoryHistory() {
+  return memoryHistory ??= new MemoryHistory({
+    directory: path.join(dataDir(), 'memory-history'),
+    readConversations,
+    saveConversation: value => serializeMutation('conversations', async () => {
+      const all = await readConversations(); const index = all.findIndex(item => item.id === value.id);
+      if (index < 0) all.push(value); else all[index] = value;
+      await writeConversations(all);
+    }),
+    baseEngine: async () => getOrionFS(await getSettings()),
+    createEngine: async id => {
+      if (!/^[a-f0-9-]{36}$/.test(id)) throw Error('Invalid memory branch.');
+      const directory = path.join(dataDir(), 'memory-history', 'branches');
+      await fs.mkdir(directory, { recursive: true });
+      const dbPath = path.join(directory, `${id}.sqlite`);
+      const fresh = !(await fs.stat(path.join(directory, `${id}.ready.enc`)).catch(() => null));
+      const settings = await getSettings();
+      const client = new OFSClient({ dbPath, maxContextTokens: Math.max(8192, settings.contextWindow), reservedOutputTokens: 1024, memoryBudgetRatio: .25 }, path.join(app.getAppPath(), 'dist', 'main', 'ofsWorker.js'), {
+        prepare: () => openEncryptedDatabase(`${dbPath}.enc`, dbPath), seal: () => sealEncryptedDatabase(`${dbPath}.enc`, dbPath), idleMs: 20_000
+      });
+      return { client, fresh };
+    },
+    defaultScope: async () => (await getSettings()).interConversationMemory ? 'all' : 'conversation',
+    busy: () => chatPreparing || Boolean(activeAbort) || modelCompatibilityBusy
+  });
+}
 const ofsDeletedConversations = new Set<string>();
 let diffusionManager: DiffusionManager;
 let llamaManager: LlamaManager;
@@ -460,7 +489,7 @@ function getOrionFS(settings: AppSettings): OFSClient {
   return ofsMemory;
 }
 async function indexOFSConversation(conversation: Conversation, settings: AppSettings): Promise<void> {
-  const engine = getOrionFS(settings);
+  const engine = await getMemoryHistory().engine(conversation.id);
   for (const message of conversation.messages) {
     if (appQuitting || ofsDeletedConversations.has(conversation.id)) break;
     if (message.role !== 'user' && message.role !== 'assistant') continue;
@@ -485,8 +514,9 @@ function indexOFSConversationBatch(settings: AppSettings): Promise<void> {
 async function retrieveConversationMemory(query: string, settings: AppSettings, maxTokens: number, excludedIds: ReadonlySet<string>, tokenCount: (chunk: MemoryChunk) => number, conversationId?: string): Promise<MemoryChunk[]> {
   // OrionFS is now the only persistent memory engine. The experimental flag is
   // retained only for settings-file compatibility and is always normalized on.
-  const engine = getOrionFS(settings);
-  const memories = await engine.recall(query, maxTokens, settings.interConversationMemory ? '__all__' : conversationId ?? '__no_active_conversation__', [...excludedIds]);
+  const history = getMemoryHistory(), engine = await history.engine(conversationId);
+  const context = conversationId ? await history.context(conversationId) : undefined;
+  const memories = await engine.recall(query, maxTokens, conversationId ? '__all__' : '__no_active_conversation__', [...excludedIds, ...(context?.lens.excludedSources ?? [])], conversationId ? await history.policy(conversationId) : undefined);
   let remaining = maxTokens;
   return memories.filter(memory => !excludedIds.has(memory.sourceMessageId ?? memory.id)).map(memory => ({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: tokenCount({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: 0 }) })).filter(chunk => { if (chunk.tokens > remaining) return false; remaining -= chunk.tokens; return true; });
 }
@@ -705,7 +735,7 @@ app.on('before-quit', event => {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.allSettled([llamaManager?.dispose(), diffusionManager?.stop(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
+        Promise.allSettled([llamaManager?.dispose(), diffusionManager?.stop(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
         new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000); })
       ]);
     } finally {
@@ -1163,7 +1193,7 @@ ipcMain.handle('create:read-media', async (_, value: string) => {
 ipcMain.handle('conversation:list', async () => (await readConversations()).sort((a,b) => b.updatedAt-a.updatedAt));
 ipcMain.handle('storage:warning', () => [...storageWarnings].join('\n\n') || null);
 ipcMain.handle('conversation:get', async (_, id: string) => (await readConversations()).find(c => c.id === id) ?? null);
-ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory = false) => serializeMutation('conversations', async () => {
+ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory = false) => { await serializeMutation('conversations', async () => {
   // Persisted workspace selection is paused with workspace mode.
   value.workspacePath = undefined;
   ofsDeletedConversations.delete(value.id);
@@ -1175,18 +1205,37 @@ ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory =
     value.summary = [...new Set([value.summary ?? '', ...facts].filter(Boolean))].slice(-24).join('\n').slice(-7000);
   }
   const all = await readConversations(); const idx = all.findIndex(c => c.id === value.id); if (idx < 0) all.push(value); else all[idx] = value; await writeConversations(all);
-  if (indexMemory && !appQuitting) { const settings = await getSettings(); void indexOFSConversation(value, settings).catch(error => { if (!appQuitting) console.error('OrionFS indexing failed:', error); }); }
-}));
-ipcMain.handle('conversation:delete', async (_, id: string) => serializeMutation('conversations', async () => { ofsDeletedConversations.add(id); await writeConversations((await readConversations()).filter(c => c.id !== id)); await ofsMemory?.removeConversation(id); }));
+  if (indexMemory && !appQuitting) {
+    await indexOFSConversation(value, await getSettings());
+  }
+});
+  const last = value.messages.at(-1);
+  if (indexMemory && last?.role === 'assistant' && (last.content.trim() || last.toolCalls?.length) && !activeAbort && !chatPreparing) await getMemoryHistory().checkpoint(value.id, undefined, true);
+});
+ipcMain.handle('conversation:delete', async (_, id: string) => {
+  if (chatPreparing || activeAbort) throw Error('Wait for generation to finish before deleting a conversation.');
+  ofsDeletedConversations.add(id);
+  await (await getMemoryHistory().engine(id)).removeConversation(id);
+  await serializeMutation('conversations', async () => { await writeConversations((await readConversations()).filter(c => c.id !== id)); });
+  await getMemoryHistory().remove(id);
+});
 ipcMain.handle('memory:stats', async (_, conversationId?: string) => {
   const settings = await getSettings();
-  const stats = await getOrionFS(settings).getStats(settings.interConversationMemory ? undefined : conversationId);
+  const history = getMemoryHistory(), context = conversationId ? await history.context(conversationId) : undefined;
+  const stats = await (await history.engine(conversationId)).getStats(conversationId, conversationId ? await history.policy(conversationId) : undefined, context?.lens.excludedSources);
   return { indexedTokens: stats.indexedTokens, limitTokens: 1_000_000, chunks: stats.activeMemories, embeddedChunks: 0, embeddingModel: null, semantic: false, recoveryWarning: null, rebuilding: Boolean(ofsSeedPromise), engine: 'ofs', activeMemories: stats.activeMemories, workingTurns: stats.workingTurns, links: stats.links, databaseBytes: stats.databaseBytes };
 });
-ipcMain.handle('memory:ofs-list', async (_, offset = 0) => {
+ipcMain.handle('memory:ofs-list', async (_, offset = 0, conversationId?: string) => {
   const settings = await getSettings();
-  return getOrionFS(settings).listMemories(50, Number.isFinite(offset) ? offset : 0);
+  return (await getMemoryHistory().engine(conversationId)).listMemories(50, Number.isFinite(offset) ? offset : 0);
 });
+for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare'] as const) {
+  ipcMain.handle(`memory-history:${method}`, async (_, ...args: unknown[]) => {
+    if (args.some(value => typeof value === 'string' && value.length > 256)) throw Error('Invalid memory request.');
+    const history = getMemoryHistory();
+    return (history[method] as (...values: unknown[]) => Promise<unknown>).apply(history, args.slice(0, 3));
+  });
+}
 ipcMain.handle('memory:install-embedding', () => { throw new Error('OrionFS is model-free and does not use embedding models.'); });
 ipcMain.handle('schedule:list', readScheduledJobs);
 ipcMain.handle('schedule:save', async (_, value: Partial<ScheduledJob>) => persistScheduledJob(value));
@@ -1301,6 +1350,7 @@ function toolNeedsApproval(name: string, settings: AppSettings) {
 }
 
 const ollamaTools = [
+  { type: 'function', function: { name: 'record_assumption', description: 'Record only a consequential constraint or uncertain assumption that changes the work. Do not use for greetings, simple answers or routine facts. kind is inferred unless directly quoted from a user. Update an existing id to correct it; confirm or dismiss existing assumptions.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['save','confirm','dismiss'] }, id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['stated','inferred'] }, sourceMessageIds: { type: 'array', items: { type: 'string' } } }, required: ['action'] } } },
   { type: 'function', function: { name: 'search_orion_help', description: 'Search Orion help. For OGS, graphs, diagrams, or charts, this returns the complete internal JSON authoring schema and valid examples, not just user-facing guidance. Use when the user asks how Orion works or how to do something in Orion.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The Orion feature or task the user needs help with.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'create_image', description: 'Generate media in Orion Create with the selected default model. Use only when the user explicitly requests image or video generation. Write a clear, detailed visual prompt. Set kind to video only for an explicit video request; otherwise omit it or use image.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, kind: { type: 'string', enum: ['image','video'] } }, required: ['prompt'] } } },
   { type: 'function', function: { name: 'create_video', description: 'Generate a video locally in Orion Create using the selected default video model. Use only when the user explicitly requests a video or animation. Describe the subject, scene, motion, camera movement, lighting, and style in a detailed visual prompt. Orion displays live generation progress and plays the finished video in chat, then restores the chat model for your final response.', parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'Detailed description of the requested video, including motion.' } }, required: ['prompt'] } } },
@@ -1644,6 +1694,10 @@ ipcMain.handle('system:prompt', async (_event, model?: string, mode?: ToolMode) 
 });
 
 ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }) => {
+  if (chatPreparing || activeAbort) throw Error('A conversation is already generating.');
+  chatPreparing = true;
+  try {
+  await getMemoryHistory().settled();
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before starting a chat.');
   const settings = await getSettings();
   const allMemory = await readConversations();
@@ -1717,7 +1771,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const inlineOrionHelp = !helpToolAvailable && isOrionHelpQuestion(latestUserRequest) ? searchOrionHelp(latestUserRequest) : '';
   const modelIdentity = await getModelIdentity(input.model);
   const buildRequestSystemPrompt = async () => addTextToolProtocol(
-    await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling),
+    (await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling)) + await getMemoryHistory().prompt(input.conversationId, Math.max(500,Math.min(16000,contextBudget*.5))),
     availableTools,
     nativeToolCalling
   );
@@ -1827,7 +1881,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const attachmentStart = latestUserRequest.indexOf(attachmentMarker);
   const retrievalQuestion = (attachmentStart >= 0 ? latestUserRequest.slice(0, attachmentStart) : latestUserRequest).trim();
   const memoryPromptTokens = (chunk: { title: string; role: string; text: string; createdAt: number }) => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, input.model) + 1;
-  const memoryScope = settings.interConversationMemory ? undefined : input.conversationId;
+  const memoryScope = input.conversationId;
   const currentRequestMemory = retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope);
   const recentContextQuery = [
     `Current request: ${latestUserRequest.slice(0, 2400)}`,
@@ -1843,6 +1897,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     if (retrievedIds.has(chunk.id) || retrieved.length >= 48 || retrievedTokens + promptTokens > memoryBudget) continue;
     retrieved.push(chunk); retrievedIds.add(chunk.id); retrievedTokens += promptTokens;
   }
+  event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'memory_context', memories: retrieved.map(chunk => ({ id: chunk.id, conversationId: chunk.conversationId, messageId: chunk.messageId, text: chunk.text })) });
   const memories = retrieved.map(chunk => memoryPromptText(chunk));
   let memory = compactSummary ? `Recent conversation summary:\n${compactSummary}\n` : '';
   memory += memories.join('\n\n');
@@ -1942,7 +1997,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       for (const message of outputs) message.content = truncateToChatTokens(String(message.content ?? ''), Math.floor(allowance / safety));
     }
   };
-  activeAbort?.abort(); const requestAbort = new AbortController(); activeAbort = requestAbort;
+  const requestAbort = new AbortController(); activeAbort = requestAbort;
   try {
     if (remote || routedManaged || routedModel.startsWith('orion-gguf:')) {
       const managedId = routedManaged?.id ?? routedModel.slice('orion-gguf:'.length);
@@ -2204,6 +2259,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     }
     const tokensPerSecond = evaluationNanos > 0 ? evaluatedTokens / (evaluationNanos / 1e9) : undefined; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'done', tokensPerSecond }); return { tokensPerSecond };
   } catch (error) { if (requestAbort.signal.aborted) { event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'cancelled' }); return { tokensPerSecond: undefined }; } const message = error instanceof Error ? error.message : String(error); event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'error', content: message }); throw new Error(message); } finally { focusCadence.stop(); agentRunMemory.clearAgentRun(input.conversationId, focusRunId); await completeWorkspaceSession(event.sender,input.conversationId).catch(error=>console.error('Could not finalize project review:',error)); if (activeAbort === requestAbort) activeAbort = null; }
+  } finally { chatPreparing = false; }
 });
 
 function decodeSearchHtml(value: string) {
@@ -2545,6 +2601,13 @@ async function controlDesktopWindow(action: string, target: string) {
   return { output: `${action} window: ${match.title} (${match.class})`, success: true };
 }
 async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string> = new Set(), conversationId?: string, activeModel = '', context = 8192): Promise<{ output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }> {
+  if (tool.name === 'record_assumption') {
+    if (!conversationId) throw Error('An active conversation is required.');
+    const action = String(tool.input.action ?? 'save');
+    if (!['save','confirm','dismiss'].includes(action)) throw Error('Choose save, confirm or dismiss.');
+    await getMemoryHistory().assumption(conversationId, action as 'save'|'confirm'|'dismiss', tool.input, true);
+    return { output: 'Assumption checkpoint updated. Continue the task; keep inferred claims uncertain.', success: true };
+  }
   if (disabledWorkspaceTools.has(tool.name)) return { output: 'Workspace tools are temporarily disabled.', success: false };
   if (tool.name === 'ask_user_question') {
     const answer = await askUserQuestion({ ...tool, conversationId: conversationId ?? tool.conversationId }, win.webContents);
@@ -2553,7 +2616,7 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
   if (tool.name === 'research_subagent') return runLocalSubagent(tool, 'research', memoryExcludedIds, conversationId ?? '', activeModel, context);
   if (tool.name === 'quality_control_subagent') return runLocalSubagent(tool, 'quality_control', memoryExcludedIds, conversationId ?? '', activeModel, context);
   if (tool.name === 'context_inspect') {
-    const settings = await getSettings(), stats = await getOrionFS(settings).getStats(settings.interConversationMemory ? undefined : conversationId);
+    const settings = await getSettings(), stats = await (await getMemoryHistory().engine(conversationId)).getStats(conversationId);
     return { output: JSON.stringify({ contextWindow: settings.contextWindow, activeModel: settings.selectedModel, conversationMemoryTokens: stats.indexedTokens, memoryChunks: stats.activeMemories, associationLinks: stats.links, subagentMaximum: settings.subagentMaxParallel }, null, 2), success: true };
   }
   if (tool.name === 'workspace_review') {

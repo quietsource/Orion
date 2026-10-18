@@ -2,7 +2,20 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, AppUpdateState } from '../shared/types';
 
 const api: OrionAPI = {
-  listOFSMemories: offset => ipcRenderer.invoke('memory:ofs-list', offset),
+  memoryHistory: {
+    context: conversationId => ipcRenderer.invoke('memory-history:context', conversationId),
+    dashboard: (conversationId) => ipcRenderer.invoke('memory-history:dashboard', conversationId),
+    checkpoint: (conversationId, label) => ipcRenderer.invoke('memory-history:checkpoint', conversationId, label),
+    preview: (checkpointId) => ipcRenderer.invoke('memory-history:preview', checkpointId),
+    branch: (checkpointId, name) => ipcRenderer.invoke('memory-history:branch', checkpointId, name),
+    lens: (conversationId, lens) => ipcRenderer.invoke('memory-history:lens', conversationId, lens),
+    assumption: (conversationId, action, value) => ipcRenderer.invoke('memory-history:assumption', conversationId, action, value),
+    tag: (conversationId, memoryId, scope) => ipcRenderer.invoke('memory-history:tag', conversationId, memoryId, scope),
+    packet: (conversationId) => ipcRenderer.invoke('memory-history:packet', conversationId),
+    carry: (conversationId, packet) => ipcRenderer.invoke('memory-history:carry', conversationId, packet),
+    compare: (leftId, rightId) => ipcRenderer.invoke('memory-history:compare', leftId, rightId),
+  },
+  listOFSMemories: (offset, conversationId) => ipcRenderer.invoke('memory:ofs-list', offset, conversationId),
   windowAction: (action) => ipcRenderer.invoke('window:action', action),
   listProviders: () => ipcRenderer.invoke('providers:list'),
   saveProvider: provider => ipcRenderer.invoke('providers:save', provider),

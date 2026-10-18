@@ -11,6 +11,7 @@ function applyTheme() { document.documentElement.dataset.theme = 'graphite'; doc
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolCallRecord, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, BackendState, GeneratedMedia, WorkspaceReview, WorkspaceStatus, ToolMode, WebResearchSource, AppUpdateState } from '../shared/types';
 import './style.css';
 import './agent.css';
+import { installMemoryHistory } from './memoryHistory';
 import { looksLikeOgs } from '../shared/ogsAuthoring';
 import { hydrateOgs, installOgsActions } from './ogs';
 import './composer.css';
@@ -72,6 +73,23 @@ const marked = new Marked({ gfm: true, breaks: true, extensions: [
 ], renderer: { code({ text, lang }) { if (lang?.trim().toLowerCase() === 'ogs' || ((!lang || lang.trim().toLowerCase()==='json') && looksLikeOgs(text))) return `<div data-ogs="${encodeURIComponent(text)}"></div>`; const validLang = lang && hljs.getLanguage(lang) ? lang : ''; const highlighted = validLang ? hljs.highlight(text, { language: validLang }).value : hljs.highlightAuto(text, autoDetectLanguages).value; const escapedLang = (lang || 'Code').replace(/[<>&"']/g, ''); const lines = Math.max(1, text.replace(/\n$/, '').split('\n').length); return `<div class="code-block"><div class="code-header"><button class="open-code-canvas" type="button" data-canvas-content="${encodeURIComponent(text)}" data-canvas-lang="${escapedLang}">Canvas</button><span class="code-lang">${escapedLang}</span><button class="copy-code" data-copy="${encodeURIComponent(text)}">Copy</button></div><div class="code-content"><div class="line-numbers">${Array.from({ length: lines }, (_, i) => i + 1).join('<br>')}</div><pre><code class="hljs">${highlighted}</code></pre></div></div>`; } } });
 let conversations: Conversation[] = [], current: Conversation | null = null, settings: AppSettings, models: { name: string; size: number; details?: Record<string, unknown>; capabilities?: string[]; source?: 'ollama'|'orion'|'api' }[] = [], attachments: Array<{ name: string; path: string; content: string; mimeType: string; kind: 'image'|'document'; attachment?: MessageAttachment }> = [], streaming = false, ollamaConnected = false, generationStatus = '';
 let canvasReviewAttachment:MessageAttachment|undefined;
+const memoryControls = installMemoryHistory({
+  current: () => current,
+  busy: () => streaming || Boolean(activeChatTask),
+  flush: async () => { storeCanvasSession(); await save(); },
+  activate: async (conversationId, messageId) => {
+    storeCanvasSession(); conversations = await window.orion.listConversations();
+    const next = conversations.find(item => item.id === conversationId);
+    if (!next) throw Error('The source conversation has been deleted.');
+    current = next; activeView = 'Chat'; updateActiveNav('Chat'); switchCanvasConversation(next.id);
+    chatMode = 'chat'; updateChatModeUi(); await memoryControls.refresh(); renderHistory(); renderMessages(!messageId);
+    if (messageId) requestAnimationFrame(() => { const target = [...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(item => item.dataset.messageId === messageId); if (target) { followsLatestMessage = false; target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } });
+  },
+  draft: text => { promptBox.value = text; promptBox.dispatchEvent(new Event('input', { bubbles: true })); promptBox.focus(); },
+  rerender: () => renderMessages()
+});
+let memoryControlsConversation: string | undefined;
+
 type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment };
 type SendOutcome = 'complete'|'cancelled'|'failed'|'unavailable';
 const messageQueue = new MessageQueue<QueuedMessage>();
@@ -210,7 +228,8 @@ function scheduleRender(structureChanged = false) {
         }
       }
       const updatedMessage=[...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(node=>node.dataset.messageId===message.id);
-      if(updatedMessage)restoreNestedScroll(updatedMessage,nestedScroll);      if (shouldFollow) requestAnimationFrame(() => { if (followsLatestMessage) chatScroller.scrollTop = chatScroller.scrollHeight; });
+      if(updatedMessage)restoreNestedScroll(updatedMessage,nestedScroll);
+      if (shouldFollow) requestAnimationFrame(() => { if (followsLatestMessage) chatScroller.scrollTop = chatScroller.scrollHeight; });
       else requestAnimationFrame(() => restoreChatAnchor(scrollAnchor));
       return;
     }
@@ -339,10 +358,10 @@ async function renderMemoryUsage() {
     $('memory-label').title = error instanceof Error ? error.message : String(error);
   }
 }
-async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(interConversation ? undefined : conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
+async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
 async function save(conversation: Conversation | null = current, indexMemory = false) { if (!conversation) return; conversation.updatedAt = now(); await window.orion.saveConversation(conversation, indexMemory); renderHistory(); void renderMemoryUsage(); }
 function scheduleSave(conversation: Conversation) { const timer = persistTimers.get(conversation.id); if (timer) clearTimeout(timer); persistTimers.set(conversation.id, window.setTimeout(() => { persistTimers.delete(conversation.id); void save(conversation); }, 900)); }
-function renderHistory() { historyBox.replaceChildren(); const groups: [string, Conversation[]][] = [['Today', []], ['Yesterday', []], ['Previous 7 days', []], ['Older', []]]; const day = new Date().setHours(0,0,0,0); for (const c of [...conversations].sort((a,b)=>b.updatedAt-a.updatedAt)) { const age = day - new Date(c.updatedAt).setHours(0,0,0,0); groups[age <= 0 ? 0 : age <= 86400000 ? 1 : age <= 7 * 86400000 ? 2 : 3]![1].push(c); } for (const [name, items] of groups) { if (!items.length) continue; const g = document.createElement('div'); g.className = 'history-group'; const label=document.createElement('div');label.className='section-label';label.textContent=name;g.append(label); for (const c of items) { const b = document.createElement('button'); b.className = `conversation${current?.id === c.id ? ' current' : ''}`; b.dataset.id = c.id; b.textContent = c.title; b.title = 'Right click to delete'; b.onclick = () => { activeView = 'Chat'; updateActiveNav('Chat'); switchCanvasConversation(c.id); current = c; chatMode = 'chat'; updateChatModeUi(); renderMessages(true); renderHistory(); void window.orion.saveConversation(c, true).then(() => renderMemoryUsage()); }; g.append(b); } historyBox.append(g); } }
+function renderHistory() { historyBox.replaceChildren(); const groups: [string, Conversation[]][] = [['Today', []], ['Yesterday', []], ['Previous 7 days', []], ['Older', []]]; const day = new Date().setHours(0,0,0,0); for (const c of [...conversations].sort((a,b)=>b.updatedAt-a.updatedAt)) { const age = day - new Date(c.updatedAt).setHours(0,0,0,0); groups[age <= 0 ? 0 : age <= 86400000 ? 1 : age <= 7 * 86400000 ? 2 : 3]![1].push(c); } for (const [name, items] of groups) { if (!items.length) continue; const g = document.createElement('div'); g.className = 'history-group'; const label=document.createElement('div');label.className='section-label';label.textContent=name;g.append(label); for (const c of items) { const b = document.createElement('button'); b.className = `conversation${current?.id === c.id ? ' current' : ''}`; b.dataset.id = c.id; b.textContent = c.title; b.title = 'Right click to delete'; b.onclick = () => { activeView = 'Chat'; updateActiveNav('Chat'); storeCanvasSession(); current = c; switchCanvasConversation(c.id); chatMode = 'chat'; updateChatModeUi(); renderMessages(true); renderHistory(); void window.orion.saveConversation(c, true).then(() => renderMemoryUsage()); }; g.append(b); } historyBox.append(g); } }
 function updateActiveNav(view: string) { document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view)); }
 function renderWorkspaceReview(review: WorkspaceReview | null) {
   workspaceReview = review;
@@ -617,6 +636,13 @@ function renderMessage(active: Conversation, message: Message) {
   timestamp.textContent = time(message.createdAt);
   header.append(author, timestamp);
   article.append(header);
+  if (message.memoryUsed?.length) {
+    const audit = document.createElement('details'); audit.className = 'memory-used';
+    const summary = document.createElement('summary'); summary.textContent = `Recalled ${message.memoryUsed.length} memories`; audit.append(summary);
+    for (const memory of message.memoryUsed) { const entry = document.createElement('p'); entry.textContent = memory.text; audit.append(entry); }
+    article.append(audit);
+  }
+  const dependency = memoryControls.dependencyNotice(message, active); if (dependency) article.append(dependency);
   const hasVisibleOutput = Boolean(message.content.trim() || message.reasoning?.trim() || message.toolCalls?.length || message.webResearch?.steps.length);
   if (live && !hasVisibleOutput) {const loading=document.createElement('div');loading.className='chat-loading';loading.setAttribute('role','status');loading.setAttribute('aria-live','polite');loading.append(createWelcomeArt(true));article.append(loading);}
   const workflow = document.createElement('section');
@@ -818,11 +844,13 @@ const mainPanel = document.querySelector<HTMLElement>('.main');
 if (mainPanel) conversationMapResizeObserver.observe(mainPanel);
 conversationMapResizeObserver.observe(chatScroller);
 function renderMessages(forceScroll = false) {
+  if (memoryControlsConversation !== current?.id) { memoryControlsConversation = current?.id; void memoryControls.refresh().then(() => { if (!streaming) renderMessages(); }); }
   document.body.classList.remove('models-view','create-view');
   document.body.classList.toggle('chat-empty', activeView === 'Chat' && !current?.messages.length);
   renderMessageQueue();
   $('model-selector-wrap').hidden = false; $('create-composer-wrap').hidden = true;
-  const active = current;  renderConversationMap(current);
+  const active = current;
+  renderConversationMap(current);
   if (activeView === 'Create') { renderCreateView(); return; }
   if (activeView === 'Models') { renderModelsView(); return; }
   const shouldFollow = forceScroll || followsLatestMessage;
@@ -941,7 +969,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
   const userMessage=createMessage('user', userText);if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
   if (target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
-  target.messages.push(createMessage('assistant', '')); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
+  const response = createMessage('assistant', ''); response.assumptionIds = memoryControls.assumptions(target.id).map(item => item.id); target.messages.push(response); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
   const generationStarted = performance.now();
   let outcome: SendOutcome = 'complete';
   let off: () => void = () => undefined;
@@ -949,6 +977,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   await save(target, true); if (current?.id === target.id) renderMessages(true);
   off = window.orion.onStream(e => {
     if (e.conversationId !== target.id) return;
+    if(e.type === 'memory_context') { target.messages.at(-1)!.memoryUsed = e.memories; return; }
     if(e.type==='canvas'&&e.canvas){
       const message=target.messages.at(-1);
       if(message){message.canvasDocuments??=[];const index=message.canvasDocuments.findIndex(doc=>doc.id===e.canvas!.id||doc.name===e.canvas!.name);if(index>=0)message.canvasDocuments[index]=e.canvas;else message.canvasDocuments.push(e.canvas);}
@@ -1015,7 +1044,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     if (current?.id === target.id) scheduleRender();
   });
   const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: true, mode: chatMode });
-  const completedAssistant = target.messages.at(-1); if (completedAssistant) { completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
+  const completedAssistant = target.messages.at(-1); if (completedAssistant) { const memoryContext = await window.orion.memoryHistory.context(target.id); completedAssistant.assumptionIds = [...new Set([...(completedAssistant.assumptionIds??[]),...memoryContext.assumptions.filter(item=>item.status!=='dismissed').map(item=>item.id)])]; completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (e) {
     outcome = 'failed';
     const assistant = target.messages.at(-1);
@@ -1023,7 +1052,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   } finally {
     off(); const timer = persistTimers.get(target.id); if (timer) clearTimeout(timer); persistTimers.delete(target.id);
     setComposerStreaming(false); $('send').textContent = '↑'; $('send').setAttribute('title','Send');
-    try { await save(target, true); } catch (error) { console.error('Could not save conversation:', error); }
+    try { await save(target, true); await memoryControls.refresh(); } catch (error) { console.error('Could not save conversation:', error); }
     if (current?.id === target.id) { renderMessages(); }
   }
   return outcome;
@@ -1123,7 +1152,7 @@ async function refreshMemoryInspector() {
   status.textContent = 'Loading local memory…'; more.hidden = true;
   try {
     const stats = await window.orion.memoryStats();
-    const page = await window.orion.listOFSMemories(memoryInspectorOffset);
+    const page = await window.orion.listOFSMemories(memoryInspectorOffset, current?.id);
     if (request !== memoryInspectorRequest) return;
     $('rebuild-memory').textContent = 'Rebuild OrionFS memory';
     grid.replaceChildren(); list.replaceChildren();
@@ -1445,7 +1474,7 @@ async function runScheduledJob(job: ScheduledJob) {
       scheduleSave(target);
     });
     const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: job.agent });
-    const completedAssistant = target.messages.at(-1); if (completedAssistant) { completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
+    const completedAssistant = target.messages.at(-1); if (completedAssistant) { const memoryContext = await window.orion.memoryHistory.context(target.id); completedAssistant.assumptionIds = [...new Set([...(completedAssistant.assumptionIds??[]),...memoryContext.assumptions.filter(item=>item.status!=='dismissed').map(item=>item.id)])]; completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (error) {
     failed = true; const assistant = target.messages.at(-1);
     if (assistant && !assistant.content) assistant.content = `Orion error: ${error instanceof Error ? error.message : String(error)}`;

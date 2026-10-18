@@ -1,3 +1,17 @@
+# Orion 0.2.0 — Conversation memory and alternate paths (local preview)
+
+- Add a horizontal checkpoint timeline with previews of messages, OrionFS memory, assumptions, and Canvas documents. Continue from a saved checkpoint in a separate branch without changing the original conversation.
+- Add assumption checkpoints with evidence links, inferred/user-stated provenance, explicit user confirmation, corrections, dependent-answer review markers, and revision prompts for affected Canvas work.
+- Add per-conversation memory lenses for conversation, named-project, personal, and all-conversation recall, with memory pins, exclusions, sharing labels, and source navigation.
+- Show automatically recalled memory snippets on individual answers and make sidebar memory counts follow the active lens and branch.
+- Add editable, reviewed carry-forward packets containing selected context, constraints, decisions, open questions, memories, and Canvas documents. Continuations start without hidden copies of the old memory store.
+- Add local branch comparison for message change counts, memories, assumptions, carried decisions, and Canvas revisions, with a shortcut to continue the preferred path.
+- Encrypt checkpoint history and branch data with Orion’s existing local storage key; compress snapshots and deduplicate stored vectors. Remove unreferenced checkpoint storage when conversations are deleted.
+- Preserve branch isolation across restarts, keep mutations out of active inference, and prevent a failed initial snapshot import from being treated as an initialized branch.
+- Restore saved Canvas documents when opening another conversation from history.
+
+0.2.0 packages are built locally and held for approval. The latest published release remains 0.1.9.
+
 # Orion 0.1.9 — More forgiving graph headings
 
 - Accept optional colons in simple OGS graph headings, so `venn: Three sets` and `bar: Weekly counts` render like their space-separated equivalents.

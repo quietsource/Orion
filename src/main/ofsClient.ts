@@ -103,13 +103,16 @@ export class OFSClient {
   ingestTurn(...args: Parameters<OrionFS['ingestTurn']>) { this.statsCache.clear(); return this.call<void>('ingest', args); }
   recall(...args: Parameters<OrionFS['recall']>) { return this.call<Awaited<ReturnType<OrionFS['recall']>>>('recall', args); }
   async getStats(...args: Parameters<OrionFS['getStats']>) {
-    const cacheKey = args[0] ?? '__all__';
+    const cacheKey = JSON.stringify(args);
+    if(this.statsCache.size>64)this.statsCache.clear();
     if (!this.worker && !this.startPromise && this.statsCache.has(cacheKey)) return this.statsCache.get(cacheKey)!;
     const value = await this.call<ReturnType<OrionFS['getStats']>>('stats', args);
     this.statsCache.set(cacheKey, value);
     return value;
   }
   listMemories(...args: Parameters<OrionFS['listMemories']>) { return this.call<ReturnType<OrionFS['listMemories']>>('list', args); }
+  exportSnapshot() { return this.call<Awaited<ReturnType<OrionFS['exportSnapshot']>>>('export'); }
+  importSnapshot(...args: Parameters<OrionFS['importSnapshot']>) { this.statsCache.clear(); return this.call<void>('import', args); }
   removeConversation(id: string) { this.statsCache.clear(); return this.call<void>('remove', [id]); }
 
   async close() {
