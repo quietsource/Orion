@@ -1,6 +1,6 @@
 # Orion
 
-Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The latest published release is `0.1.9`. The local `0.2.0` build adds five conversation-memory features and is awaiting release approval.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The latest published release is `0.1.9`. The local `0.2.0` build adds five conversation-memory features and private local voice and is awaiting release approval.
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
@@ -44,6 +44,12 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 
 All five use OrionFS locally. Checkpoints preserve application context rather than model hidden state, and do not reverse external actions. Branches use isolated memory snapshots. See the [conversation memory guide](docs/memory-history.md) for workflows, context limits, and deletion behavior. These packages have not been published yet.
 
+## Local voice — 0.2.0 preview
+
+Use the microphone beside Send for live English dictation. Click Send, press Enter, or pause and say exactly **send the message**. The separate speaker toggle enables natural neural read aloud; Settings → Voice offers six American/British voices, speed control, and previews.
+
+The native runtime and relevant model download only after first-use setup is accepted. Dictation and read aloud install independently and work offline afterward. Raw audio stays in memory, without recordings or separate transcript logs. Sent text uses normal encrypted chat history. Voice conversations stay on local models with local tools; voice-derived memories are excluded from ordinary and hosted-provider recall. See the [local voice guide](docs/local-voice.md) for setup, privacy boundaries, and current English support.
+
 ## Requirements
 
 For normal use, connect Orion to a local Ollama server with a chat model installed, install an Orion-managed GGUF model, or configure an API provider. API providers receive the prompts sent to them and relevant recalled memories.
@@ -74,7 +80,7 @@ bun run dist
 
 Orion stores conversations, settings, OrionFS memories, downloaded models, and generated media in the operating system's per-user application data directory. Conversations, settings, OrionFS memories, checkpoint histories, assumption records, carry-forward packets, and provider API keys are encrypted at rest with AES-GCM. The encryption key is protected by the operating system's secure storage; Orion decrypts records while reading them and writes them back encrypted. The active OrionFS database is re-encrypted after it has been idle and when Orion exits cleanly. Existing conversation, settings, provider, and memory data is migrated as it is read. Linux requires a working desktop keyring such as GNOME Keyring, KWallet, or Secret Service.
 
-Downloaded model files and generated media files are stored locally but are not encrypted at rest. Local Ollama, llama.cpp, and `stable-diffusion.cpp` inference run on the computer. If you choose a hosted API provider, that provider receives the prompts and relevant memory needed for the request. Web search, model downloads, and initial `stable-diffusion.cpp` or llama.cpp setup use the network.
+Downloaded model files and generated media files are stored locally but are not encrypted at rest. Local Ollama, llama.cpp, and `stable-diffusion.cpp` inference run on the computer. If you choose a hosted API provider, that provider receives the prompts and relevant memory needed for the request. Web search, model downloads, and initial `stable-diffusion.cpp`, llama.cpp, or explicitly enabled local voice setup use the network. Speech recognition and neural read aloud run locally; microphone audio and synthesized audio are not uploaded or saved as recordings. Voice-derived chat text follows the additional local-only boundaries in the [voice guide](docs/local-voice.md).
 
 API keys are stored in a separate local file with restricted file permissions and are encrypted at rest. File attachments are read after you select them. Orion's tools may access the web or local applications when used in chat.
 

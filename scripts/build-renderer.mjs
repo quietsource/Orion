@@ -33,6 +33,6 @@ const html = sourceHtml
   .replace('<script type="module" src="/src/renderer/renderer.ts"></script>', '<script type="module" src="./renderer.js"></script>')
   .replace('</head>', '<link rel="stylesheet" href="./renderer.css"></head>');
 await writeFile(path.join(rendererDirectory, 'index.html'), html);
-for (const file of ['browser.html', 'browser.css', 'browser-ui.js']) {
+for (const file of ['browser.html', 'browser.css', 'browser-ui.js', 'voice-capture-worklet.js']) {
   await copyFile(path.join(publicDirectory, file), path.join(rendererDirectory, file));
 }

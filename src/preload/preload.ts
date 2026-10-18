@@ -2,6 +2,18 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, AppUpdateState } from '../shared/types';
 
 const api: OrionAPI = {
+  voice: {
+    state: () => ipcRenderer.invoke('voice:state'),
+    preferences: value => ipcRenderer.invoke('voice:preferences', value),
+    setup: kind => ipcRenderer.invoke('voice:setup', kind),
+    cancelSetup: () => ipcRenderer.invoke('voice:cancel-setup'),
+    start: () => ipcRenderer.invoke('voice:start'),
+    accept: (session, samples, sampleRate) => ipcRenderer.invoke('voice:accept', session, samples, sampleRate),
+    stop: (session, flush) => ipcRenderer.invoke('voice:stop', session, flush),
+    speak: (text, voice, speed) => ipcRenderer.invoke('voice:speak', text, voice, speed),
+    stopSpeech: () => ipcRenderer.invoke('voice:stop-speech'),
+    onProgress: callback => { const listener = (_: Electron.IpcRendererEvent, value: Parameters<typeof callback>[0]) => callback(value); ipcRenderer.on('voice:progress', listener); return () => ipcRenderer.removeListener('voice:progress', listener); }
+  },
   memoryHistory: {
     context: conversationId => ipcRenderer.invoke('memory-history:context', conversationId),
     dashboard: (conversationId) => ipcRenderer.invoke('memory-history:dashboard', conversationId),

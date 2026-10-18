@@ -12,6 +12,7 @@ import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocum
 import './style.css';
 import './agent.css';
 import { installMemoryHistory } from './memoryHistory';
+import { installVoice } from './voice';
 import { looksLikeOgs } from '../shared/ogsAuthoring';
 import { hydrateOgs, installOgsActions } from './ogs';
 import './composer.css';
@@ -72,13 +73,22 @@ const marked = new Marked({ gfm: true, breaks: true, extensions: [
   { name: 'inlineMath', level: 'inline', start(source) { const index=source.indexOf('$'); return index < 0 ? undefined : index; }, tokenizer(source) { if(source.startsWith('$$'))return; const match=/^\$((?:\\.|[^$\\\n])+?)\$(?!\$)/.exec(source); if(!match)return; return {type:'inlineMath',raw:match[0],text:match[1]!}; }, renderer(token) { return `<span class="math-inline">${katex.renderToString((token as unknown as {text:string}).text,{throwOnError:false,strict:'ignore'})}</span>`; } }
 ], renderer: { code({ text, lang }) { if (lang?.trim().toLowerCase() === 'ogs' || ((!lang || lang.trim().toLowerCase()==='json') && looksLikeOgs(text))) return `<div data-ogs="${encodeURIComponent(text)}"></div>`; const validLang = lang && hljs.getLanguage(lang) ? lang : ''; const highlighted = validLang ? hljs.highlight(text, { language: validLang }).value : hljs.highlightAuto(text, autoDetectLanguages).value; const escapedLang = (lang || 'Code').replace(/[<>&"']/g, ''); const lines = Math.max(1, text.replace(/\n$/, '').split('\n').length); return `<div class="code-block"><div class="code-header"><button class="open-code-canvas" type="button" data-canvas-content="${encodeURIComponent(text)}" data-canvas-lang="${escapedLang}">Canvas</button><span class="code-lang">${escapedLang}</span><button class="copy-code" data-copy="${encodeURIComponent(text)}">Copy</button></div><div class="code-content"><div class="line-numbers">${Array.from({ length: lines }, (_, i) => i + 1).join('<br>')}</div><pre><code class="hljs">${highlighted}</code></pre></div></div>`; } } });
 let conversations: Conversation[] = [], current: Conversation | null = null, settings: AppSettings, models: { name: string; size: number; details?: Record<string, unknown>; capabilities?: string[]; source?: 'ollama'|'orion'|'api' }[] = [], attachments: Array<{ name: string; path: string; content: string; mimeType: string; kind: 'image'|'document'; attachment?: MessageAttachment }> = [], streaming = false, ollamaConnected = false, generationStatus = '';
+const voiceControls = installVoice({
+  prompt: promptBox, composer,
+  send: () => sendMessage(),
+  notice: text => showNotice(text, 'Local voice'),
+  currentId: () => current?.id,
+  isGenerating: () => streaming,
+  prepareConversation: () => { if(!current)newConversation(); },
+  latestReply: () => ({text:current?.messages.filter(message=>message.role==='assistant').at(-1)?.content??'',id:current?.id??''})
+});
 let canvasReviewAttachment:MessageAttachment|undefined;
 const memoryControls = installMemoryHistory({
   current: () => current,
   busy: () => streaming || Boolean(activeChatTask),
   flush: async () => { storeCanvasSession(); await save(); },
   activate: async (conversationId, messageId) => {
-    storeCanvasSession(); conversations = await window.orion.listConversations();
+    voiceControls.changedConversation(); storeCanvasSession(); conversations = await window.orion.listConversations();
     const next = conversations.find(item => item.id === conversationId);
     if (!next) throw Error('The source conversation has been deleted.');
     current = next; activeView = 'Chat'; updateActiveNav('Chat'); switchCanvasConversation(next.id);
@@ -90,7 +100,7 @@ const memoryControls = installMemoryHistory({
 });
 let memoryControlsConversation: string | undefined;
 
-type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment };
+type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment; voiceInput?: boolean };
 type SendOutcome = 'complete'|'cancelled'|'failed'|'unavailable';
 const messageQueue = new MessageQueue<QueuedMessage>();
 let activeChatTask: Promise<SendOutcome> | null = null, queueInterruptPending = false, queueAutoPaused = false;
@@ -243,6 +253,7 @@ function setComposerStreaming(active: boolean) {
   if (active && !streaming) generationIdle = new Promise(resolve => { resolveGenerationIdle = resolve; });
   if (!active) { resolveGenerationIdle?.(); resolveGenerationIdle = undefined; }
   streaming = active;
+  voiceControls.generating(active);
   generationStatus = active ? 'Waiting for the model…' : '';
   promptBox.setAttribute('aria-busy', String(active));
 }
@@ -347,7 +358,7 @@ document.addEventListener('pointerdown', event => { if (!contextMenu.contains(ev
 document.addEventListener('contextmenu', event => { const target = event.target as HTMLElement; const conversationButton = target.closest<HTMLButtonElement>('.conversation'); if (conversationButton) { event.preventDefault(); const conversation = conversations.find(item => item.id === conversationButton.dataset.id); if (conversation) showContextMenu(event.clientX, event.clientY, [{ label: 'Open conversation', run: () => conversationButton.click() }, { label: 'Delete conversation…', danger: true, run: async () => { if (await askConfirm(`Delete “${conversation.title}”?`, 'Delete conversation')) { await window.orion.deleteConversation(conversation.id); messageQueue.discardConversation(conversation.id); conversations = conversations.filter(item => item.id !== conversation.id); if (current?.id === conversation.id) { switchCanvasConversation(undefined); current = null; } renderHistory(); renderMessages(true); } } }]); return; } const selection = getSelection()?.toString() ?? ''; const editable = target.closest('textarea:not([readonly]),input:not([type=checkbox]):not([type=number]):not([readonly])'); const actions: Array<{ label: string; run: () => void | Promise<void> }> = []; if (selection) actions.push({ label: 'Copy', run: () => navigator.clipboard.writeText(selection) }); if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) { const input = editable; actions.push({ label: 'Cut', run: async () => { const a = input.selectionStart ?? 0, b = input.selectionEnd ?? a; await navigator.clipboard.writeText(input.value.slice(a, b)); input.setRangeText('', a, b, 'start'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Paste', run: async () => { const text = await navigator.clipboard.readText(); input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? input.selectionStart ?? 0, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Select all', run: () => input.select() }); } if (actions.length) { event.preventDefault(); showContextMenu(event.clientX, event.clientY, actions); } });
 
 function createMessage(role: Message['role'], content: string): Message { return { id: id(), role, content, createdAt: now() }; }
-function newConversation() { if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); current = { id: id(), title: 'New conversation', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; switchCanvasConversation(current.id); conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
+function newConversation() { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); current = { id: id(), title: 'New conversation', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; switchCanvasConversation(current.id); conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
 let memoryRenderSequence = 0;
 async function renderMemoryUsage() {
   const conversationId = current?.id;
@@ -361,7 +372,7 @@ async function renderMemoryUsage() {
 async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
 async function save(conversation: Conversation | null = current, indexMemory = false) { if (!conversation) return; conversation.updatedAt = now(); await window.orion.saveConversation(conversation, indexMemory); renderHistory(); void renderMemoryUsage(); }
 function scheduleSave(conversation: Conversation) { const timer = persistTimers.get(conversation.id); if (timer) clearTimeout(timer); persistTimers.set(conversation.id, window.setTimeout(() => { persistTimers.delete(conversation.id); void save(conversation); }, 900)); }
-function renderHistory() { historyBox.replaceChildren(); const groups: [string, Conversation[]][] = [['Today', []], ['Yesterday', []], ['Previous 7 days', []], ['Older', []]]; const day = new Date().setHours(0,0,0,0); for (const c of [...conversations].sort((a,b)=>b.updatedAt-a.updatedAt)) { const age = day - new Date(c.updatedAt).setHours(0,0,0,0); groups[age <= 0 ? 0 : age <= 86400000 ? 1 : age <= 7 * 86400000 ? 2 : 3]![1].push(c); } for (const [name, items] of groups) { if (!items.length) continue; const g = document.createElement('div'); g.className = 'history-group'; const label=document.createElement('div');label.className='section-label';label.textContent=name;g.append(label); for (const c of items) { const b = document.createElement('button'); b.className = `conversation${current?.id === c.id ? ' current' : ''}`; b.dataset.id = c.id; b.textContent = c.title; b.title = 'Right click to delete'; b.onclick = () => { activeView = 'Chat'; updateActiveNav('Chat'); storeCanvasSession(); current = c; switchCanvasConversation(c.id); chatMode = 'chat'; updateChatModeUi(); renderMessages(true); renderHistory(); void window.orion.saveConversation(c, true).then(() => renderMemoryUsage()); }; g.append(b); } historyBox.append(g); } }
+function renderHistory() { historyBox.replaceChildren(); const groups: [string, Conversation[]][] = [['Today', []], ['Yesterday', []], ['Previous 7 days', []], ['Older', []]]; const day = new Date().setHours(0,0,0,0); for (const c of [...conversations].sort((a,b)=>b.updatedAt-a.updatedAt)) { const age = day - new Date(c.updatedAt).setHours(0,0,0,0); groups[age <= 0 ? 0 : age <= 86400000 ? 1 : age <= 7 * 86400000 ? 2 : 3]![1].push(c); } for (const [name, items] of groups) { if (!items.length) continue; const g = document.createElement('div'); g.className = 'history-group'; const label=document.createElement('div');label.className='section-label';label.textContent=name;g.append(label); for (const c of items) { const b = document.createElement('button'); b.className = `conversation${current?.id === c.id ? ' current' : ''}`; b.dataset.id = c.id; b.textContent = c.title; b.title = 'Right click to delete'; b.onclick = () => { activeView = 'Chat'; updateActiveNav('Chat'); voiceControls.changedConversation(); storeCanvasSession(); current = c; switchCanvasConversation(c.id); chatMode = 'chat'; updateChatModeUi(); renderMessages(true); renderHistory(); void window.orion.saveConversation(c, true).then(() => renderMemoryUsage()); }; g.append(b); } historyBox.append(g); } }
 function updateActiveNav(view: string) { document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view)); }
 function renderWorkspaceReview(review: WorkspaceReview | null) {
   workspaceReview = review;
@@ -951,10 +962,13 @@ async function sendQueuedNow(messageId: string) {
   finally { queueInterruptPending = false; renderMessageQueue(); }
 }
 async function sendMessage() {
+  const voiceInput = await voiceControls.beforeSend();
+  const selectedVoiceModel = ($('model') as HTMLSelectElement).value || current?.model || '';
+  if(selectedVoiceModel.startsWith('api:') && (voiceInput || current?.privateVoice || current?.messages.some(message=>message.voiceInput))){showNotice('Voice conversations stay on this computer. Select a local Ollama or Orion-managed model before sending.', 'Local voice privacy'); return;}
   const content = promptBox.value.trim(); if (!content) return;
   if (!current) newConversation(); if (!current) return;
-  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment };
-  attachments = []; canvasReviewAttachment = undefined; $('attachments').replaceChildren(); promptBox.value = ''; promptBox.dispatchEvent(new Event('input', { bubbles: true }));
+  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment, voiceInput };
+  voiceControls.submitted(); attachments = []; canvasReviewAttachment = undefined; $('attachments').replaceChildren(); promptBox.value = ''; promptBox.dispatchEvent(new Event('input', { bubbles: true }));
   if (streaming || activeChatTask || queueInterruptPending) { messageQueue.push(entry); renderMessageQueue(); promptBox.focus(); return; }
   queueAutoPaused = false; await launchSubmission(entry);
 }
@@ -967,7 +981,8 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   if (!chatModels().some(model => model.name === entry.model)) { showNotice('The selected model is no longer available. Choose an installed model before sending this message.', 'Model unavailable'); return 'unavailable'; }
   const imageRefs=[...entry.attachments.flatMap(file=>file.attachment?[file.attachment]:[]),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
   const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
-  const userMessage=createMessage('user', userText);if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
+  if(entry.voiceInput)target.privateVoice=true;
+  const userMessage=createMessage('user', userText);if(entry.voiceInput)userMessage.voiceInput=true;if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
   if (target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
   const response = createMessage('assistant', ''); response.assumptionIds = memoryControls.assumptions(target.id).map(item => item.id); target.messages.push(response); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
   const generationStarted = performance.now();
@@ -1054,6 +1069,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     setComposerStreaming(false); $('send').textContent = '↑'; $('send').setAttribute('title','Send');
     try { await save(target, true); await memoryControls.refresh(); } catch (error) { console.error('Could not save conversation:', error); }
     if (current?.id === target.id) { renderMessages(); }
+    void voiceControls.reply(target.messages.at(-1)?.content??'',target.id,outcome==='complete');
   }
   return outcome;
 }
@@ -1197,6 +1213,7 @@ function organizeSettingsPanel() {
   const groups: Array<{ name: string; ids: string[]; extras: HTMLElement[]; description: string }> = [
     { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
     { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
+    { name: 'Voice', ids: [], extras: [voiceControls.settingsSection()], description: 'Private local dictation and natural neural read aloud. Nothing installs until first use.' },
     { name: 'Startup', ids: ['keep-in-tray', 'start-new-conversation'], extras: [], description: 'Choose what Orion does when its window closes or opens.' },
     { name: 'System prompt', ids: [], extras: systemPrompt ? [systemPrompt] : [], description: 'Current instructions sent to the selected model.' }
   ];

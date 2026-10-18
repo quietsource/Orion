@@ -1,4 +1,9 @@
-# Orion 0.2.0 — Conversation memory and alternate paths (local preview)
+# Orion 0.2.0 — Conversation memory, alternate paths and local voice (local preview)
+
+- Add native local voice with live English dictation, an independent neural read-aloud toggle, and a microphone button immediately beside Send. Send by button, Enter, or the exact standalone spoken command “send the message”.
+- Add six Kokoro neural voices, voice previews and speed control in Settings → Voice. Download the native runtime and each model component only after first-use setup is accepted; unused voice features install nothing.
+- Keep raw audio in memory, isolate speech inference from the UI, release microphone/voice resources on cancellation and closure, and avoid recordings, separate transcript logs or speech telemetry.
+- Keep dictated conversations, branches, carry-forward context and voice-derived memories local-only. Block hosted inference, Ollama cloud models and network tools for those conversations; exclude protected voice memories from ordinary and hosted recall.
 
 - Add a horizontal checkpoint timeline with previews of messages, OrionFS memory, assumptions, and Canvas documents. Continue from a saved checkpoint in a separate branch without changing the original conversation.
 - Add assumption checkpoints with evidence links, inferred/user-stated provenance, explicit user confirmation, corrections, dependent-answer review markers, and revision prompts for affected Canvas work.

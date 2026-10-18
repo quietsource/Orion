@@ -8,12 +8,12 @@ export interface WebResearchStep { id: string; query: string; status: 'searching
 export interface WebResearchActivity { status: 'planning'|'searching'|'reading'|'complete'|'error'; steps: WebResearchStep[]; }
 export interface WebResearchEvent { stepId: string; phase: 'planning'|'searching'|'reading'|'source'|'complete'|'error'; query?: string; source?: WebResearchSource; error?: string; }
 export interface MessageAttachment { id: string; name: string; mimeType: string; kind: 'image'|'document'; }
-export interface Message { memoryUsed?: Array<{id:string;conversationId:string;messageId:string;text:string}>; assumptionIds?: string[]; id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
+export interface Message { voiceInput?: boolean; memoryUsed?: Array<{id:string;conversationId:string;messageId:string;text:string}>; assumptionIds?: string[]; id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
 export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }
 export type ToolMode = 'chat' | 'code';
-export interface Conversation { id: string; title: string; model: string; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
+export interface Conversation { privateVoice?: boolean; id: string; title: string; model: string; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
 export type OrionTheme = 'graphite' | 'midnight' | 'ocean' | 'forest' | 'rose' | 'ember' | 'light' | 'paper';
 export interface AppSettings { ollamaUrl: string; selectedModel: string; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; }
 export interface WorkspaceChange { path: string; status: 'added'|'modified'|'deleted'; additions: number; deletions: number; diff: string; }
@@ -35,6 +35,7 @@ export interface CreateProgress { id: string; phase: string; detail: string; per
 export interface GeneratedMedia { id: string; prompt: string; modelId: string; path: string; mediaType: 'image'|'video'; createdAt: number; }
 export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'installing'|'error'; version?: string; notes?: string; received?: number; total?: number; detail?: string; }
 export interface OrionAPI {
+  voice: import('./voice').VoiceAPI;
   memoryHistory: import('./memoryHistory').MemoryHistoryAPI;
   listOFSMemories(offset?: number, conversationId?: string): Promise<{ total: number; items: Array<{ id: string; content: string; type: string; entities: string[]; importance: number; createdAt: number; conversationId: string; sourceMessageId: string | null }> }>;
   listProviders(): Promise<ApiProvider[]>;

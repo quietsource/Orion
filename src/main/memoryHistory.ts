@@ -42,6 +42,7 @@ type Dependencies = {
   createEngine(id: string): Promise<{ client: OFSClient; fresh: boolean }>;
   busy(): boolean;
   defaultScope?(): Promise<MemoryLens["scope"]>;
+  privateSources?(): Promise<string[]>;
 };
 const clone = <T>(value: T): T => structuredClone(value);
 const hash = (value: string) =>
@@ -771,8 +772,18 @@ export class MemoryHistory {
         );
       const context = await this.context(id),
         state = await this.index();
+      const privateVoiceSources = new Set(
+        (await this.deps.privateSources?.()) ?? [],
+      );
       const conversation: Conversation = {
         id: newId,
+        privateVoice:
+          original.privateVoice ||
+          chosen.some((item) =>
+            item.sources.some((source) =>
+              privateVoiceSources.has(source.messageId),
+            ),
+          ),
         title: packet.title.trim().slice(0, 160) || "Continuation",
         model: packet.model || original.model,
         createdAt: now,

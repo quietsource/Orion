@@ -12,7 +12,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "bun run build && bunx --bun electron .",
-    "build": "bun scripts/generate-highlight-languages.mjs && bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json && bun build src/main/main.ts src/main/ofsWorker.ts src/preload/preload.ts src/preload/browserPreload.ts --target=node --packages=external --external=electron --outdir=dist --root=src --format=cjs && bun scripts/build-renderer.mjs",
+    "build": "bun scripts/generate-highlight-languages.mjs && bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json && bun build src/main/main.ts src/main/ofsWorker.ts src/main/voiceWorker.ts src/preload/preload.ts src/preload/browserPreload.ts --target=node --packages=external --external=electron --outdir=dist --root=src --format=cjs && bun scripts/build-renderer.mjs",
     "test": "bun run build && bunx --bun tsc -p tsconfig.test-build.json && bun test && bun scripts/check-ofs.mjs",
     "start": "bunx --bun electron .",
     "typecheck": "bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json",

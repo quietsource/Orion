@@ -15,6 +15,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
+import { VoiceManager } from './voice';
+import type { VoiceKind, VoicePreferences } from '../shared/voice';
 import { MemoryHistory } from './memoryHistory';
 import type { MemoryChunk } from './memory';
 import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } from './contextBudget';
@@ -41,6 +43,9 @@ for (const stream of [process.stdout, process.stderr]) stream.on('error', error 
 
 let win: BrowserWindow;
 const agentRunMemory = new AgentRunMemory();
+let voiceManager: VoiceManager | undefined;
+const VOICE_LOCAL_TOOLS=new Set(['record_assumption','ask_user_question','context_inspect','search_memory','canvas_open','search_orion_help']);
+function getVoiceManager(){return voiceManager??=new VoiceManager(path.join(dataDir(),'voice'),path.join(app.getAppPath(),'dist','main','voiceWorker.js'),value=>{if(win&&!win.isDestroyed())win.webContents.send('voice:progress',value);});}
 let ofsMemory: OFSClient | null = null;
 let memoryHistory: MemoryHistory | undefined;
 let chatPreparing = false;
@@ -48,6 +53,7 @@ function getMemoryHistory() {
   return memoryHistory ??= new MemoryHistory({
     directory: path.join(dataDir(), 'memory-history'),
     readConversations,
+    privateSources: async () => [...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))],
     saveConversation: value => serializeMutation('conversations', async () => {
       const all = await readConversations(); const index = all.findIndex(item => item.id === value.id);
       if (index < 0) all.push(value); else all[index] = value;
@@ -511,12 +517,13 @@ function indexOFSConversationBatch(settings: AppSettings): Promise<void> {
   return ofsSeedPromise;
 }
 
-async function retrieveConversationMemory(query: string, settings: AppSettings, maxTokens: number, excludedIds: ReadonlySet<string>, tokenCount: (chunk: MemoryChunk) => number, conversationId?: string): Promise<MemoryChunk[]> {
+async function retrieveConversationMemory(query: string, settings: AppSettings, maxTokens: number, excludedIds: ReadonlySet<string>, tokenCount: (chunk: MemoryChunk) => number, conversationId?: string, allowPrivateVoice = false): Promise<MemoryChunk[]> {
   // OrionFS is now the only persistent memory engine. The experimental flag is
   // retained only for settings-file compatibility and is always normalized on.
   const history = getMemoryHistory(), engine = await history.engine(conversationId);
   const context = conversationId ? await history.context(conversationId) : undefined;
-  const memories = await engine.recall(query, maxTokens, conversationId ? '__all__' : '__no_active_conversation__', [...excludedIds, ...(context?.lens.excludedSources ?? [])], conversationId ? await history.policy(conversationId) : undefined);
+  const privateSources=allowPrivateVoice?[]:[...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))];
+  const memories = await engine.recall(query, maxTokens, conversationId ? '__all__' : '__no_active_conversation__', [...excludedIds, ...privateSources, ...(context?.lens.excludedSources ?? [])], conversationId ? await history.policy(conversationId) : undefined);
   let remaining = maxTokens;
   return memories.filter(memory => !excludedIds.has(memory.sourceMessageId ?? memory.id)).map(memory => ({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: tokenCount({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: 0 }) })).filter(chunk => { if (chunk.tokens > remaining) return false; remaining -= chunk.tokens; return true; });
 }
@@ -562,6 +569,14 @@ function ensureTray() {
 function createWindow() {
   const appRoot = app.getAppPath();
   win = new BrowserWindow({ icon: orionIconPath(), width: 1440, height: 940, minWidth: 820, minHeight: 620, backgroundColor: '#09090b', title: 'Orion', frame: false, autoHideMenuBar: true, webPreferences: { preload: path.join(appRoot, 'dist/preload/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  win.webContents.on('render-process-gone',()=>voiceManager?.suspend());
+  win.on('hide',()=>voiceManager?.suspend());
+  win.webContents.session.setPermissionRequestHandler((contents,permission,callback,details)=>{
+    const own=contents.id===win.webContents.id&&contents.getURL().startsWith('file://')&&details.isMainFrame;
+    callback(Boolean(own&&(permission==='media'?'mediaTypes' in details&&details.mediaTypes?.length&&details.mediaTypes.every(type=>type==='audio'):['clipboard-read','clipboard-sanitized-write','fullscreen'].includes(permission))));
+  });
+  win.webContents.session.setPermissionCheckHandler((contents,permission,_origin,details)=>Boolean(contents?.id===win.webContents.id&&contents.getURL().startsWith('file://')&&(permission==='media'?details.mediaType==='audio':['clipboard-read','clipboard-sanitized-write','fullscreen'].includes(permission))));
+
   win.removeMenu();
   win.on('close', event => {
     if (appQuitting || closeHandling) return;
@@ -735,7 +750,7 @@ app.on('before-quit', event => {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.allSettled([llamaManager?.dispose(), diffusionManager?.stop(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
+        Promise.allSettled([llamaManager?.dispose(), diffusionManager?.stop(), voiceManager?.close(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
         new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000); })
       ]);
     } finally {
@@ -1190,12 +1205,24 @@ ipcMain.handle('create:read-media', async (_, value: string) => {
   const mime = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : extension === '.mp4' ? 'video/mp4' : extension === '.webm' ? 'video/webm' : 'image/png';
   return `data:${mime};base64,${buffer.toString('base64')}`;
 });
+function assertVoiceSender(event:Electron.IpcMainInvokeEvent){if(!win||event.sender!==win.webContents||event.senderFrame!==win.webContents.mainFrame)throw Error('Voice is only available in the Orion chat window.');}
+ipcMain.handle('voice:state',event=>{assertVoiceSender(event);return getVoiceManager().state();});
+ipcMain.handle('voice:preferences',(event,value:VoicePreferences)=>{assertVoiceSender(event);return getVoiceManager().preferences(value);});
+ipcMain.handle('voice:setup',(event,kind:VoiceKind)=>{assertVoiceSender(event);return getVoiceManager().setup(kind);});
+ipcMain.handle('voice:cancel-setup',event=>{assertVoiceSender(event);getVoiceManager().cancelSetup();});
+ipcMain.handle('voice:start',event=>{assertVoiceSender(event);return getVoiceManager().start();});
+ipcMain.handle('voice:accept',(event,session:string,samples:Float32Array,sampleRate:number)=>{assertVoiceSender(event);return getVoiceManager().accept(session,samples,sampleRate);});
+ipcMain.handle('voice:stop',(event,session:string,flush:boolean)=>{assertVoiceSender(event);return getVoiceManager().stop(session,flush===true);});
+ipcMain.handle('voice:speak',(event,text:string,voice:string,speed:number)=>{assertVoiceSender(event);return getVoiceManager().speak(text,voice,speed);});
+ipcMain.handle('voice:stop-speech',event=>{assertVoiceSender(event);getVoiceManager().stopSpeech();});
 ipcMain.handle('conversation:list', async () => (await readConversations()).sort((a,b) => b.updatedAt-a.updatedAt));
 ipcMain.handle('storage:warning', () => [...storageWarnings].join('\n\n') || null);
 ipcMain.handle('conversation:get', async (_, id: string) => (await readConversations()).find(c => c.id === id) ?? null);
 ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory = false) => { await serializeMutation('conversations', async () => {
   // Persisted workspace selection is paused with workspace mode.
   value.workspacePath = undefined;
+  value.privateVoice = value.privateVoice || value.messages.some(message=>message.voiceInput===true);
+  if(value.privateVoice)await getVoiceManager().protectSources(value.messages.map(message=>message.id));
   ofsDeletedConversations.delete(value.id);
   // Rolling extractive compaction keeps the full searchable transcript while
   // giving each prompt a concise summary of older turns.
@@ -1721,9 +1748,19 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   settingsCache = settings;
   const configuredProviders = await readProviders();
   const remote = resolveProviderModel(configuredProviders, input.model);
+  const privateVoice = conversation?.privateVoice || input.messages.some(message=>message.voiceInput);
+  if(privateVoice&&remote)throw Error('Voice conversations stay on this computer. Select an Orion-managed or local Ollama model.');
   const installedConversational = remote ? [] : await readInstalledModels();
   const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
   const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
+  if(privateVoice&&!routedModel.startsWith('orion-gguf:')){
+    if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(routedModel))throw Error('Ollama cloud models cannot be used for private local voice. Select a downloaded local model.');
+    const info=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:routedModel}),signal:AbortSignal.timeout(10000)});
+    if(!info.ok)throw Error('Could not verify that this Ollama model is local. Select an installed local model and try again.');
+    const metadata=await info.json() as {remote_host?:string;remote_model?:string};
+    if(metadata.remote_host||metadata.remote_model)throw Error('This Ollama model is cloud-backed. Private local voice requires a downloaded local model.');
+  }
+
   const checkedCompatibility = new Set<string>();
   const loadManaged = async (modelPath: string, context: number, mmproj?: string, initialFailure?: Error): Promise<string> => {
     try {
@@ -1765,13 +1802,13 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const workspaceSelected = false;
   const codeMode = false;
   if (remote) installedToolSupport.set(`${settings.ollamaUrl}\0${input.model}`, remote.provider.tools);
-  let availableTools = toolsForModel();
+  let availableTools = toolsForModel().filter(tool=>!privateVoice||VOICE_LOCAL_TOOLS.has(tool.function.name));
   const allAvailableTools = availableTools;
   const helpToolAvailable = availableTools.some(tool => tool.function.name === 'search_orion_help');
   const inlineOrionHelp = !helpToolAvailable && isOrionHelpQuestion(latestUserRequest) ? searchOrionHelp(latestUserRequest) : '';
   const modelIdentity = await getModelIdentity(input.model);
   const buildRequestSystemPrompt = async () => addTextToolProtocol(
-    (await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling)) + await getMemoryHistory().prompt(input.conversationId, Math.max(500,Math.min(16000,contextBudget*.5))),
+    (await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling)) + await getMemoryHistory().prompt(input.conversationId, Math.max(500,Math.min(16000,contextBudget*.5))) + (privateVoice?'\nThis is a private local voice conversation. Network tools are unavailable. Never suggest sending voice-derived context to a hosted service.':''),
     availableTools,
     nativeToolCalling
   );
@@ -1882,13 +1919,13 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const retrievalQuestion = (attachmentStart >= 0 ? latestUserRequest.slice(0, attachmentStart) : latestUserRequest).trim();
   const memoryPromptTokens = (chunk: { title: string; role: string; text: string; createdAt: number }) => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, input.model) + 1;
   const memoryScope = input.conversationId;
-  const currentRequestMemory = retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope);
+  const currentRequestMemory = retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice));
   const recentContextQuery = [
     `Current request: ${latestUserRequest.slice(0, 2400)}`,
     ...priorDialogueContext.map(message => `Recent ${message.role} context: ${message.content.slice(0, 800)}`)
   ].join('\n');
   const contextualMemory = priorDialogueContext.length
-    ? retrieveConversationMemory(recentContextQuery, settings, contextMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope)
+    ? retrieveConversationMemory(recentContextQuery, settings, contextMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice))
     : Promise.resolve([]);
   const [currentMatches, contextualMatches] = await Promise.all([currentRequestMemory, contextualMemory]);
   const retrieved = [], retrievedIds = new Set<string>(); let retrievedTokens = 0;
@@ -2601,6 +2638,7 @@ async function controlDesktopWindow(action: string, target: string) {
   return { output: `${action} window: ${match.title} (${match.class})`, success: true };
 }
 async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string> = new Set(), conversationId?: string, activeModel = '', context = 8192): Promise<{ output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }> {
+  if(conversationId&&(await readConversations()).find(item=>item.id===conversationId)?.privateVoice&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local voice conversation.',success:false};
   if (tool.name === 'record_assumption') {
     if (!conversationId) throw Error('An active conversation is required.');
     const action = String(tool.input.action ?? 'save');
@@ -2692,7 +2730,7 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
     if (!query) return { output: 'Provide a memory search query.', success: false };
     const settings = await getSettings();
     const maxTokens = Math.min(16_384, Math.max(1024, Math.floor(settings.contextWindow * MEMORY_CONTEXT_FRACTION)));
-    const chunks = await retrieveConversationMemory(query, settings, maxTokens, memoryExcludedIds, chunk => estimateModelChatTokens(memoryPromptText(chunk, '\n'), settings.ollamaUrl, settings.selectedModel) + 1, conversationId);
+    const chunks = await retrieveConversationMemory(query, settings, maxTokens, memoryExcludedIds, chunk => estimateModelChatTokens(memoryPromptText(chunk, '\n'), settings.ollamaUrl, settings.selectedModel) + 1, conversationId, Boolean(conversationId&&(await readConversations()).find(item=>item.id===conversationId)?.privateVoice));
     const output = chunks.map(chunk => memoryPromptText(chunk, '\n')).join('\n\n');
     return { output: output || 'No matching saved conversation excerpts were found. Try exact names or distinctive wording.', success: true };
   }
@@ -2758,6 +2796,7 @@ async function executeToolSafely(tool: ToolRequest, memoryExcludedIds?: Readonly
 }
 
 async function executeAgentTool(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string>, conversationId: string, activeModel: string, context: number, maxOutputCharacters = 6000) {
+  if((await readConversations()).find(item=>item.id===conversationId)?.privateVoice&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local voice conversation.',success:false};
   if (tool.name === 'canvas_open') {
     try {
       const action=String(tool.input.action??'open');
