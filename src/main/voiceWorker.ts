@@ -37,19 +37,29 @@ port.on("message", ({ data: request }) => {
           featConfig: { sampleRate: 16000, featureDim: 80 },
           modelConfig: {
             transducer: {
-              encoder: path.join(model, "encoder-epoch-99-avg-1.int8.onnx"),
-              decoder: path.join(model, "decoder-epoch-99-avg-1.int8.onnx"),
-              joiner: path.join(model, "joiner-epoch-99-avg-1.int8.onnx"),
+              encoder: path.join(
+                model,
+                "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+              ),
+              decoder: path.join(
+                model,
+                "decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
+              ),
+              joiner: path.join(
+                model,
+                "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+              ),
             },
             tokens: path.join(model, "tokens.txt"),
             numThreads: 2,
             provider: "cpu",
             debug: 0,
           },
-          decodingMethod: "greedy_search",
+          decodingMethod: "modified_beam_search",
+          maxActivePaths: 4,
           enableEndpoint: true,
           rule1MinTrailingSilence: 2.4,
-          rule2MinTrailingSilence: 0.9,
+          rule2MinTrailingSilence: 1.1,
           rule3MinUtteranceLength: 24,
         });
         stream = recognizer.createStream();
@@ -57,6 +67,11 @@ port.on("message", ({ data: request }) => {
       result = true;
     } else if (request.method === "reset") {
       stream = recognizer.createStream();
+      stream.acceptWaveform({
+        samples: new Float32Array(3200),
+        sampleRate: 16000,
+      });
+      while (recognizer.isReady(stream)) recognizer.decode(stream);
       resampler = undefined;
       result = true;
     } else if (request.method === "accept" || request.method === "finish") {
@@ -114,7 +129,7 @@ port.on("message", ({ data: request }) => {
         generationConfig: new sherpa.GenerationConfig({
           sid: voice.speaker,
           speed: third,
-          silenceScale: 0.2,
+          silenceScale: 1.0,
         }),
       });
       // Copy the native external buffer before its owner is collected.

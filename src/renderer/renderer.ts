@@ -22,6 +22,8 @@ import { MessageQueue } from '../shared/messageQueue';
 import './messageQueue.css';
 import { installPanelLayout } from './panelLayout';
 import { installComposerSelects } from './composerSelect';
+import './chatShell.css';
+import { isReusableUntitledConversation } from '../shared/conversationDefaults';
 installOgsActions();
 
 const $ = <T extends HTMLElement>(id: string) => {
@@ -96,6 +98,15 @@ const memoryControls = installMemoryHistory({
     if (messageId) requestAnimationFrame(() => { const target = [...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(item => item.dataset.messageId === messageId); if (target) { followsLatestMessage = false; target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } });
   },
   draft: text => { promptBox.value = text; promptBox.dispatchEvent(new Event('input', { bubbles: true })); promptBox.focus(); },
+  cleaned: (conversationId, documentIds) => {
+    const session=canvasSessions.get(conversationId);
+    if(session&&documentIds.includes(session.document.id))canvasSessions.delete(conversationId);
+    if(canvasDocument?.conversationId===conversationId&&documentIds.includes(canvasDocument.id)){
+      canvasDocument=null;canvasNotes=[];canvasPrevious=null;canvasPreviousNotes=[];pendingCanvasReview=null;canvasReviewAttachment=undefined;
+      $('canvas-sidebar').hidden=true;document.body.classList.remove('canvas-open');syncCanvasToggle();
+    }
+    if(current?.id===conversationId)for(const message of current.messages)message.canvasDocuments=message.canvasDocuments?.filter(doc=>!documentIds.includes(doc.id));
+  },
   rerender: () => renderMessages()
 });
 let memoryControlsConversation: string | undefined;
@@ -175,6 +186,7 @@ let followsLatestMessage = true;
 let lastObservedScrollTop = 0;
 const persistTimers = new Map<string, number>();
 const expandedThinking = new Set<string>();
+const finalResponseStarted = new Set<string>();
 const toolCallOpenState = new Map<string, boolean>();
 const toolActivityOpenState = new Map<string, boolean>();
 let renderQueued = false;
@@ -315,7 +327,7 @@ function safeWebResearchSource(input: WebResearchSource): WebResearchSource | nu
 }
 let canvasSelectedQuote='';
 let canvasMode:'source'|'preview'|'diff'='preview';
-function syncCanvasToggle(){const open=!($('canvas-sidebar') as HTMLElement).hidden,button=$('canvas-open'),arrow=$('canvas-toggle-arrow'),anchor=$('canvas-toggle-anchor'),header=$('canvas-header');button.setAttribute('aria-pressed',String(open));button.setAttribute('aria-label',open?'Hide Canvas':'Show Canvas');button.title=open?'Hide Canvas':'Show Canvas';button.classList.remove('active');arrow?.setAttribute('d',open?'M12 12l5 4-5 4':'M12 12l-5 4 5 4');if(open)header.insertBefore(button,header.firstChild);else anchor.parentElement?.insertBefore(button,anchor);}
+function syncCanvasToggle(){const open=!($('canvas-sidebar') as HTMLElement).hidden,button=$('canvas-open'),arrow=$('canvas-toggle-arrow'),settingsButton=$('settings-open');button.setAttribute('aria-pressed',String(open));button.setAttribute('aria-label',open?'Hide Canvas':'Show Canvas');button.title=open?'Hide Canvas':'Show Canvas';button.classList.remove('active');arrow?.setAttribute('d',open?'M12 12l5 4-5 4':'M12 12l-5 4 5 4');settingsButton.parentElement?.insertBefore(button,settingsButton);}
 let canvasSaveTimer:ReturnType<typeof setTimeout>|undefined;
 function storeCanvasSession() { const key=canvasDocument?.conversationId;if(!key||!canvasDocument)return;
   if(current?.id===key){const doc=canvasDocument;let owner=[...current.messages].reverse().find(message=>message.canvasDocuments?.some(item=>item.id===doc.id));if(!owner)owner=[...current.messages].reverse().find(message=>message.role==='assistant');if(owner){owner.canvasDocuments??=[];const index=owner.canvasDocuments.findIndex(item=>item.id===doc.id);if(index>=0)owner.canvasDocuments[index]={...doc};else owner.canvasDocuments.push({...doc});const conversation=current;if(canvasSaveTimer)clearTimeout(canvasSaveTimer);canvasSaveTimer=setTimeout(()=>void save(conversation),350);}}
@@ -358,7 +370,7 @@ document.addEventListener('pointerdown', event => { if (!contextMenu.contains(ev
 document.addEventListener('contextmenu', event => { const target = event.target as HTMLElement; const conversationButton = target.closest<HTMLButtonElement>('.conversation'); if (conversationButton) { event.preventDefault(); const conversation = conversations.find(item => item.id === conversationButton.dataset.id); if (conversation) showContextMenu(event.clientX, event.clientY, [{ label: 'Open conversation', run: () => conversationButton.click() }, { label: 'Delete conversation…', danger: true, run: async () => { if (await askConfirm(`Delete “${conversation.title}”?`, 'Delete conversation')) { await window.orion.deleteConversation(conversation.id); messageQueue.discardConversation(conversation.id); conversations = conversations.filter(item => item.id !== conversation.id); if (current?.id === conversation.id) { switchCanvasConversation(undefined); current = null; } renderHistory(); renderMessages(true); } } }]); return; } const selection = getSelection()?.toString() ?? ''; const editable = target.closest('textarea:not([readonly]),input:not([type=checkbox]):not([type=number]):not([readonly])'); const actions: Array<{ label: string; run: () => void | Promise<void> }> = []; if (selection) actions.push({ label: 'Copy', run: () => navigator.clipboard.writeText(selection) }); if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) { const input = editable; actions.push({ label: 'Cut', run: async () => { const a = input.selectionStart ?? 0, b = input.selectionEnd ?? a; await navigator.clipboard.writeText(input.value.slice(a, b)); input.setRangeText('', a, b, 'start'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Paste', run: async () => { const text = await navigator.clipboard.readText(); input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? input.selectionStart ?? 0, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Select all', run: () => input.select() }); } if (actions.length) { event.preventDefault(); showContextMenu(event.clientX, event.clientY, actions); } });
 
 function createMessage(role: Message['role'], content: string): Message { return { id: id(), role, content, createdAt: now() }; }
-function newConversation() { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); current = { id: id(), title: 'New conversation', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; switchCanvasConversation(current.id); conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
+function newConversation(reuseEmpty = false) { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); const reusable = reuseEmpty ? conversations.find(isReusableUntitledConversation) : undefined; current = reusable ?? { id: id(), title: 'Untitled', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; current.title='Untitled'; switchCanvasConversation(current.id); if(!reusable)conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
 let memoryRenderSequence = 0;
 async function renderMemoryUsage() {
   const conversationId = current?.id;
@@ -647,12 +659,6 @@ function renderMessage(active: Conversation, message: Message) {
   timestamp.textContent = time(message.createdAt);
   header.append(author, timestamp);
   article.append(header);
-  if (message.memoryUsed?.length) {
-    const audit = document.createElement('details'); audit.className = 'memory-used';
-    const summary = document.createElement('summary'); summary.textContent = `Recalled ${message.memoryUsed.length} memories`; audit.append(summary);
-    for (const memory of message.memoryUsed) { const entry = document.createElement('p'); entry.textContent = memory.text; audit.append(entry); }
-    article.append(audit);
-  }
   const dependency = memoryControls.dependencyNotice(message, active); if (dependency) article.append(dependency);
   const hasVisibleOutput = Boolean(message.content.trim() || message.reasoning?.trim() || message.toolCalls?.length || message.webResearch?.steps.length);
   if (live && !hasVisibleOutput) {const loading=document.createElement('div');loading.className='chat-loading';loading.setAttribute('role','status');loading.setAttribute('aria-live','polite');loading.append(createWelcomeArt(true));article.append(loading);}
@@ -661,10 +667,10 @@ function renderMessage(active: Conversation, message: Message) {
   if (message.reasoning) {
     const details = document.createElement('details');
     details.className = 'reasoning';
-    details.open = expandedThinking.has(message.id) || (streaming && active.id === current?.id && active.messages.at(-1)?.id === message.id);
+    details.open = expandedThinking.has(message.id) || (streaming && active.id === current?.id && active.messages.at(-1)?.id === message.id && !(settings.autoCollapseThinking && finalResponseStarted.has(message.id)));
     const summary=document.createElement('summary');const label=document.createElement('span');label.className='reasoning-label';label.textContent='Thinking';const meta=document.createElement('span');meta.className='reasoning-meta';summary.append(label,meta);const content=document.createElement('div');content.className='reasoning-content';details.append(summary,content);
     const reasoningMeta = details.querySelector<HTMLElement>('.reasoning-meta');
-    if (reasoningMeta) reasoningMeta.textContent = streaming && active.id === current?.id && active.messages.at(-1)?.id === message.id ? 'In progress' : 'View reasoning';
+    if (reasoningMeta) reasoningMeta.textContent = streaming && !finalResponseStarted.has(message.id) && active.id === current?.id && active.messages.at(-1)?.id === message.id ? 'In progress' : 'View reasoning';
     details.querySelector('.reasoning-content')!.replaceChildren(safeMarkdownFragment(message.reasoning, live));
     details.addEventListener('toggle', () => {
       if (details.open) expandedThinking.add(message.id);
@@ -798,6 +804,7 @@ function renderMessage(active: Conversation, message: Message) {
   if (message.role === 'assistant' && message.generationMs !== undefined) { const elapsed = document.createElement('span'); elapsed.className = 'message-metric'; elapsed.textContent = `${(message.generationMs / 1000).toFixed(1)}s`; footer.append(elapsed); }
   if (message.role === 'assistant' && message.tokensPerSecond !== undefined) { const rate = document.createElement('span'); rate.className = 'message-metric'; rate.textContent = `${message.tokensPerSecond.toFixed(1)} tokens/s`; footer.append(rate); }
   article.append(footer);
+  const receipt=memoryControls.receipt(message,active);if(receipt)article.append(receipt);
   return article;
 }
 function wireCodeButtons(body: HTMLElement, active: Conversation) {
@@ -855,6 +862,7 @@ const mainPanel = document.querySelector<HTMLElement>('.main');
 if (mainPanel) conversationMapResizeObserver.observe(mainPanel);
 conversationMapResizeObserver.observe(chatScroller);
 function renderMessages(forceScroll = false) {
+  memoryControls.syncVisibility();
   if (memoryControlsConversation !== current?.id) { memoryControlsConversation = current?.id; void memoryControls.refresh().then(() => { if (!streaming) renderMessages(); }); }
   document.body.classList.remove('models-view','create-view');
   document.body.classList.toggle('chat-empty', activeView === 'Chat' && !current?.messages.length);
@@ -898,12 +906,24 @@ async function refreshModelControls(){
  select.replaceChildren(...values.map(n=>new Option(Math.round(n/1024)+'K',String(n))));
  if(settings.contextWindow>max){settings.contextWindow=max;await window.orion.saveSettings(settings);}select.value=String(settings.contextWindow);select.dispatchEvent(new Event('orion:select-sync'));$('context-meter').textContent='— / '+Math.round(settings.contextWindow/1024)+'K';
 }
-async function refreshModels(refreshProviders = false) { const [available] = await Promise.all([window.orion.listModels().catch(() => []), window.orion.ollamaStatus().then(connected => { ollamaConnected = connected; }).catch(() => { ollamaConnected = false; })]); models = available; setModels(); await refreshModelControls(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : ollamaConnected ? 'Connected' : 'Disconnected · Error'; if (activeView === 'Models' && (modelTab !== 'providers' || refreshProviders)) renderModelsView(); }
+let ollamaDetected = false, configuredProviderCount = 0;
+function syncModelServerStatus() {
+  const state=$('connection-state'), row=$('model-server-row');
+  const hasProvider=configuredProviderCount > 0 || models.some(model=>model.source === 'api');
+  row.hidden = !ollamaDetected && !ollamaConnected && !hasProvider;
+  state.textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : ollamaConnected ? 'Connected' : hasProvider && !ollamaDetected ? 'Provider configured' : 'Ollama offline';
+}
+async function refreshModels(refreshProviders = false) {
+  const [available, connected, providers] = await Promise.all([window.orion.listModels().catch(() => []), window.orion.ollamaStatus().catch(() => false), window.orion.listProviders().catch(() => [])]);
+  models=available;ollamaConnected=connected;ollamaDetected ||= connected;configuredProviderCount=providers.length;
+  setModels();await refreshModelControls();syncModelServerStatus();
+  if(activeView === 'Models' && (modelTab !== 'providers' || refreshProviders))renderModelsView();
+}
 const gigabytes = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
 async function refreshLlamaStatus() { const previous = managedLlamaInstalled; try { managedLlamaInstalled = await window.orion.llamaStatus(); $('llama-state').textContent = managedLlamaInstalled ? 'Installed' : 'Not Installed'; } catch { managedLlamaInstalled = false; $('llama-state').textContent = 'Unknown'; } if (previous !== managedLlamaInstalled && activeView === 'Models' && modelTab === 'manage') renderModelsView(); }
 async function refreshCreateEngineStatus() { try { createState = await window.orion.getCreateEngineState(); } catch (error) { createState = { installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown' }; } }
 let systemResourcesPending=false;
-async function refreshSystemResources() { if(systemResourcesPending)return;systemResourcesPending=true;try { const info = await window.orion.getSystemInfo(); $('connection-state').textContent = ($('model') as HTMLSelectElement).value.startsWith('api:') ? 'API provider' : info.ollama ? 'Connected' : 'Disconnected · Error'; $('cpu-label').textContent=info.cpuUsagePercent===null?'—':`${info.cpuUsagePercent}%`; $('ram-label').textContent = `${gigabytes(info.usedRamMB)} / ${gigabytes(info.totalRamMB)}`; $('gpu-label').textContent=info.gpuUsagePercent===null?'—':`${info.gpuUsagePercent}%`; $('vram-label').textContent = info.totalVramMB > 0 ? `${info.usedVramMB === null ? '—' : gigabytes(info.usedVramMB)} / ${gigabytes(info.totalVramMB)}` : 'Not detected'; ($('gpu-label') as HTMLElement).title=info.gpuUsagePercent===null?'GPU utilization is not reported by this driver.':'Current overall GPU utilization'; ($('vram-label') as HTMLElement).title = info.totalVramMB > 0 && info.usedVramMB === null ? 'GPU memory capacity is available, but current usage is not reported by this driver.' : ''; } catch { $('connection-state').textContent = 'Disconnected · Error'; } finally{systemResourcesPending=false;} }
+async function refreshSystemResources() { if(systemResourcesPending)return;systemResourcesPending=true;try { const info = await window.orion.getSystemInfo(); ollamaConnected=info.ollama;ollamaDetected=info.ollamaInstalled||info.ollama;syncModelServerStatus(); $('cpu-label').textContent=info.cpuUsagePercent===null?'—':`${info.cpuUsagePercent}%`; $('ram-label').textContent = `${gigabytes(info.usedRamMB)} / ${gigabytes(info.totalRamMB)}`; $('gpu-label').textContent=info.gpuUsagePercent===null?'—':`${info.gpuUsagePercent}%`; $('vram-label').textContent = info.totalVramMB > 0 ? `${info.usedVramMB === null ? '—' : gigabytes(info.usedVramMB)} / ${gigabytes(info.totalVramMB)}` : 'Not detected'; ($('gpu-label') as HTMLElement).title=info.gpuUsagePercent===null?'GPU utilization is not reported by this driver.':'Current overall GPU utilization'; ($('vram-label') as HTMLElement).title = info.totalVramMB > 0 && info.usedVramMB === null ? 'GPU memory capacity is available, but current usage is not reported by this driver.' : ''; } catch { syncModelServerStatus(); } finally{systemResourcesPending=false;} }
 function renderMessageQueue() {
   const entries = current ? messageQueue.list(current.id) : [];
   queueContainer.hidden = activeView !== 'Chat' || !entries.length;
@@ -979,11 +999,11 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   await workspaceSettingsWrite;
   if (!chatModels().length) { await refreshModels(); if (!chatModels().length) { showNotice(models.length ? 'No chat-capable Ollama model is installed. Install a completion model, then refresh the model list.' : 'Add an API provider in Model browser → Providers, or install a local model.', 'Ollama unavailable'); return 'unavailable'; } }
   if (!chatModels().some(model => model.name === entry.model)) { showNotice('The selected model is no longer available. Choose an installed model before sending this message.', 'Model unavailable'); return 'unavailable'; }
-  const imageRefs=[...entry.attachments.flatMap(file=>file.attachment?[file.attachment]:[]),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
+  const imageRefs=[...entry.attachments.map(file=>file.attachment??{id:id(),name:file.name,mimeType:file.mimeType,kind:'document' as const}),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
   const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
   if(entry.voiceInput)target.privateVoice=true;
   const userMessage=createMessage('user', userText);if(entry.voiceInput)userMessage.voiceInput=true;if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
-  if (target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
+  if (target.title === 'Untitled' || target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
   const response = createMessage('assistant', ''); response.assumptionIds = memoryControls.assumptions(target.id).map(item => item.id); target.messages.push(response); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
   const generationStarted = performance.now();
   let outcome: SendOutcome = 'complete';
@@ -992,7 +1012,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   await save(target, true); if (current?.id === target.id) renderMessages(true);
   off = window.orion.onStream(e => {
     if (e.conversationId !== target.id) return;
-    if(e.type === 'memory_context') { target.messages.at(-1)!.memoryUsed = e.memories; return; }
+    if(e.type === 'memory_context') { const reply=target.messages.at(-1)!;reply.memoryUsed = e.memories;reply.sourceFiles=e.sourceFiles; return; }
     if(e.type==='canvas'&&e.canvas){
       const message=target.messages.at(-1);
       if(message){message.canvasDocuments??=[];const index=message.canvasDocuments.findIndex(doc=>doc.id===e.canvas!.id||doc.name===e.canvas!.name);if(index>=0)message.canvasDocuments[index]=e.canvas;else message.canvasDocuments.push(e.canvas);}
@@ -1011,6 +1031,11 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     else if (e.type === 'cancelled') generationStatus = 'Response stopped';
     if (e.type === 'workspace' && e.workspaceReview && current?.id === target.id) renderWorkspaceReview(e.workspaceReview);
     if(e.type==='context'&&e.usedContextTokens!==undefined)$('context-meter').textContent=`${(e.usedContextTokens/1000).toFixed(1)}K / ${Math.round((e.maxContextTokens??settings.contextWindow)/1024)}K`;
+    if ((e.type === 'token'||e.type === 'replace') && e.content?.trim() && !finalResponseStarted.has(assistant.id)) {
+      finalResponseStarted.add(assistant.id);
+      const liveView=[...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(item=>item.dataset.messageId===assistant.id);const meta=liveView?.querySelector('.reasoning-meta');if(meta)meta.textContent='View reasoning';
+      if(settings.autoCollapseThinking){expandedThinking.delete(assistant.id);const view=[...chatBox.querySelectorAll<HTMLElement>('[data-message-id]')].find(item=>item.dataset.messageId===assistant.id);const thinking=view?.querySelector<HTMLDetailsElement>('details.reasoning');if(thinking)thinking.open=false;}
+    }
     if (e.type === 'replace') assistant.content = e.content ?? '';
     if (e.type === 'token') assistant.content += e.content ?? '';
     if (e.type === 'done') {
@@ -1076,7 +1101,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
 
 $('send').addEventListener('click', () => { if (streaming) { queueAutoPaused = true; void window.orion.cancelStream(); } else void sendMessage(); });
 // Orion is intentionally conversation-first: there is no Chat/Code mode switch.
-promptBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void sendMessage(); } }); $('command-close').onclick = closeCommandPalette; $('new-chat').onclick = newConversation;
+promptBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void sendMessage(); } }); $('command-close').onclick = closeCommandPalette; $('new-chat').onclick = () => newConversation();
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'p') { event.preventDefault(); event.stopPropagation(); void openCommandPalette(); return; }
   if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && event.target === promptBox && !promptBox.value.trim()) { event.preventDefault(); event.stopPropagation(); void openCommandPalette(); return; }
@@ -1105,7 +1130,7 @@ sidebar.addEventListener('pointerleave', scheduleSidebarPeekHide);
 $('collapse').onclick = () => { cancelSidebarPeekHide(); document.body.classList.remove('sidebar-peek-open'); document.body.classList.add('sidebar-collapsed'); ($('collapse') as HTMLButtonElement).blur(); };
 $('expand').onclick = () => { cancelSidebarPeekHide(); document.body.classList.remove('sidebar-peek-open', 'sidebar-collapsed'); };
 for (const [id, action] of [['win-minimize', 'minimize'], ['win-maximize', 'toggle-maximize'], ['win-close', 'close']] as const) $(id).addEventListener('click', () => { void window.orion.windowAction(action); });
-$('model').addEventListener('change', async () => { settings.selectedModel = ($('model') as HTMLSelectElement).value; const selected = chatModels().find(model => model.name === settings.selectedModel); ($('model') as HTMLSelectElement).title = selected ? modelSelectorLabel(selected) : settings.selectedModel; await window.orion.saveSettings(settings); await refreshModelControls(); if (activeView === 'Models') renderModelsView(); });
+$('model').addEventListener('change', async () => { settings.selectedModel = ($('model') as HTMLSelectElement).value; syncModelServerStatus(); const selected = chatModels().find(model => model.name === settings.selectedModel); ($('model') as HTMLSelectElement).title = selected ? modelSelectorLabel(selected) : settings.selectedModel; await window.orion.saveSettings(settings); await refreshModelControls(); if (activeView === 'Models') renderModelsView(); });
 document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => button.onclick = async () => {
   const view = button.dataset.view;
   if (view === 'Schedules') { if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Schedules'); renderMessages(true); await openSchedules(); return; }
@@ -1211,7 +1236,7 @@ function organizeSettingsPanel() {
   const subagentHelp = all.find(node => node.matches('.muted') && node.textContent?.startsWith('The first subagent'));
   const systemPrompt = all.find(node => node.matches('#settings-system-prompt') || node.querySelector('#settings-system-prompt'));
   const groups: Array<{ name: string; ids: string[]; extras: HTMLElement[]; description: string }> = [
-    { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
+    { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel','auto-collapse-thinking'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
     { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
     { name: 'Voice', ids: [], extras: [voiceControls.settingsSection()], description: 'Private local dictation and natural neural read aloud. Nothing installs until first use.' },
     { name: 'Startup', ids: ['keep-in-tray', 'start-new-conversation'], extras: [], description: 'Choose what Orion does when its window closes or opens.' },
@@ -1245,7 +1270,7 @@ async function loadSettingsSystemPrompt() {
   try { output.textContent = await window.orion.getSystemPrompt(($('model') as HTMLSelectElement).value, chatMode); }
   catch (error) { output.textContent = `Could not load the system prompt: ${error instanceof Error ? error.message : String(error)}`; }
 }
-$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
+$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); await voiceControls.refreshSettings(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('auto-collapse-thinking') as HTMLInputElement).checked = settings.autoCollapseThinking; ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
 settingsDialog.addEventListener('close', () => applyTheme());
 $('workspace-browse').onclick = async () => { const selected = await window.orion.selectWorkspace(); if (selected) ($('workspace-path') as HTMLInputElement).value = selected; };
 $('rebuild-memory').onclick = () => { $('memory-progress').textContent = 'Re-indexing saved conversations…'; void window.orion.rebuildMemory(); };
@@ -1254,7 +1279,7 @@ embeddingButton.onclick = async () => { embeddingButton.disabled = true; $('memo
 window.orion.onMemoryProgress(progress => { $('memory-progress').textContent = progress.error ? `Memory re-index failed: ${progress.error}` : progress.status ?? (progress.completed >= progress.total ? `Memory index ready · ${progress.total} conversations indexed.` : `Indexing conversations · ${progress.completed} / ${progress.total}`); void renderMemoryUsage(); });
 $('settings-close').addEventListener('click', () => settingsDialog.close());
 $('settings-cancel').addEventListener('click', () => settingsDialog.close());
-$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
+$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.autoCollapseThinking = ($('auto-collapse-thinking') as HTMLInputElement).checked; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
 window.orion.onDownloadProgress(progress=>{downloadProgress.set(progress.id,progress);if(progress.phase!=='downloading')cancellingModelDownloads.delete(progress.id);renderDownloadActivity();if(progress.repo==='Orion llama.cpp'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshLlamaStatus(),2500);if(progress.phase!=='downloading')window.setTimeout(()=>{downloadProgress.delete(progress.id);renderDownloadActivity();},progress.phase==='complete'?6000:progress.phase==='cancelled'?3500:12000);});
 const invokeDialog=$('engine-install-dialog') as HTMLDialogElement;
 async function startEngineInstall() {
@@ -1601,8 +1626,8 @@ $('job-form').addEventListener('submit', async e => {
     ($('job-form') as HTMLFormElement).hidden = true; await renderScheduledJobs();
   } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; }
 });
-function ensureStartupPreferenceControl() { if (document.getElementById('start-new-conversation')) return; const label = document.createElement('label'); label.className = 'job-check';const input=document.createElement('input');input.id='start-new-conversation';input.type='checkbox';const description=document.createElement('span');description.textContent='Start a new conversation when Orion opens (otherwise restore the last chat).';label.append(input,description);$('keep-in-tray').closest('label')?.before(label); }
-async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(); conversations = await window.orion.listConversations(); await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
+function ensureStartupPreferenceControl() { if (document.getElementById('start-new-conversation')) return; const label = document.createElement('label'); label.className = 'job-check';const input=document.createElement('input');input.id='start-new-conversation';input.type='checkbox';const description=document.createElement('span');description.textContent='Open an empty chat when Orion starts, reusing an existing Untitled chat when available (otherwise restore the last chat).';label.append(input,description);$('keep-in-tray').closest('label')?.before(label); }
+async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(); conversations = await window.orion.listConversations(); for(const conversation of conversations) { if(isReusableUntitledConversation(conversation) && conversation.title !== 'Untitled') { conversation.title='Untitled'; await window.orion.saveConversation(conversation,false); } } await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(true); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
 ensureStartupPreferenceControl();
 window.history.scrollRestoration = 'manual';
 void init();

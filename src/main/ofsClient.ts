@@ -113,6 +113,7 @@ export class OFSClient {
   listMemories(...args: Parameters<OrionFS['listMemories']>) { return this.call<ReturnType<OrionFS['listMemories']>>('list', args); }
   exportSnapshot() { return this.call<Awaited<ReturnType<OrionFS['exportSnapshot']>>>('export'); }
   importSnapshot(...args: Parameters<OrionFS['importSnapshot']>) { this.statsCache.clear(); return this.call<void>('import', args); }
+  forgetMemories(conversationId: string, ids: string[]) { this.statsCache.clear(); return this.call<void>('forget', [conversationId, ids]); }
   removeConversation(id: string) { this.statsCache.clear(); return this.call<void>('remove', [id]); }
 
   async close() {

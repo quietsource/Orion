@@ -1,5 +1,13 @@
-# Orion 0.2.0 — Conversation memory, alternate paths and local voice (local preview)
+# Orion 0.2.0 — Conversation memory, alternate paths and local voice
 
+- Refine the chat surface with unified sidebar/composer colors, a smooth inset shape, a restrained top focus highlight and animated Canvas transitions. Keep the Canvas toggle in the top bar.
+- Hide Conversation History on empty chats, reuse an existing Untitled chat on startup, and hide the Model server row when neither Ollama nor a provider is set up.
+- Consolidate checkpoints, assumptions, recall controls, local handoffs, branch comparison and reviewed cleanup into Conversation History with one quiet composer entry.
+- Add source receipts below answers for recalled memory and attached-file context, linked to original messages.
+- Add local model selection and opt-in Canvas documents for reviewed handoffs, with local-only inference, tool and memory boundaries.
+- Add scoped cleanup of active memories, checkpoints, dismissed assumptions and Canvas copies, plus revalidated cleanup of unused attachment images older than 24 hours.
+- Improve dictation with broader-data streaming recognition, startup audio context and sentence casing. Use full-precision Kokoro with natural pause timing, paired optional setup and in-dialog voice auditions.
+- Add voice-aware composer placeholders and an optional automatic Thinking collapse when the final response starts.
 - Add native local voice with live English dictation, an independent neural read-aloud toggle, and a microphone button immediately beside Send. Send by button, Enter, or the exact standalone spoken command “send the message”.
 - Add six Kokoro neural voices, voice previews and speed control in Settings → Voice. Download the native runtime and each model component only after first-use setup is accepted; unused voice features install nothing.
 - Keep raw audio in memory, isolate speech inference from the UI, release microphone/voice resources on cancellation and closure, and avoid recordings, separate transcript logs or speech telemetry.
@@ -15,7 +23,7 @@
 - Preserve branch isolation across restarts, keep mutations out of active inference, and prevent a failed initial snapshot import from being treated as an initialized branch.
 - Restore saved Canvas documents when opening another conversation from history.
 
-0.2.0 packages are built locally and held for approval. The latest published release remains 0.1.9.
+Windows x64: installer and portable EXE. Linux x64: AppImage, DEB and RPM. macOS is not currently supported.
 
 # Orion 0.1.9 — More forgiving graph headings
 

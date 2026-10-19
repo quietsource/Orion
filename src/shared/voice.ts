@@ -46,6 +46,7 @@ export const VOICES = [
 export interface VoicePreferences {
   voice: string;
   speed: number;
+  setupPairSeen?: boolean;
 }
 export interface VoiceState {
   dictationInstalled: boolean;

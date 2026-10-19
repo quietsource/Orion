@@ -819,6 +819,19 @@ export class OrionFS {
       conversationId: String(row.conversation_id), sourceMessageId: row.source_message_id ? String(row.source_message_id) : null })) };
   }
 
+  public async forgetMemories(conversationId: string, ids: string[]): Promise<void> {
+    await this.ingestionQueue;
+    this.db.transaction(() => {
+      for (const id of new Set(ids)) {
+        const exists = this.db.query('SELECT id FROM ofs_memories WHERE id = ? AND conversation_id = ?').all(id, conversationId);
+        if (!exists.length) continue;
+        this.db.run('DELETE FROM ofs_memories_fts WHERE id = ?', [id]);
+        this.db.run('DELETE FROM ofs_memories WHERE id = ? AND conversation_id = ?', [id, conversationId]);
+        this.vectorCache.delete(id);
+      }
+    })();
+  }
+
   public removeConversation(conversationId: string): void {
     const ids = this.db.query(`SELECT id FROM ofs_memories WHERE conversation_id = ?`).all(conversationId) as { id: string }[];
     this.db.transaction(() => {

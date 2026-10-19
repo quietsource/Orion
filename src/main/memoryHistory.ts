@@ -19,6 +19,8 @@ import {
   type CarryItem,
   type MemoryLens,
   type MemoryComparison,
+  type ConversationCleanup,
+  type CleanupPreview,
 } from "../shared/memoryHistory";
 import type { OFSClient } from "./ofsClient";
 
@@ -36,6 +38,7 @@ type CheckpointData = {
 };
 type Dependencies = {
   directory: string;
+  attachmentDirectory?: string;
   readConversations(): Promise<Conversation[]>;
   saveConversation(value: Conversation): Promise<void>;
   baseEngine(): Promise<OFSClient>;
@@ -598,6 +601,10 @@ export class MemoryHistory {
           }),
         );
     }
+    if (context.carried) {
+      const selectedDocs=canvases(conversation).filter(doc=>context.carried!.canvasIds.includes(doc.id));
+      if(selectedDocs.length)add("Selected local Canvas documents (use canvas_open action read with the exact name to inspect their source): " + JSON.stringify(selectedDocs.map(doc=>({name:doc.name,format:doc.format}))));
+    }
     parts.push(
       "Recent user evidence IDs for record_assumption; cite only real matching user statements:",
     );
@@ -664,6 +671,74 @@ export class MemoryHistory {
         })),
       storageBytes,
     };
+  }
+  private async unusedAttachments() {
+    if(!this.deps.attachmentDirectory)return [];
+    const state=await this.index(), referenced=new Set<string>();
+    const track=(conversation: Conversation)=>{
+      for(const message of conversation.messages) {
+        for(const attachment of message.attachments??[])referenced.add(attachment.id);
+        for(const doc of message.canvasDocuments??[])if(doc.attachment)referenced.add(doc.attachment.id);
+      }
+    };
+    for(const conversation of await this.deps.readConversations())track(conversation);
+    for(const checkpoint of state.checkpoints)track((await this.checkpointData(checkpoint.id)).conversation);
+    let files: import("node:fs").Dirent[];
+    try { files=await fs.readdir(this.deps.attachmentDirectory,{withFileTypes:true}); }
+    catch(error) { if((error as NodeJS.ErrnoException).code === "ENOENT")return [];throw error; }
+    const result: Array<{id:string;name:string;bytes:number}>=[];
+    for(const file of files) {
+      const match=/^([a-f0-9-]{36})\.(png|jpe?g|webp|gif|bmp|avif)$/i.exec(file.name);
+      if(!file.isFile()||!match||referenced.has(match[1]!))continue;
+      const stat=await fs.stat(path.join(this.deps.attachmentDirectory,file.name));
+      if(Date.now()-stat.mtimeMs < 86400000)continue;
+      result.push({id:file.name,name:`Unused cached image · ${file.name}`,bytes:stat.size});
+    }
+    return result;
+  }
+  async cleanupPreview(id: string): Promise<CleanupPreview> {
+    await this.queue;
+    const conversation = await this.readConversation(id), context = await this.context(id), state = await this.index();
+    return {
+      memories: entries(await (await this.engine(id)).exportSnapshot()).filter(item => item.conversationId === id),
+      checkpoints: clone(state.checkpoints.filter(item => item.conversationId === id)),
+      assumptions: context.assumptions.filter(item => item.status === "dismissed"),
+      documents: canvases(conversation).map(item => ({ id: item.id, name: item.name })),
+      attachments: await this.unusedAttachments()
+    };
+  }
+  async cleanup(id: string, selection: ConversationCleanup): Promise<void> {
+    return this.exclusive(async () => {
+      this.assertIdle();
+      for (const key of ["memoryIds", "checkpointIds", "assumptionIds", "canvasIds", "attachmentIds"] as const) {
+        if (!Array.isArray(selection?.[key]) || selection[key].length > 10000 || selection[key].some(value => typeof value !== "string" || value.length > 256)) throw Error("Invalid cleanup selection.");
+      }
+      const conversation = await this.readConversation(id), context = await this.editContext(id), state = await this.index();
+      const existingMemories=entries(await (await this.engine(id)).exportSnapshot()).filter(item=>item.conversationId===id);
+      const allowed: Record<keyof ConversationCleanup, Set<string>> = {
+        memoryIds:new Set(existingMemories.map(item=>item.id)),
+        checkpointIds:new Set(state.checkpoints.filter(item=>item.conversationId===id).map(item=>item.id)),
+        assumptionIds:new Set(context.assumptions.filter(item=>item.status==="dismissed").map(item=>item.id)),
+        canvasIds:new Set(canvases(conversation).map(item=>item.id)),
+        attachmentIds:new Set((await this.unusedAttachments()).map(item=>item.id))
+      };
+      for(const key of Object.keys(allowed) as Array<keyof ConversationCleanup>)if(selection[key].some(value=>!allowed[key].has(value)))throw Error("Some selected items changed. Refresh Cleanup and review again.");
+      const removedCheckpoints = state.checkpoints.filter(item => item.conversationId === id && selection.checkpointIds.includes(item.id));
+      await (await this.engine(id)).forgetMemories(id, selection.memoryIds);
+      // Checkpoints and existing branches retain their own historical memory state.
+      context.lens.pinned = context.lens.pinned.filter(value => !selection.memoryIds.includes(value));
+      context.assumptions = context.assumptions.filter(item => item.status !== "dismissed" || !selection.assumptionIds.includes(item.id));
+      for (const memoryId of selection.memoryIds) { delete state.tags[memoryId]; if(context.tags)delete context.tags[memoryId]; }
+      state.checkpoints = state.checkpoints.filter(item => !removedCheckpoints.some(removed => removed.id === item.id));
+      for (const message of conversation.messages) message.canvasDocuments = message.canvasDocuments?.filter(doc => !selection.canvasIds.includes(doc.id));
+      if (context.carried) context.carried.canvasIds = context.carried.canvasIds.filter(value => !selection.canvasIds.includes(value));
+      await this.deps.saveConversation(conversation);
+      await this.persist();
+      for(const file of selection.attachmentIds)await fs.rm(path.join(this.deps.attachmentDirectory!,file),{force:true});
+      for (const checkpoint of removedCheckpoints) {
+        if (/^[a-f0-9-]{36}$/.test(checkpoint.id)) await fs.rm(path.join(this.deps.directory, `${checkpoint.id}.checkpoint.enc`), { force: true });
+      }
+    });
   }
   async packet(id: string): Promise<CarryPacket> {
     const conversation = await this.readConversation(id),
@@ -732,11 +807,11 @@ export class MemoryHistory {
         });
     }
     return {
-      title: `Continue: ${conversation.title}`,
+      title: `Handoff: ${conversation.title}`,
       sourceConversationId: id,
       createdAt: Date.now(),
       items,
-      canvasIds: canvases(conversation).map((doc) => doc.id),
+      canvasIds: [],
       model: conversation.model,
     };
   }
@@ -754,6 +829,7 @@ export class MemoryHistory {
         )
       )
         throw Error("Invalid continuation packet.");
+      if (!packet.model || packet.model.startsWith("api:") || /(?:[-_:]cloud)(?:$|[-_:])/i.test(packet.model)) throw Error("Choose a downloaded local chat model for this handoff.");
       const chosen = packet.items.filter((item) => item.included);
       if (!chosen.length)
         throw Error("Select at least one item to carry forward.");
@@ -777,6 +853,7 @@ export class MemoryHistory {
       );
       const conversation: Conversation = {
         id: newId,
+        localOnly: true,
         privateVoice:
           original.privateVoice ||
           chosen.some((item) =>
@@ -793,7 +870,7 @@ export class MemoryHistory {
             id: randomUUID(),
             role: "assistant",
             content:
-              "A reviewed continuation packet is attached to this conversation. Your selected context and documents are available; tell me what to work on next.",
+              "Local handoff ready. Your reviewed context and selected documents are available to this local model. What would you like to work on next?",
             createdAt: now,
             canvasDocuments: canvases(original)
               .filter((doc) => packet.canvasIds.includes(doc.id))
@@ -810,7 +887,7 @@ export class MemoryHistory {
       state.contexts[newId] = {
         lens: defaultMemoryLens(),
         assumptions: [],
-        branchName: "Continuation",
+        branchName: "Local handoff",
         rootId: context.rootId || id,
         branch: {
           parentId: id,

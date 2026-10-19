@@ -15,6 +15,10 @@ import {
 } from "../shared/voice";
 const execute = promisify(execFile);
 const VERSION = "1.13.8";
+const MODELS = {
+  dictation: "gigaspeech-streaming-2023-06-26-v2",
+  speech: "kokoro-1.0-fp32-v2",
+};
 const PACKAGES = {
   "sherpa-onnx-node":
     "MsDMBdhLFTZ1GwvcGSSQhnS7g/EA8OMH6IYysCVUOM7j8Icty9KRc0E6YT1A5fWBsZwRfKOeh88QC95aRvS8ag==",
@@ -23,20 +27,20 @@ const PACKAGES = {
   "sherpa-onnx-linux-x64":
     "6plnhjagsSeTntCgnlag86hWbs/uZE9Crms1LgOb68/1nKsIQjMd+WG519m+aPwT6TrsBOiEMzrx41t8sL5L5g==",
 };
-const ASR_REPO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17";
-const ASR_REV = "d42f2d9f7ca24806fb667456a18a9f1b60f70d16";
+const ASR_REPO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26";
+const ASR_REV = "672fbf1b30579d6585301139bb363f42a0ad4a24";
 const ASR_FILES = [
   [
-    "encoder-epoch-99-avg-1.int8.onnx",
-    "3810755ce7c3ab26b42a8bcf39d191308fa27fb0f53358823ba46141d03b7eb3",
+    "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+    "563fde436d16cf7607cf408cd6b30909819d03162652ef389c2450ced3f45ac1",
   ],
   [
-    "decoder-epoch-99-avg-1.int8.onnx",
-    "21e2a2acd961b3ac72f55be2f10f1a285e1b0b0ba010d7c0b6eab141411b163c",
+    "decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
+    "7bf787f90b194b307e5a4ad6a34fadb4e748304c35f78a8d66358a05b13ee6ef",
   ],
   [
-    "joiner-epoch-99-avg-1.int8.onnx",
-    "e085d73b593cf9b0707f370dbd656d58327d3fe36d80d849202ef81df02cb01e",
+    "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+    "d944208d660d67c8d72cd2acaeac971fa5ceb8c80e76c1968148846fedd6e297",
   ],
   [
     "tokens.txt",
@@ -47,6 +51,10 @@ class NativeVoice {
   private child: UtilityProcess;
   private serial = 0;
   private ended = false;
+  private exitResolve = () => {};
+  private exited = new Promise<void>((resolve) => {
+    this.exitResolve = resolve;
+  });
   private pending = new Map<
     number,
     {
@@ -91,6 +99,7 @@ class NativeVoice {
     );
     this.child.on("exit", () => {
       this.ended = true;
+      this.exitResolve();
       this.rejectAll(
         "The local voice engine stopped. Activate voice again to restart it.",
       );
@@ -126,6 +135,7 @@ class NativeVoice {
     this.ended = true;
     this.rejectAll("Local voice processing was stopped.");
     this.child.kill();
+    return this.exited;
   }
 }
 export class VoiceManager {
@@ -219,6 +229,14 @@ export class VoiceManager {
       this.root,
       kind === "dictation" ? "dictation" : "speech",
     );
+    try {
+      const ready = JSON.parse(
+        await fs.readFile(path.join(folder, "ready.json"), "utf8"),
+      ) as { model?: string };
+      if (ready.model !== MODELS[kind]) return false;
+    } catch {
+      return false;
+    }
     const files =
       kind === "dictation"
         ? ASR_FILES.map(([name]) => name)
@@ -252,17 +270,24 @@ export class VoiceManager {
         value.speed > 1.35
       )
         throw Error("Choose a listed voice and a speed between 0.75 and 1.35.");
+      const previous = await this.preferences();
+      const saved = {
+        voice: value.voice,
+        speed: value.speed,
+        setupPairSeen: value.setupPairSeen ?? previous.setupPairSeen ?? false,
+      };
       await writeEncryptedText(
         path.join(this.root, "preferences.enc"),
-        JSON.stringify(value),
+        JSON.stringify(saved),
       );
-      return value;
+      return saved;
     }
     try {
       const saved = JSON.parse(
         await readEncryptedText(path.join(this.root, "preferences.enc")),
       ) as VoicePreferences;
       return {
+        setupPairSeen: saved.setupPairSeen === true,
         voice: VOICES.some((voice) => voice.id === saved.voice)
           ? saved.voice
           : "heart",
@@ -292,6 +317,9 @@ export class VoiceManager {
       if (await this.installed(kind)) return;
     }
     if (await this.installed(kind)) return;
+    const previous = this.engines[kind];
+    delete this.engines[kind];
+    if (previous) await (await previous).close();
     const abort = new AbortController();
     this.setupAbort = abort;
     this.setupTask = this.install(kind, abort.signal).finally(() => {
@@ -431,10 +459,10 @@ export class VoiceManager {
       } else {
         const archive = path.join(stage, "voices.tar.bz2");
         await this.download(
-          "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2",
+          "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
           archive,
           "sha256",
-          "4c3052abaa60943a341f193888cf6abd68787dae6ab8ae5c925a706caa247e4e",
+          "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298",
           kind,
           signal,
         );
@@ -466,7 +494,7 @@ export class VoiceManager {
       signal.throwIfAborted();
       await fs.writeFile(
         path.join(source, "ready.json"),
-        JSON.stringify({ version: 1 }),
+        JSON.stringify({ version: 2, model: MODELS[kind] }),
         { mode: 0o600 },
       );
       const target = this.inside(

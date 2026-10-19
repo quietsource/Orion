@@ -14,6 +14,7 @@ parentPort!.on('message', (request: { id: number; method: string; args: unknown[
         case 'list': result = engine.listMemories(...request.args as Parameters<OrionFS['listMemories']>); break;
         case 'export': result = await engine.exportSnapshot(); break;
         case 'import': result = await engine.importSnapshot(...request.args as Parameters<OrionFS['importSnapshot']>); break;
+        case 'forget': result = await engine.forgetMemories(...request.args as Parameters<OrionFS['forgetMemories']>); break;
         case 'remove': result = engine.removeConversation(String(request.args[0])); break;
         case 'close': engine.close(); parentPort!.postMessage({ id: request.id, result: null }); parentPort!.close(); return;
         default: throw new Error('Unknown OFS operation');

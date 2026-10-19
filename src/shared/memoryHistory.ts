@@ -113,7 +113,23 @@ export interface MemoryComparison {
     status: "added" | "removed" | "changed";
   }>;
 }
+export interface ConversationCleanup {
+  memoryIds: string[];
+  checkpointIds: string[];
+  assumptionIds: string[];
+  canvasIds: string[];
+  attachmentIds: string[];
+}
+export interface CleanupPreview {
+  memories: MemoryEntry[];
+  checkpoints: MemoryCheckpoint[];
+  assumptions: Assumption[];
+  documents: Array<{ id: string; name: string }>;
+  attachments: Array<{ id: string; name: string; bytes: number }>;
+}
 export interface MemoryHistoryAPI {
+  cleanupPreview(conversationId: string): Promise<CleanupPreview>;
+  cleanup(conversationId: string, selection: ConversationCleanup): Promise<void>;
   context(conversationId: string): Promise<MemoryContext>;
   dashboard(conversationId: string): Promise<MemoryDashboard>;
   checkpoint(conversationId: string, label?: string): Promise<MemoryCheckpoint>;

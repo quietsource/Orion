@@ -10,3 +10,5 @@ tool-directive/
 
 /.release-staging-*/
 /.release-final-*/
+
+release-staged/

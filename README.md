@@ -1,6 +1,6 @@
 # Orion
 
-Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The latest published release is `0.1.9`. The local `0.2.0` build adds five conversation-memory features and private local voice and is awaiting release approval.
+Orion is a local-first desktop app for chatting with AI models, using research and productivity tools, and creating images and video. The latest release is `0.2.0`, with Conversation History, private local voice, reviewed local handoffs and a refined chat interface.
 
 Orion is built with Electron and TypeScript. Bun is used to install dependencies, run development commands, build, and package Orion. Electron includes the runtime needed by the desktop app, so a separate system Node.js installation is not required.
 
@@ -25,7 +25,7 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 - Orion Graph System (OGS) for native chat diagrams, networks, line/bar/pie charts, radar charts, and Venn diagrams. Models describe data and connections; Orion handles rendering, accessible data views, and SVG export. See the [OGS guide](docs/orion-graph-system.md).
 - Automatic model reasoning with runtime defaults, and a compact composer docked to the bottom of chat.
 - Queue follow-up messages with Enter while a response is generating. Compact cards above the composer provide send-now and delete controls; queued messages run in order without replacing an unsent draft. Pending queues stay in memory for the current app session.
-- OrionFS (OFS) local memory. OFS stores attributed statements and their associations locally and recalls relevant memories without a separate embedding model or network service. Saved memories are available in Settings. The local 0.2.0 build adds a Memory panel beside the composer context meter.
+- OrionFS (OFS) local memory. OFS stores attributed statements and their associations locally and recalls relevant memories without a separate embedding model or network service. Saved memories are available in Settings. Conversation History is available beside the composer context meter once a chat contains content.
 - General chat tools for web search and page reading, local application actions, questions, Canvas, and image/video creation with live progress cards. Tools run without per-action approval prompts. Project workspace tools are currently disabled.
 - Orion Browser controls for opening and reading HTTPS pages in Orion's browser.
 - Orion Create, which can install a compact Vulkan-accelerated `stable-diffusion.cpp` runtime for Stable Diffusion image generation and Wan video generation. The runtime and chosen model weights are downloaded on demand.
@@ -34,21 +34,23 @@ Download the current packages from [GitHub Releases](https://github.com/quietsou
 - Check compatibility on installed Orion-managed conversational model cards in Models → Manage. Requires the managed llama.cpp engine. Orion diagnoses compatibility and, when available, downloads and validates a newer official runtime for that model. Verified runtime profiles are applied automatically; unsupported models receive a clear explanation. Compatibility errors during chat trigger the same check automatically, with progress shown in the chat tool activity. New architectures still require implementation support in llama.cpp.
 - In-app release checks with download progress. Updates open the visible Windows installer or Linux system package installer, then close Orion. Portable Windows and AppImage updates open the downloaded version after Orion closes. Packages stay in Downloads, and release notes appear when the updated version starts.
 
-## Conversation memory — 0.2.0 preview
+## Conversation history
 
 - **Checkpoint timeline:** preview saved states with a horizontal slider and continue from one in a new branch, preserving the original conversation.
 - **Assumption checkpoints:** inspect inferred versus user-stated constraints, confirm or correct them, and review answers and Canvas documents produced under an outdated assumption.
 - **Memory lenses:** control conversation, named-project, personal, or all-conversation recall; pin or exclude specific memories and inspect automatically recalled snippets on each answer.
-- **Reviewed carry-forward:** edit an evidence packet of decisions, constraints, memories, open questions, and selected Canvas documents before starting a shorter continuation.
+- **Local handoff:** edit selected evidence and choose Canvas documents before continuing with a downloaded local model.
 - **Branch comparison:** compare message counts, memories, assumptions, carried decisions, and Canvas revisions across alternate paths.
 
-All five use OrionFS locally. Checkpoints preserve application context rather than model hidden state, and do not reverse external actions. Branches use isolated memory snapshots. See the [conversation memory guide](docs/memory-history.md) for workflows, context limits, and deletion behavior. These packages have not been published yet.
+These controls use OrionFS locally. Checkpoints preserve application context rather than model hidden state, and do not reverse external actions. Branches use isolated memory snapshots. See the [conversation history guide](docs/memory-history.md) for workflows, context limits, and deletion behavior.
 
-## Local voice — 0.2.0 preview
+Conversation History consolidates Timeline, Memory (including assumptions), Local handoff, Compare and reviewed Cleanup. Source receipts below answers show recalled memories and attached-file context with links to their original messages. Local handoffs let you edit selected context and choose a downloaded model; those conversations and their memories remain local-only. Cleanup previews selected memories, checkpoints, dismissed assumptions, Canvas copies and unused attachment cache before removal. See the [conversation history guide](docs/memory-history.md).
+
+## Local voice
 
 Use the microphone beside Send for live English dictation. Click Send, press Enter, or pause and say exactly **send the message**. The separate speaker toggle enables natural neural read aloud; Settings → Voice offers six American/British voices, speed control, and previews.
 
-The native runtime and relevant model download only after first-use setup is accepted. Dictation and read aloud install independently and work offline afterward. Raw audio stays in memory, without recordings or separate transcript logs. Sent text uses normal encrypted chat history. Voice conversations stay on local models with local tools; voice-derived memories are excluded from ordinary and hosted-provider recall. See the [local voice guide](docs/local-voice.md) for setup, privacy boundaries, and current English support.
+The native runtime and relevant model download only after first-use setup is accepted. First-use setup offers both features separately, with voice auditions after download. Dictation and read aloud install independently and work offline afterward. Settings → Model can automatically collapse Thinking when the final answer starts. Raw audio stays in memory, without recordings or separate transcript logs. Sent text uses normal encrypted chat history. Voice conversations stay on local models with local tools; voice-derived memories are excluded from ordinary and hosted-provider recall. See the [local voice guide](docs/local-voice.md) for setup, privacy boundaries, and current English support.
 
 ## Requirements
 

@@ -15,6 +15,8 @@ const api: OrionAPI = {
     onProgress: callback => { const listener = (_: Electron.IpcRendererEvent, value: Parameters<typeof callback>[0]) => callback(value); ipcRenderer.on('voice:progress', listener); return () => ipcRenderer.removeListener('voice:progress', listener); }
   },
   memoryHistory: {
+    cleanupPreview: conversationId => ipcRenderer.invoke('memory-history:cleanupPreview', conversationId),
+    cleanup: (conversationId, selection) => ipcRenderer.invoke('memory-history:cleanup', conversationId, selection),
     context: conversationId => ipcRenderer.invoke('memory-history:context', conversationId),
     dashboard: (conversationId) => ipcRenderer.invoke('memory-history:dashboard', conversationId),
     checkpoint: (conversationId, label) => ipcRenderer.invoke('memory-history:checkpoint', conversationId, label),

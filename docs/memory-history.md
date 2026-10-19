@@ -1,6 +1,6 @@
-# Conversation memory in Orion 0.2.0
+# Conversation history in Orion 0.2.0
 
-Open **Memory** beside the context meter in the chat composer. Its five tabs let you inspect and change the context available to a conversation. The controls use OrionFS locally; no embedding model, additional AI model, account, or remote service is needed.
+Open **History** beside the context meter in the chat composer once the conversation contains content. Empty chats keep this control hidden. Timeline, Memory, Local handoff, Compare, and Cleanup consolidate the conversation controls. Assumptions are inside Memory and stay collapsed until opened. The controls use OrionFS locally; no embedding model, additional AI model, account, or remote service is needed.
 
 ## 1. Checkpoint timeline
 
@@ -10,7 +10,7 @@ Choose **Continue from here** to create a named conversation branch. The branch 
 
 Checkpoints start when this feature is enabled in Orion 0.2.0. Orion cannot reconstruct a memory state from before it saved a checkpoint. A checkpoint restores application context, not a model's internal hidden state or random sampling state. Answers can differ when you continue. Website actions, generated media files, and changes made outside the conversation are not reversed.
 
-## 2. Assumption checkpoints
+## Decisions and assumptions (inside Memory)
 
 Add a confirmed constraint yourself, or review a consequential assumption recorded by the assistant. Entries distinguish model inference from a directly sourced user statement. A direct quotation is not automatically a user confirmation. Only the user can confirm a constraint.
 
@@ -18,7 +18,7 @@ Use **Save correction**, **Confirm**, or **Dismiss**. Corrected constraints take
 
 Dependency markers mean an answer was produced while an assumption was active. They are a review aid, not a proof that every sentence depends on that assumption. Orion does not silently overwrite answers, rerun tools, or modify original files.
 
-## 3. Memory lenses
+## Recall settings (inside Memory)
 
 - **This conversation:** recall from this chat.
 - **Named project:** recall from conversations assigned the same project name and memories labeled for that project. This is a memory grouping, not the disabled filesystem workspace feature.
@@ -29,19 +29,27 @@ Search stored memories and open their source messages. Pin an entry to prioritiz
 
 Restored branches remain isolated: a broader lens can inspect other conversations present in their frozen snapshot, but cannot reveal later events or live changes from other branches. Ordinary conversations share the original memory store; restored branches do not automatically publish their new memories into it.
 
-Answers with automatically recalled memories have an expandable **Recalled … memories** record showing exactly those initial recall snippets. Memories explicitly retrieved later by a tool appear in that tool's result. The selected local model or hosted provider receives included memory text as part of its request. Context limits still apply; pins cannot exceed a model's available context budget.
+Answers with automatically recalled memories or attached-file context have a collapsed **Sources** receipt below the answer. It shows initial recall snippets and attached-file references, with links to the original messages. A receipt records supplied context; it does not prove causal use, completeness, or correctness. Clipped messages can provide only part of a document. Memories explicitly retrieved later by a tool appear in that tool's result. The selected local model or hosted provider receives included memory text as part of its request. Context limits still apply; pins cannot exceed a model's available context budget.
 
-## 4. Reviewed carry-forward packets
+## Local handoff
 
-Use **Carry forward** to start a shorter continuation without copying the entire old transcript. Orion assembles a draft from confirmed constraints, recent user requests, pinned memories, and possible open questions. This is a local evidence selection, not an AI-generated or verified summary.
+Use **Local handoff** to start a shorter continuation without copying the entire old transcript. Orion assembles a draft from confirmed constraints, recent user requests, pinned memories, and possible open questions. This is a local evidence selection, not an AI-generated or verified summary.
 
-Edit the text, add decisions or constraints, uncheck unwanted items, and choose Canvas documents. Source links preserve attribution. **Create continuation** starts a new conversation containing only the reviewed packet and selected documents. The old engine's memory rows are not copied in secretly. New turns build new OrionFS memories normally.
+Edit the text, add decisions or constraints, uncheck unwanted items, and choose Canvas documents. Source links preserve attribution. Canvas documents start unselected. Choose an installed local conversational model. **Start local handoff** starts a new conversation containing only the reviewed packet and selected documents. Handoff conversations remain local-only, including subsequent branches: hosted API models, Ollama cloud inference and network tools are blocked. Their memories are excluded from ordinary and hosted recall. The old engine's memory rows are not copied in secretly. New turns build new OrionFS memories normally.
 
 The packet is limited to 24,000 selected characters. Prompts prioritize confirmed constraints and include packet records that fit the selected model's context budget. A small local context window may omit records; the model is told when this happens. Choose a concise packet or increase the context limit when needed.
 
-## 5. Branch comparison
+## Compare
 
-Choose two conversations from the same family in **Compare branches**. Orion shows message change counts, added/removed/changed memories, assumption changes, carried decisions and constraints, and Canvas revisions side by side. Use **Continue the “after” branch** to open your preferred path. Comparison is deterministic and local; nothing is merged or replaced automatically.
+Choose two conversations from the same family in **Compare**. Orion shows message change counts, added/removed/changed memories, assumption changes, carried decisions and constraints, and Canvas revisions side by side. Use **Continue the “after” branch** to open your preferred path. Comparison is deterministic and local; nothing is merged or replaced automatically.
+
+## Cleanup
+
+Search and select active memories from this conversation, checkpoints, dismissed assumptions, or stored Canvas copies. Nothing is preselected. **Review cleanup** shows the exact selected items before **Remove selected items** applies changes. The server validates ownership and rechecks the selection before removal.
+
+Unused cached images older than 24 hours are listed separately, with their size. Their references are checked across **all** saved conversations and checkpoints, including branches, before deletion. Recent files are retained to protect drafts. Original files outside Orion’s attachment cache, model weights and generated media are never targeted by this cleanup.
+
+Removing a memory affects the active engine; existing checkpoints and independent branches preserve their historical memory copies. Chat text and past source receipts also remain. Rebuilding memory from retained transcripts can recreate memories. Removing a Canvas copy clears its current session as well as its saved conversation record. This is selective housekeeping, not a promise of erasing every historical copy or reclaiming snapshot storage.
 
 ## Storage and deletion
 

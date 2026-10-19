@@ -52,8 +52,9 @@ let chatPreparing = false;
 function getMemoryHistory() {
   return memoryHistory ??= new MemoryHistory({
     directory: path.join(dataDir(), 'memory-history'),
+    attachmentDirectory: path.join(dataDir(), 'attachments'),
     readConversations,
-    privateSources: async () => [...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))],
+    privateSources: async () => [...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.localOnly||c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))],
     saveConversation: value => serializeMutation('conversations', async () => {
       const all = await readConversations(); const index = all.findIndex(item => item.id === value.id);
       if (index < 0) all.push(value); else all[index] = value;
@@ -100,7 +101,7 @@ const creationsIndexFile = () => path.join(creationsDir(), 'index.json');
 const attachmentsDir = () => path.join(dataDir(), 'attachments');
 const chatTokenCalibrationFile = () => path.join(dataDir(), 'chat-token-calibration.json');
 const huggingFaceTokenFile = () => path.join(dataDir(), 'huggingface-token');
-const defaults: AppSettings = { ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2 };
+const defaults: AppSettings = { autoCollapseThinking:true, ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2 };
 
 let settingsCache: AppSettings = { ...defaults };
 const chatTokenSafetyFactors = new Map<string, number>();
@@ -460,6 +461,7 @@ async function getSettings(): Promise<AppSettings> {
   }
   const settings = { ...defaults, ...parsed, theme: defaults.theme } as AppSettings;
   try {
+    settings.autoCollapseThinking = settings.autoCollapseThinking !== false;
     settings.ollamaUrl = validateOllamaUrl(settings.ollamaUrl);
     if (typeof settings.selectedModel !== 'string' || !Number.isFinite(settings.temperature) ||
         !Number.isFinite(settings.contextWindow) || !['all', 'external', 'none'].includes(settings.approvalLevel) ||
@@ -522,7 +524,7 @@ async function retrieveConversationMemory(query: string, settings: AppSettings, 
   // retained only for settings-file compatibility and is always normalized on.
   const history = getMemoryHistory(), engine = await history.engine(conversationId);
   const context = conversationId ? await history.context(conversationId) : undefined;
-  const privateSources=allowPrivateVoice?[]:[...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))];
+  const privateSources=allowPrivateVoice?[]:[...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.localOnly||c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))];
   const memories = await engine.recall(query, maxTokens, conversationId ? '__all__' : '__no_active_conversation__', [...excludedIds, ...privateSources, ...(context?.lens.excludedSources ?? [])], conversationId ? await history.policy(conversationId) : undefined);
   let remaining = maxTokens;
   return memories.filter(memory => !excludedIds.has(memory.sourceMessageId ?? memory.id)).map(memory => ({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: tokenCount({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: 0 }) })).filter(chunk => { if (chunk.tokens > remaining) return false; remaining -= chunk.tokens; return true; });
@@ -1222,7 +1224,7 @@ ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory =
   // Persisted workspace selection is paused with workspace mode.
   value.workspacePath = undefined;
   value.privateVoice = value.privateVoice || value.messages.some(message=>message.voiceInput===true);
-  if(value.privateVoice)await getVoiceManager().protectSources(value.messages.map(message=>message.id));
+  if(value.privateVoice||value.localOnly)await getVoiceManager().protectSources(value.messages.map(message=>message.id));
   ofsDeletedConversations.delete(value.id);
   // Rolling extractive compaction keeps the full searchable transcript while
   // giving each prompt a concise summary of older turns.
@@ -1256,8 +1258,9 @@ ipcMain.handle('memory:ofs-list', async (_, offset = 0, conversationId?: string)
   const settings = await getSettings();
   return (await getMemoryHistory().engine(conversationId)).listMemories(50, Number.isFinite(offset) ? offset : 0);
 });
-for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare'] as const) {
-  ipcMain.handle(`memory-history:${method}`, async (_, ...args: unknown[]) => {
+for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare','cleanupPreview','cleanup'] as const) {
+  ipcMain.handle(`memory-history:${method}`, async (event, ...args: unknown[]) => {
+    if (!win || event.sender !== win.webContents) throw Error('Conversation history is only available in the main Orion window.');
     if (args.some(value => typeof value === 'string' && value.length > 256)) throw Error('Invalid memory request.');
     const history = getMemoryHistory();
     return (history[method] as (...values: unknown[]) => Promise<unknown>).apply(history, args.slice(0, 3));
@@ -1297,6 +1300,7 @@ ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
     approvedTools: [],
     workspacePath: '',
     keepInTray: value.keepInTray === true,
+    autoCollapseThinking: value.autoCollapseThinking !== false,
     interConversationMemory: value.interConversationMemory === true,
     experimentalOfsMemory: true,
     startNewConversation: value.startNewConversation !== false,
@@ -1748,17 +1752,17 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   settingsCache = settings;
   const configuredProviders = await readProviders();
   const remote = resolveProviderModel(configuredProviders, input.model);
-  const privateVoice = conversation?.privateVoice || input.messages.some(message=>message.voiceInput);
-  if(privateVoice&&remote)throw Error('Voice conversations stay on this computer. Select an Orion-managed or local Ollama model.');
+  const privateVoice = conversation?.localOnly || conversation?.privateVoice || input.messages.some(message=>message.voiceInput);
+  if(privateVoice&&remote)throw Error('This conversation stays on this computer. Select an Orion-managed or local Ollama model.');
   const installedConversational = remote ? [] : await readInstalledModels();
   const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
   const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
   if(privateVoice&&!routedModel.startsWith('orion-gguf:')){
-    if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(routedModel))throw Error('Ollama cloud models cannot be used for private local voice. Select a downloaded local model.');
+    if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(routedModel))throw Error('Ollama cloud models cannot be used for this local conversation. Select a downloaded local model.');
     const info=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:routedModel}),signal:AbortSignal.timeout(10000)});
     if(!info.ok)throw Error('Could not verify that this Ollama model is local. Select an installed local model and try again.');
     const metadata=await info.json() as {remote_host?:string;remote_model?:string};
-    if(metadata.remote_host||metadata.remote_model)throw Error('This Ollama model is cloud-backed. Private local voice requires a downloaded local model.');
+    if(metadata.remote_host||metadata.remote_model)throw Error('This Ollama model is cloud-backed. This conversation requires a downloaded local model.');
   }
 
   const checkedCompatibility = new Set<string>();
@@ -1808,7 +1812,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const inlineOrionHelp = !helpToolAvailable && isOrionHelpQuestion(latestUserRequest) ? searchOrionHelp(latestUserRequest) : '';
   const modelIdentity = await getModelIdentity(input.model);
   const buildRequestSystemPrompt = async () => addTextToolProtocol(
-    (await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling)) + await getMemoryHistory().prompt(input.conversationId, Math.max(500,Math.min(16000,contextBudget*.5))) + (privateVoice?'\nThis is a private local voice conversation. Network tools are unavailable. Never suggest sending voice-derived context to a hosted service.':''),
+    (await buildOrionSystemPrompt(modelIdentity, availableTools, inlineOrionHelp, codeMode ? 'code' : 'chat', workspaceSelected, nativeToolCalling)) + await getMemoryHistory().prompt(input.conversationId, Math.max(500,Math.min(16000,contextBudget*.5))) + (privateVoice?'\nThis is a private local conversation. Network tools are unavailable. Keep this conversation and its context on the computer.':''),
     availableTools,
     nativeToolCalling
   );
@@ -1934,7 +1938,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     if (retrievedIds.has(chunk.id) || retrieved.length >= 48 || retrievedTokens + promptTokens > memoryBudget) continue;
     retrieved.push(chunk); retrievedIds.add(chunk.id); retrievedTokens += promptTokens;
   }
-  event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'memory_context', memories: retrieved.map(chunk => ({ id: chunk.id, conversationId: chunk.conversationId, messageId: chunk.messageId, text: chunk.text })) });
+  event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'memory_context', sourceFiles: recent.flatMap(message => (message.attachments ?? []).filter(file=>file.kind === 'image'||message.content.includes(file.name)).map(file => ({id:file.id,name:file.name,conversationId:input.conversationId,messageId:message.id}))), memories: retrieved.map(chunk => ({ id: chunk.id, conversationId: chunk.conversationId, messageId: chunk.messageId, text: chunk.text })) });
   const memories = retrieved.map(chunk => memoryPromptText(chunk));
   let memory = compactSummary ? `Recent conversation summary:\n${compactSummary}\n` : '';
   memory += memories.join('\n\n');
@@ -2454,6 +2458,23 @@ ipcMain.handle('canvas:save-revision', async (_, conversationId: string, filePat
   await fs.writeFile(file,content,'utf8');
   await sendWorkspaceReview(win.webContents,conversationId);
 });
+let ollamaInstallCache: { checkedAt: number; found: boolean } | undefined;
+let ollamaInstallCheck: Promise<boolean> | undefined;
+async function detectOllamaInstallation(): Promise<boolean> {
+  if(ollamaInstallCache && Date.now()-ollamaInstallCache.checkedAt < 30000)return ollamaInstallCache.found;
+  if(ollamaInstallCheck)return ollamaInstallCheck;
+  ollamaInstallCheck=(async()=>{
+    const executable=process.platform === 'win32' ? 'ollama.exe' : 'ollama';
+    const candidates=(process.env.PATH??'').split(path.delimiter).filter(Boolean).map(directory=>path.join(directory.replace(/^"|"$/g,''),executable));
+    if(process.platform === 'win32') {
+      if(process.env.LOCALAPPDATA)candidates.push(path.join(process.env.LOCALAPPDATA,'Programs','Ollama','ollama.exe'));
+      if(process.env.ProgramFiles)candidates.push(path.join(process.env.ProgramFiles,'Ollama','ollama.exe'));
+    } else candidates.push('/usr/local/bin/ollama','/usr/bin/ollama');
+    const found=(await Promise.all([...new Set(candidates)].map(async file=>{try{return (await fs.stat(file)).isFile();}catch{return false;}}))).some(Boolean);
+    ollamaInstallCache={checkedAt:Date.now(),found};return found;
+  })().finally(()=>{ollamaInstallCheck=undefined;});
+  return ollamaInstallCheck;
+}
 let cachedOllamaStatus=false, cachedOllamaStatusAt=0, ollamaStatusRefresh:Promise<void>|null=null;
 function refreshCachedOllamaStatus(){
   if(ollamaStatusRefresh||Date.now()-cachedOllamaStatusAt<5000)return;
@@ -2466,7 +2487,7 @@ async function queryNvidiaGpuStats():Promise<{usagePercent:number|null;usedVramM
   return null;
 }
 ipcMain.handle('system:info', async () => {
-  const [nvidia, cpuLoad] = await Promise.all([queryNvidiaGpuStats(),si.currentLoad().catch(() => null)]);
+  const [nvidia, cpuLoad, ollamaInstalled] = await Promise.all([queryNvidiaGpuStats(),si.currentLoad().catch(() => null),detectOllamaInstallation()]);
   const graphics=nvidia?null:await si.graphics().catch(() => ({ controllers: [], displays: [] }));
   void refreshCachedOllamaStatus();
   const totalRamMB = os.totalmem() / 1024 / 1024, usedRamMB = (os.totalmem() - os.freemem()) / 1024 / 1024;
@@ -2475,7 +2496,7 @@ ipcMain.handle('system:info', async () => {
   const knownUsedVram = controllers.length > 0 && controllers.every(controller => typeof controller.memoryUsed === 'number');
   const usedVramMB = knownUsedVram ? controllers.reduce((total, controller) => total + (controller.memoryUsed ?? 0), 0) : null;
   const gpuLoads=(graphics?.controllers??[]).map(controller=>controller.utilizationGpu).filter((value):value is number=>typeof value==='number'&&Number.isFinite(value));
-  return { platform: process.platform, ollama: cachedOllamaStatus, cpuUsagePercent: cpuLoad&&Number.isFinite(cpuLoad.currentLoad)?Math.round(cpuLoad.currentLoad):null, usedRamMB: Math.round(usedRamMB), totalRamMB: Math.round(totalRamMB), gpuUsagePercent: nvidia?.usagePercent??(gpuLoads.length?Math.round(gpuLoads.reduce((sum,value)=>sum+value,0)/gpuLoads.length):null), usedVramMB: nvidia?.usedVramMB??(usedVramMB === null ? null : Math.round(usedVramMB)), totalVramMB: nvidia?.totalVramMB??Math.round(totalVramMB) };
+  return { platform: process.platform, ollama: cachedOllamaStatus, ollamaInstalled, cpuUsagePercent: cpuLoad&&Number.isFinite(cpuLoad.currentLoad)?Math.round(cpuLoad.currentLoad):null, usedRamMB: Math.round(usedRamMB), totalRamMB: Math.round(totalRamMB), gpuUsagePercent: nvidia?.usagePercent??(gpuLoads.length?Math.round(gpuLoads.reduce((sum,value)=>sum+value,0)/gpuLoads.length):null), usedVramMB: nvidia?.usedVramMB??(usedVramMB === null ? null : Math.round(usedVramMB)), totalVramMB: nvidia?.totalVramMB??Math.round(totalVramMB) };
 });
 async function workspaceRoot(conversationId?: string, createSession = false) { const configured = (await getSettings()).workspacePath; if (!configured) throw new Error('Choose or create a project workspace from the / command palette before using workspace tools.'); return conversationId && createSession ? workspaceManager.begin(configured, conversationId) : workspaceManager.rootFor(configured, conversationId); }
 async function sendWorkspaceReview(sender: Electron.WebContents, conversationId: string) { const review = await workspaceManager.review(conversationId); if (review?.changes.length && !sender.isDestroyed()) sender.send('ollama:stream', { conversationId, type: 'workspace', workspaceReview: review }); }
@@ -2638,7 +2659,7 @@ async function controlDesktopWindow(action: string, target: string) {
   return { output: `${action} window: ${match.title} (${match.class})`, success: true };
 }
 async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string> = new Set(), conversationId?: string, activeModel = '', context = 8192): Promise<{ output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }> {
-  if(conversationId&&(await readConversations()).find(item=>item.id===conversationId)?.privateVoice&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local voice conversation.',success:false};
+  if(conversationId&&(await readConversations()).some(item=>item.id===conversationId&&(item.privateVoice||item.localOnly))&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local conversation.',success:false};
   if (tool.name === 'record_assumption') {
     if (!conversationId) throw Error('An active conversation is required.');
     const action = String(tool.input.action ?? 'save');
@@ -2730,7 +2751,7 @@ async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<
     if (!query) return { output: 'Provide a memory search query.', success: false };
     const settings = await getSettings();
     const maxTokens = Math.min(16_384, Math.max(1024, Math.floor(settings.contextWindow * MEMORY_CONTEXT_FRACTION)));
-    const chunks = await retrieveConversationMemory(query, settings, maxTokens, memoryExcludedIds, chunk => estimateModelChatTokens(memoryPromptText(chunk, '\n'), settings.ollamaUrl, settings.selectedModel) + 1, conversationId, Boolean(conversationId&&(await readConversations()).find(item=>item.id===conversationId)?.privateVoice));
+    const chunks = await retrieveConversationMemory(query, settings, maxTokens, memoryExcludedIds, chunk => estimateModelChatTokens(memoryPromptText(chunk, '\n'), settings.ollamaUrl, settings.selectedModel) + 1, conversationId, Boolean(conversationId&&(await readConversations()).some(item=>item.id===conversationId&&(item.privateVoice||item.localOnly))));
     const output = chunks.map(chunk => memoryPromptText(chunk, '\n')).join('\n\n');
     return { output: output || 'No matching saved conversation excerpts were found. Try exact names or distinctive wording.', success: true };
   }
@@ -2796,7 +2817,7 @@ async function executeToolSafely(tool: ToolRequest, memoryExcludedIds?: Readonly
 }
 
 async function executeAgentTool(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string>, conversationId: string, activeModel: string, context: number, maxOutputCharacters = 6000) {
-  if((await readConversations()).find(item=>item.id===conversationId)?.privateVoice&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local voice conversation.',success:false};
+  if((await readConversations()).some(item=>item.id===conversationId&&(item.privateVoice||item.localOnly))&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local conversation.',success:false};
   if (tool.name === 'canvas_open') {
     try {
       const action=String(tool.input.action??'open');

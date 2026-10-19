@@ -49,6 +49,8 @@ function button(
 }
 
 export function installVoice(host: Host) {
+  const defaultPlaceholder = host.prompt.placeholder;
+  let pairedSetupSeen = false;
   const api = window.orion.voice,
     send = document.getElementById("send")!;
   const speechButton = button("", toggleSpeech, "composer-action voice-button");
@@ -100,6 +102,9 @@ export function installVoice(host: Host) {
     finishPlayback: (() => void) | undefined;
   let stateLoaded = false,
     setupBusy = false,
+    setupReady = false,
+    setupInstalled = false,
+    setupCancelled = false,
     setupKind: VoiceKind = "dictation",
     setupResolve: ((value: boolean) => void) | undefined,
     setupTask: Promise<boolean> | undefined;
@@ -116,26 +121,81 @@ export function installVoice(host: Host) {
   download.hidden = true;
   const setupDetail = element("p", "", "voice-setup-detail");
   setupDetail.setAttribute("role", "status");
+  const voicePicker = element("section", undefined, "voice-picker");
+  voicePicker.hidden = true;
+  const setupVoice = element("select");
+  setupVoice.setAttribute("aria-label", "Choose your read-aloud voice");
+  for (const voice of VOICES)
+    setupVoice.add(new Option(`${voice.name} · ${voice.detail}`, voice.id));
+  const pickerLabel = element("label", "Choose your voice");
+  pickerLabel.append(setupVoice);
+  const previewVoice = button("Preview selected voice", async () => {
+    previewVoice.disabled = true;
+    try {
+      await read(
+        "Hello. Welcome to Orion. Take a moment to listen, and choose the voice you enjoy most.",
+        { ...preferences, voice: setupVoice.value },
+      );
+    } catch (error) {
+      setupDetail.textContent = message(error);
+    } finally {
+      previewVoice.disabled = false;
+    }
+  });
+  const stopPreview = button("Stop preview", () => stopReading());
+  voicePicker.append(
+    pickerLabel,
+    previewVoice,
+    stopPreview,
+    element(
+      "p",
+      "You can change the voice and speaking speed at any time in Settings → Voice.",
+      "muted",
+    ),
+  );
   const cancel = button("Not now", () => {
     if (setupBusy) {
+      setupCancelled = true;
       void api.cancelSetup();
       return;
     }
-    resolveSetup(false);
+    resolveSetup(setupReady);
   });
   const install = button(
     "Download and enable",
     async () => {
       if (setupBusy) return;
+      if (setupInstalled && setupKind === "dictation") { resolveSetup(true); return; }
+      if (setupReady) {
+        install.disabled = true;
+        try {
+          await stopReading();
+          preferences = await api.preferences({
+            ...preferences,
+            voice: setupVoice.value,
+          });
+          resolveSetup(true);
+        } catch (error) {
+          setupDetail.textContent = message(error);
+          install.disabled = false;
+        }
+        return;
+      }
       setupBusy = true;
+      setupCancelled = false;
       download.hidden = false;
       download.removeAttribute("value");
       install.disabled = true;
       cancel.textContent = "Cancel download";
       try {
         await api.setup(setupKind);
-        resolveSetup(true);
+        if (setupKind === "speech") showVoicePicker();
+        else resolveSetup(true);
       } catch (error) {
+        if (setupCancelled) {
+          resolveSetup(false);
+          return;
+        }
         setupDetail.textContent = message(error);
         setupBusy = false;
         install.disabled = false;
@@ -154,13 +214,16 @@ export function installVoice(host: Host) {
     setupPrivacy,
     download,
     setupDetail,
+    voicePicker,
     setupActions,
   );
   document.body.append(setupDialog);
   setupDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
-    if (setupBusy) void api.cancelSetup();
-    else resolveSetup(false);
+    if (setupBusy) {
+      setupCancelled = true;
+      void api.cancelSetup();
+    } else resolveSetup(setupReady);
   });
   api.onProgress((value) => {
     if (!setupDialog.open || value.kind !== setupKind) return;
@@ -200,36 +263,70 @@ export function installVoice(host: Host) {
               ? "Listening locally · Pause, then say “send the message” to send"
               : "Microphone paused"
           : "";
+    host.prompt.placeholder = starting
+      ? "Getting voice ready… wait for Listening"
+      : microphoneEnabled
+        ? generating
+          ? "Your model is replying…"
+          : reading
+            ? "Microphone paused while the answer is read aloud…"
+            : session
+              ? "Speak your message…"
+              : "Microphone paused…"
+        : readEnabled
+          ? "Type a message… responses will be read aloud"
+          : defaultPlaceholder;
     status.textContent = text;
     status.hidden = !text;
     mic.disabled = starting || stopping;
   }
   function resolveSetup(value: boolean) {
     setupBusy = false;
+    if (setupReady) void stopReading();
+    setupReady = false;
     setupDialog.close();
     setupResolve?.(value);
     setupResolve = undefined;
     setupTask = undefined;
   }
-  async function ensure(kind: VoiceKind) {
+  function showVoicePicker() {
+    setupBusy = false;
+    setupReady = true;
+    download.hidden = true;
+    voicePicker.hidden = false;
+    setupTitle.textContent = "Choose your read-aloud voice";
+    setupText.textContent =
+      "The full-quality neural voices are ready on your computer. Preview and choose your favorite before continuing.";
+    setupVoice.value = preferences.voice;
+    setupDetail.textContent = "";
+    install.disabled = false;
+    install.textContent = "Use this voice and continue";
+    cancel.textContent = "Keep current voice";
+  }
+  async function ensure(kind: VoiceKind, offerInstalled = false) {
     const state = await api.state();
     preferences = state.preferences;
     stateLoaded = true;
-    if (kind === "dictation" ? state.dictationInstalled : state.speechInstalled)
-      return true;
+    const installed =
+      kind === "dictation" ? state.dictationInstalled : state.speechInstalled;
+    if (installed && !offerInstalled) return true;
     if (setupTask) {
       await setupTask;
       return ensure(kind);
     }
     setupKind = kind;
+    setupInstalled = installed;
+    setupReady = false;
+    setupCancelled = false;
+    voicePicker.hidden = true;
     setupTitle.textContent =
       kind === "dictation"
         ? "Enable local voice typing"
         : "Enable natural read aloud";
     setupText.textContent =
       kind === "dictation"
-        ? "On first use, Orion downloads its native speech engine (about 10 MB) and English streaming recognition model (about 44 MB). After setup, dictation works offline. Nothing is downloaded unless you enable it. Dictated conversations use local chat models and local tools only."
-        : "On first use, Orion downloads its native speech engine (about 10 MB) and Kokoro neural voice model (about 132 MB). All six natural voice choices share this model. Speech is generated locally and works offline after setup.";
+        ? "On first use, Orion downloads its native speech engine (about 10 MB) and English streaming recognition model (about 74 MB). After setup, dictation works offline. Nothing is downloaded unless you enable it. Dictated conversations use local chat models and local tools only."
+        : "On first use, Orion downloads its native speech engine (about 10 MB) and full-precision Kokoro neural voice model (about 350 MB). All six natural voice choices share this model. Speech is generated locally and works offline after setup.";
     setupDetail.textContent = "";
     download.hidden = true;
     install.disabled = false;
@@ -237,7 +334,41 @@ export function installVoice(host: Host) {
     cancel.textContent = "Not now";
     setupTask = new Promise<boolean>((resolve) => (setupResolve = resolve));
     setupDialog.showModal();
+    if (installed) {
+      if (kind === "speech") showVoicePicker();
+      else {
+        setupTitle.textContent = "Enable local voice typing";
+        setupText.textContent =
+          "English voice typing is already installed and ready. Enable the microphone to speak your messages. No download is needed.";
+        install.textContent = "Enable dictation";
+      }
+    }
     return setupTask;
+  }
+  async function ensurePair(kind: VoiceKind) {
+    const state = await api.state();
+    preferences = state.preferences;
+    const pair = !pairedSetupSeen && !preferences.setupPairSeen;
+    pairedSetupSeen = true;
+    const enabled = await ensure(kind);
+    if (pair) {
+      const other: VoiceKind = kind === "dictation" ? "speech" : "dictation";
+      const secondary = await ensure(other, true);
+      if (secondary) {
+        if (other === "speech") readEnabled = true;
+        else {
+          host.prepareConversation();
+          microphoneEnabled = true;
+        }
+      }
+      preferences = await api.preferences({
+        ...preferences,
+        setupPairSeen: true,
+      });
+      update();
+      if (!enabled) await resumeCapture();
+    }
+    return enabled;
   }
   async function toggleMicrophone() {
     if (microphoneEnabled) {
@@ -247,7 +378,7 @@ export function installVoice(host: Host) {
       return;
     }
     try {
-      if (!(await ensure("dictation"))) return;
+      if (!(await ensurePair("dictation"))) return;
       host.prepareConversation();
       microphoneEnabled = true;
       if (!generating && !reading) await startCapture();
@@ -268,11 +399,12 @@ export function installVoice(host: Host) {
       return;
     }
     try {
-      if (!(await ensure("speech"))) return;
+      if (!(await ensurePair("speech"))) return;
       readEnabled = true;
       update();
       const latest = host.latestReply();
       if (latest.text && !host.isGenerating()) await read(latest.text);
+      await resumeCapture();
     } catch (error) {
       host.notice(message(error));
     }
@@ -284,7 +416,16 @@ export function installVoice(host: Host) {
     internalEdit = false;
   }
   function sentence(text: string) {
-    return text ? text[0]!.toUpperCase() + text.slice(1) : "";
+    if (!text) return "";
+    let value = text === text.toUpperCase() ? text.toLowerCase() : text;
+    value = value
+      .replace(/\bi\b/g, "I")
+      .replace(/\borion\b/gi, "Orion")
+      .replace(
+        /\b(ai|api|cpu|gpu|ram|vram|gguf|ogs|ofs|json|html|css|sql|http|https|url|usb)\b/gi,
+        (word) => word.toUpperCase(),
+      );
+    return value[0]!.toUpperCase() + value.slice(1);
   }
   function apply(result: DictationResult) {
     if (captureConversation !== host.currentId()) return;
@@ -335,20 +476,6 @@ export function installVoice(host: Host) {
     update();
     const generation = ++captureGeneration;
     try {
-      // Permission is requested only after an explicit microphone click.
-      media = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
-      if (generation !== captureGeneration) {
-        media.getTracks().forEach((track) => track.stop());
-        return;
-      }
       const nextSession = await api.start();
       if (generation !== captureGeneration || !microphoneEnabled) {
         await api.stop(nextSession, false);
@@ -366,6 +493,20 @@ export function installVoice(host: Host) {
       });
       await capture.audioWorklet.addModule("./voice-capture-worklet.js");
       if (generation !== captureGeneration) return;
+      // Permission is requested only after an explicit microphone click.
+      media = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      if (generation !== captureGeneration) {
+        media.getTracks().forEach((track) => track.stop());
+        return;
+      }
       source = capture.createMediaStreamSource(media);
       worklet = new AudioWorkletNode(capture, "orion-voice-capture");
       mute = capture.createGain();
@@ -571,7 +712,7 @@ export function installVoice(host: Host) {
     if (buffer.trim()) chunks.push(buffer.trim());
     return chunks;
   }
-  async function read(text: string) {
+  async function read(text: string, selectedPreferences = preferences) {
     const chunks = speechChunks(text);
     if (!chunks.length) return;
     const stopped = stopReading(),
@@ -589,8 +730,8 @@ export function installVoice(host: Host) {
         if (generation !== readGeneration) break;
         const audio = await api.speak(
           chunk,
-          preferences.voice,
-          preferences.speed,
+          selectedPreferences.voice,
+          selectedPreferences.speed,
         );
         if (generation !== readGeneration) break;
         const samples = new Float32Array(audio.samples);
@@ -626,6 +767,7 @@ export function installVoice(host: Host) {
       }
     }
   }
+  let refreshVoiceSettings: (() => Promise<void>) | undefined;
   function settingsSection() {
     const section = element("div", undefined, "voice-settings");
     const copy = element(
@@ -684,7 +826,7 @@ export function installVoice(host: Host) {
     speed.oninput = () => {
       speedLabel.textContent = `${Number(speed.value).toFixed(2)}×`;
     };
-    void api
+    refreshVoiceSettings = async () => { await api
       .state()
       .then((state) => {
         preferences = state.preferences;
@@ -696,12 +838,14 @@ export function installVoice(host: Host) {
       })
       .catch(() => {
         information.textContent = "Could not read local voice status.";
-      });
+      }); };
+    void refreshVoiceSettings();
     return section;
   }
   update();
   return {
     settingsSection,
+    async refreshSettings() { await refreshVoiceSettings?.(); },
     async beforeSend() {
       await stopReading();
       await stopCapture(true);
@@ -739,3 +883,4 @@ export function installVoice(host: Host) {
     resume: resumeCapture,
   };
 }
+

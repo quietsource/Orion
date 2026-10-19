@@ -1,0 +1,38 @@
+/* The window chrome and composer share a solid surface around the inset chat. */
+:root[data-theme="graphite"] { --chrome-bg:#242428; --composer-bg:var(--chrome-bg); --sidebar:var(--chrome-bg); }
+:root[data-theme] body,:root[data-theme] .app { background:var(--chrome-bg)!important; }
+:root[data-theme] .app > .main { background:var(--chrome-bg);border:0;border-radius:0;height:calc(100vh - 8px);margin-bottom:0;isolation:isolate; }
+.app > .main > .chat-shell-frame { position:absolute;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none;overflow:visible; }
+.chat-shell-surface { fill:var(--bg);stroke:none; }
+.app > .main > .header { height:6px;flex-basis:6px;min-height:0;padding:0; }
+.app > .main > .titlebar,.app > .main > .header { background:transparent; }
+:root[data-theme] .sidebar,:root[data-theme] .canvas-sidebar { background:var(--chrome-bg)!important;border:0; }
+:root[data-theme] .sidebar { border-radius:0; }
+:root[data-theme] .system-card { background:transparent;border-color:transparent; }
+:root[data-theme] .canvas-header,:root[data-theme] .canvas-toolbar,:root[data-theme] .canvas-feedback { background:var(--chrome-bg); }
+.composer-wrap { background:none; }
+:root[data-theme] .composer { --composer-dock:var(--chrome-bg); }
+.composer-frame-fill { fill:var(--chrome-bg); }
+.composer-frame-outline { opacity:0;stroke-linecap:butt;filter:drop-shadow(0 -1px 3px rgba(197,195,220,.28));transition:opacity .16s ease; }
+.composer:focus-within .composer-frame-outline { opacity:1; }
+/* Models and Create retain their own layouts on the same inset surface. */
+.models-view .chat-shell-frame,.create-view .chat-shell-frame { display:none; }
+:root[data-theme] .models-view .main,:root[data-theme] .create-view .main { background:var(--bg);border-radius:20px 20px 0 0; }
+@media(max-width:760px) { .composer-wrap { background:none; } }
+
+/* Keep all three grid tracks compatible so either sidebar interpolates smoothly. */
+.app { --layout-sidebar:var(--sidebar-width); --layout-canvas:0px; transition:grid-template-columns .24s cubic-bezier(.2,.7,.2,1); }
+body.sidebar-collapsed .app { --layout-sidebar:0px; }
+.app:has(.canvas-sidebar:not([hidden])) { --layout-canvas:var(--canvas-width); }
+.app,.app:has(.canvas-sidebar:not([hidden])),body.sidebar-collapsed .app,body.sidebar-collapsed .app:has(.canvas-sidebar:not([hidden])) { grid-template-columns:var(--layout-sidebar) minmax(0,1fr) var(--layout-canvas)!important; }
+/* The contents keep their width as their grid track opens, avoiding text reflow. */
+:root[data-theme] .canvas-sidebar { width:calc(var(--canvas-width) - 8px);max-width:none;justify-self:start;opacity:1;transform:translateX(0);visibility:visible;transition:transform .24s cubic-bezier(.2,.7,.2,1),opacity .18s ease,visibility 0s; }
+:root[data-theme] .canvas-sidebar[hidden] { display:flex;opacity:0;transform:translateX(12px);visibility:hidden;pointer-events:none;transition:transform .24s cubic-bezier(.2,.7,.2,1),opacity .18s ease,visibility 0s linear .24s; }
+@media(prefers-reduced-motion:reduce) { .app,:root[data-theme] .canvas-sidebar,:root[data-theme] .canvas-sidebar[hidden],.composer-frame-outline { transition:none; } }
+
+.titlebar > .canvas-open-button { height:28px;margin:0 4px 0 0;flex:0 0 30px;-webkit-app-region:no-drag; }
+.app > .main > .header > .expand { position:absolute;top:2px;left:8px;z-index:2;-webkit-app-region:no-drag; }
+
+#model-server-row[hidden] { display:none!important; }
+body:not(.sidebar-collapsed) .sidebar #collapse { position:absolute;top:3px;right:10px;height:28px; }
+body:not(.sidebar-collapsed) .sidebar .nav-chat-row { padding-right:34px; }
