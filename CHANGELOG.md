@@ -3,6 +3,7 @@
 ## Fixes and improvements
 
 - Route managed EXL2 model chat requests through the ExLlamaV2 server and find each installed model root from its `config.json`, including models indexed by earlier nightly builds.
+- Install ExLlamaV2's required `setuptools` and tokenizer packages through Orion's shared uv runtime, migrate existing private uv installs, repair older runtime environments, and verify dependencies before marking the engine ready.
 - Remove the engine installation card from the model browser's Manage page.
 - Add RAM and VRAM fit estimates for conversational model variants, filters for models that fit this PC, GPU fits, CPU or partial GPU fits, and models that may exceed available memory, plus best-fit sorting.
 - Preserve the visible model card when quantization files are opened or model results refresh.
