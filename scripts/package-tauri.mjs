@@ -30,4 +30,5 @@ if(process.platform==='win32'){
 }
 const hashes=[];for(const name of await readdir(destination)){if(name==='SHA256SUMS.txt')continue;const bytes=await readFile(path.join(destination,name));hashes.push(createHash('sha256').update(bytes).digest('hex')+'  '+name);}
 await writeFile(path.join(destination,'SHA256SUMS.txt'),hashes.join('\n')+'\n');
+await writeFile(path.join(destination,'SHA256SUMS'),hashes.join('\n')+'\n');
 console.log('Native packages staged in '+destination);

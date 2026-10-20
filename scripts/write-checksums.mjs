@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const directoryPath = fileURLToPath(new URL('../release/', import.meta.url));
 const version = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+const directoryPath = process.argv[2] ? resolve(process.argv[2]) : fileURLToPath(new URL(`../release/${version}/`, import.meta.url));
 const distributableExtensions = new Set(['.AppImage', '.deb', '.dmg', '.exe', '.rpm', '.zip']);
 
 async function sha256(path) {
@@ -24,4 +24,5 @@ if (files.length === 0) throw new Error(`No distributable packages found in ${di
 
 const lines = await Promise.all(files.map(async (filename) => `${await sha256(join(directoryPath, filename))}  ${basename(filename)}`));
 await writeFile(join(directoryPath, 'SHA256SUMS'), `${lines.join('\n')}\n`, 'utf8');
+await writeFile(join(directoryPath, 'SHA256SUMS.txt'), `${lines.join('\n')}\n`, 'utf8');
 console.log(`Wrote SHA256SUMS for ${files.length} package(s).`);
