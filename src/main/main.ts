@@ -23,6 +23,7 @@ import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } fr
 import { isOrionHelpQuestion, searchOrionHelp } from './orionHelp';
 import { DiffusionManager } from './diffusion';
 import { LlamaManager, isModelCompatibilityError } from './llama';
+import { ExllamaManager } from './exllama';
 import { OGS_PROMPT, validateOgsResponse, ogsCorrectionPrompt, validOgsGraphCount } from '../shared/ogs';
 import { buildModelPrompt, addModelTextToolProtocol, isReasoningModelName } from './modelPrompt';
 import { WorkspaceManager } from './workspace';
@@ -80,6 +81,7 @@ function getMemoryHistory() {
 const ofsDeletedConversations = new Set<string>();
 let diffusionManager: DiffusionManager;
 let llamaManager: LlamaManager;
+let exllamaManager: ExllamaManager;
 let modelCompatibilityBusy = false;
 let workspaceManager: WorkspaceManager;
 let orionBrowser: NativeWindow | null = null;
@@ -707,7 +709,7 @@ app.on('before-quit', event => {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.allSettled([llamaManager?.dispose(), diffusionManager?.stop(), voiceManager?.close(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
+        Promise.allSettled([llamaManager?.dispose(), exllamaManager?.dispose(), diffusionManager?.stop(), voiceManager?.close(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
         new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000); })
       ]);
     } finally {
@@ -738,6 +740,7 @@ else {
     // installed or started in response to their respective user actions.
     diffusionManager = new DiffusionManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) { win.webContents.send('create:progress', progress); if(progress.download)win.webContents.send('models:progress',{id:progress.id,...progress.download}); } });
     llamaManager = new LlamaManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); });
+    exllamaManager = new ExllamaManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); });
     createWindow();
     const updateCheckTimer = setTimeout(() => void checkForAppUpdate(), 3500);
     updateCheckTimer.unref?.();
@@ -893,7 +896,9 @@ ipcMain.handle('ollama:models', async () => {
       for (const model of ollama) if (Array.isArray(model.capabilities)) installedToolSupport.set(`${settings.ollamaUrl}\0${model.name}`, model.capabilities.includes('tools'));
     }
   } catch { /* Keep Orion-downloaded GGUFs available when Ollama is offline. */ }
-  const managed = (await readInstalledModels()).filter(model => model.category === 'conversational').map(model => ({ name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file) }, source: 'orion' as const }));
+  const managed = (await readInstalledModels()).filter(model => model.category === 'conversational').map(model => model.engine === 'exllamav2'
+    ? { name: `orion-exl2:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: model.file }, source: 'orion' as const }
+    : { name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file) }, source: 'orion' as const });
   const remote = (await readProviders()).flatMap(provider => provider.models.map(model => ({ name: providerModelKey(provider.id, model), size: 0, source: 'api' as const, capabilities: ['completion'], details: { label: `${provider.name} · ${model}` } })));
   return [...ollama, ...managed, ...remote];
 });
@@ -903,9 +908,9 @@ async function getModelInformation(modelName: string): Promise<{ contextLength: 
     const routed=resolveProviderModel(await readProviders(),modelName);
     return {contextLength:131072,supportsThinking:isReasoningModelName(routed?.model ?? '')};
   }
-  if (modelName.startsWith('orion-gguf:')) {
+  if (modelName.startsWith('orion-gguf:') || modelName.startsWith('orion-exl2:')) {
     // llama.cpp's model template controls reasoning automatically; never force a level.
-    const installed=(await readInstalledModels()).find(item=>modelName==='orion-gguf:'+item.id);
+    const installed=(await readInstalledModels()).find(item=>modelName==='orion-gguf:'+item.id||modelName==='orion-exl2:'+item.id);
     return {contextLength:131072,supportsThinking:isReasoningModelName(installed?.repo ?? '')};
   }
   const {ollamaUrl}=await getSettings();
@@ -932,22 +937,23 @@ ipcMain.handle('ollama:delete-model', async (_, name: string) => {
   if (!response.ok) throw new Error(`Ollama could not delete ${name} (${response.status}).`);
   if(settings.selectedModel===name){settings.selectedModel='';await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));}
 });
-ipcMain.handle('models:search', async (_, query: string, category: ModelCategory, nextUrl?: string|null) => {
+ipcMain.handle('models:search', async (_, query: string, category: ModelCategory, nextUrl?: string|null, engine?: string) => {
   if (!['conversational','image','video'].includes(category)) throw new Error('Unknown Hugging Face model category.');
   const url = nextUrl ? new URL(nextUrl) : new URL('https://huggingface.co/api/models');
   if (url.protocol !== 'https:' || url.hostname !== 'huggingface.co' || url.pathname !== '/api/models') throw new Error('Invalid Hugging Face pagination link.');
   if (!nextUrl) {
     url.searchParams.set('search', String(query ?? '').slice(0, 160));
-    if(category==='conversational')url.searchParams.set('filter','gguf');
+    if(category==='conversational')url.searchParams.set('filter',engine==='exllamav2'?'exl2':'gguf');
     else url.searchParams.set('pipeline_tag',category==='image'?'text-to-image':'text-to-video');
     url.searchParams.set('sort', 'downloads'); url.searchParams.set('direction', '-1'); url.searchParams.set('limit', '24');
   }
   const response = await fetch(url, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Hugging Face search failed (${response.status}).`);
   const rows = await response.json() as Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; cardData?: { description?: string; license?: string } }>;
+  const modelEngines = (row: typeof rows[number]) => { const tags = row.tags ?? []; const engines: string[] = []; if (tags.includes('gguf') || /[-_.]gguf$/i.test(row.id)) engines.push('llama.cpp'); if (tags.includes('exl2') || /[-_.]exl2/i.test(row.id)) engines.push('exllamav2'); return engines; };
   const supportsStableDiffusion=(row:typeof rows[number])=>{const tags=row.tags??[];return tags.some(tag=>/^stable-diffusion(?:$|-|\.)/i.test(tag)||/^diffusers:StableDiffusion(?:XL)?Pipeline$/i.test(tag)||/^diffusers:StableDiffusionXL/i.test(tag)||/^base_model:.*stable-diffusion/i.test(tag))||/(?:stable[-_ ]?diffusion|sdxl|sd[_-]?1[._]?5|sd[_-]?2[._]?1|dreamshaper|juggernaut.?xl|realvisxl|pony.?diffusion|animagine.?xl)/i.test(row.id);};
-  const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':true).map(row => ({ id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license }));
-  if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0'});}}
+  const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':true).map(row => ({ id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, engines: category==='conversational'?modelEngines(row):undefined }));
+  if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0',engines:undefined});}}
   const next = response.headers.get('link')?.match(/<([^>]+)>\s*;\s*rel="?next"?/i)?.[1] ?? null;
   return { models: found, nextUrl: next };
 });
@@ -964,7 +970,7 @@ async function getHubFiles(repo: string, category?: ModelCategory): Promise<HubF
   const encoded = repo.split('/').map(encodeURIComponent).join('/');
   const response = await fetch(`https://huggingface.co/api/models/${encoded}?blobs=true`, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Could not read model files (${response.status}).`);
-  const model = await response.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }> };
+  const model = await response.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }>; tags?: string[] };
   const files = (model.siblings ?? []).map(file => ({ name: file.rfilename, size: file.lfs?.size ?? file.size ?? 0, sha256: file.lfs?.sha256 })).filter(file => /\.(gguf|safetensors|ckpt)$/i.test(file.name));
   const companions = files.filter(file => /(?:mmproj|projector|vision[_-]?encoder|text[_-]?encoder|clip[_-]?vision)/i.test(path.basename(file.name)));
   const primaryFiles = files.filter(file => !companions.includes(file));
@@ -998,17 +1004,153 @@ async function getHubFiles(repo: string, category?: ModelCategory): Promise<HubF
   if(category==='image')return output.filter(file=>!file.name.includes('/')&&/\.(?:safetensors|ckpt|gguf)$/i.test(file.name));
   // Video support is currently the verified Wan 2.2 TI2V 5B bundle.
   if(category==='video')return [];
+  if (category === 'conversational') {
+    // EXL2 repositories keep each quantization on its own branch while the
+    // default branch usually only carries the measurement file. Offer the
+    // quantization branches alongside any GGUF files in the same listing.
+    const exl2 = model.tags?.includes('exl2') || /[-_.]exl2(?:[-_.]|$)/i.test(repo) ? await exl2BranchFiles(repo).catch(() => []) : [];
+    return [...exl2, ...output].sort((a,b) => Number(Boolean(b.revision)) - Number(Boolean(a.revision)) || a.size - b.size);
+  }
   return output.sort((a,b) => a.size - b.size);
+}
+const exl2BranchPattern = /^\d+(?:\.\d+)?bpw$/i;
+async function exl2BranchFiles(repo: string): Promise<HubFile[]> {
+  const encoded = repo.split('/').map(encodeURIComponent).join('/');
+  const headers = await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' });
+  const refsResponse = await fetch(`https://huggingface.co/api/models/${encoded}/refs`, { headers, signal: AbortSignal.timeout(20_000) });
+  if (!refsResponse.ok) return [];
+  const refs = await refsResponse.json() as { branches?: Array<{ name?: string }> };
+  const branches = (refs.branches ?? []).map(branch => String(branch.name ?? '')).filter(name => exl2BranchPattern.test(name));
+  const listings = await Promise.all(branches.map(async branch => {
+    const treeResponse = await fetch(`https://huggingface.co/api/models/${encoded}/revision/${encodeURIComponent(branch)}?blobs=true`, { headers, signal: AbortSignal.timeout(30_000) });
+    if (!treeResponse.ok) return null;
+    const revision = await treeResponse.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }>; config?: { quantization_config?: { quant_method?: string } } };
+    const files = (revision.siblings ?? []).map(file => ({ name: file.rfilename, size: file.lfs?.size ?? file.size ?? 0, sha256: file.lfs?.sha256 })).filter(file => !file.name.startsWith('.'));
+    // A downloadable EXL2 branch needs the tokenizer/config companions plus at
+    // least one safetensors weight; measurement-only default branches never pass.
+    if (!files.some(file => file.name === 'config.json') || !files.some(file => /\.safetensors$/i.test(file.name))) return null;
+    if (revision.config?.quantization_config?.quant_method && revision.config.quantization_config.quant_method !== 'exl2') return null;
+    return { branch, files };
+  }));
+  const output: HubFile[] = [];
+  for (const listing of listings) {
+    if (!listing) continue;
+    output.push({ name: listing.branch, size: listing.files.reduce((sum, file) => sum + file.size, 0), revision: listing.branch, bundle: 'exl2', relatedFiles: listing.files.map(file => ({ name: file.name, size: file.size, ...(file.sha256 ? { sha256: file.sha256 } : {}) })) });
+  }
+  return output.sort((a,b) => Number(exl2BranchPattern.exec(a.name)?.[1] ?? 0) - Number(exl2BranchPattern.exec(b.name)?.[1] ?? 0));
 }
 ipcMain.handle('models:files', async (_, repo: string, category?: ModelCategory) => getHubFiles(repo,category));
 ipcMain.handle('models:installed', readInstalledModels);
+// EXL2 quantizations are downloaded as complete branch bundles: every file at
+// the branch revision lands in one model folder that the ExLlamaV2 runtime can
+// load directly. Weights stay next to their tokenizer and config companions.
+async function downloadExl2Bundle(repo: string, selection: HubFile): Promise<InstalledModel> {
+  const revision = selection.revision!;
+  const files = selection.relatedFiles ?? [];
+  if (!files.length || !files.some(file => file.name === 'config.json') || !files.some(file => /\.safetensors$/i.test(file.name))) throw new Error('That EXL2 branch does not contain a complete model.');
+  const selectionId = `conversational|${repo}|${selection.name}`;
+  const installedRows = await readInstalledModels();
+  const existing = installedRows.find(item => item.id === selectionId && item.category === 'conversational');
+  if (existing) {
+    const oldFiles = existing.files?.length ? existing.files : [existing.path];
+    const valid = oldFiles.length === files.length && await Promise.all(files.map(async asset => {
+      const relative = oldFiles[files.indexOf(asset)];
+      if (!relative) return false;
+      const target = path.resolve(modelsRoot(), relative);
+      return target.startsWith(`${path.resolve(modelsRoot())}${path.sep}`) && fs.stat(target).then(stat => stat.isFile() && (!asset.size || stat.size === asset.size), () => false);
+    })).then(values => values.every(Boolean));
+    if (valid) return existing;
+    await serializeMutation('models', () => atomicWrite(modelIndexFile(), JSON.stringify(installedRows.filter(item => item.id !== selectionId), null, 2)));
+  }
+  const activeId = crypto.randomUUID(), root = modelsRoot(), controller = new AbortController();
+  modelDownloadControllers.set(activeId, controller);
+  const encodedRepo = repo.split('/').map(encodeURIComponent).join('/');
+  const targets = files.map(asset => {
+    validHubFile(asset.name);
+    const relative = path.join('chat', ...repo.split('/'), revision, ...asset.name.split('/'));
+    const target = path.resolve(root, relative);
+    if (!target.startsWith(`${path.resolve(root)}${path.sep}`)) throw new Error('Invalid model output path.');
+    return { name: asset.name, expectedSize: asset.size, sha256: asset.sha256, relative, target, url: `https://huggingface.co/${encodedRepo}/resolve/${encodeURIComponent(revision)}/${asset.name.split('/').map(encodeURIComponent).join('/')}`, temporary: `${target}.${activeId}.partial` };
+  });
+  await Promise.all(targets.map(target => fs.mkdir(path.dirname(target.target), { recursive: true })));
+  const totalExpected = targets.reduce((sum, target) => sum + target.expectedSize, 0);
+  let receivedTotal = 0, indexed = false;
+  const fileSha256: Record<string, string> = {}, finalized: string[] = [], backups: Array<{ target: string; backup: string }> = [];
+  reportModelProgress({ id: activeId, repo, file: selection.name, received: 0, total: totalExpected, phase: 'downloading' });
+  try {
+    for (const target of targets) {
+      const response = await fetch(target.url, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60 * 60_000)]) });
+      if (!response.ok || !response.body) throw new Error(`Model download failed (${response.status}): ${target.name}`);
+      const headerLength = Number(response.headers.get('content-length') ?? 0), expected = target.expectedSize || headerLength;
+      const handle = await fs.open(target.temporary, 'w', 0o600);
+      let received = 0, lastReport = 0;
+      const checksum = createHash('sha256');
+      try {
+        const reader = response.body.getReader();
+        while (true) {
+          const { value, done } = await reader.read(); if (done) break;
+          let offset = 0;
+          while (offset < value.byteLength) { const written = await handle.write(value, offset, value.byteLength - offset); offset += written.bytesWritten; }
+          received += value.byteLength;
+          checksum.update(value);
+          if (received - lastReport >= 512 * 1024) { reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal + received, total: totalExpected || expected, phase: 'downloading' }); lastReport = received; }
+        }
+        await handle.sync();
+      } finally { await handle.close(); }
+      if (expected && received !== expected) throw new Error(`Downloaded ${target.name} is incomplete (${received} of ${expected} bytes).`);
+      const sha256 = checksum.digest('hex');
+      if (target.sha256 && sha256 !== target.sha256) throw new Error(`Downloaded ${target.name} failed its SHA-256 integrity check.`);
+      fileSha256[target.relative] = sha256;
+      receivedTotal += received;
+    }
+    if (controller.signal.aborted) throw new Error('Download cancelled.');
+    for (const target of targets) {
+      if (controller.signal.aborted) throw new Error('Download cancelled.');
+      const backup = `${target.target}.${activeId}.previous`;
+      if (await fs.access(target.target).then(() => true, () => false)) { await fs.rename(target.target, backup); backups.push({ target: target.target, backup }); }
+      await fs.rename(target.temporary, target.target);
+      finalized.push(target.target);
+    }
+    const installed: InstalledModel = { id: selectionId, repo, file: selection.name, category: 'conversational', path: targets[0]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now(), engine: 'exllamav2', revision };
+    await fs.mkdir(root, { recursive: true });
+    await serializeMutation('models', async () => {
+      const all = await readInstalledModels(), previous = all.find(item => item.id === installed.id);
+      const next = all.filter(item => item.id !== installed.id); next.push(installed);
+      await atomicWrite(modelIndexFile(), JSON.stringify(next, null, 2));
+      if (previous) {
+        const kept = new Set(next.flatMap(item => item.files?.length ? item.files : [item.path]));
+        for (const oldFile of previous.files ?? [previous.path]) {
+          const target = path.resolve(root, oldFile);
+          if (!kept.has(oldFile) && target.startsWith(`${root}${path.sep}`)) await fs.rm(target, { force: true }).catch(() => undefined);
+        }
+      }
+    });
+    indexed = true;
+    for (const previous of backups) await fs.rm(previous.backup, { force: true }).catch(() => undefined);
+    reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal, total: totalExpected || receivedTotal, phase: 'complete' });
+    return installed;
+  } catch (error) {
+    if (!indexed) {
+      for (const target of targets) await fs.rm(target.temporary, { force: true }).catch(() => undefined);
+      for (const target of finalized) await fs.rm(target, { force: true }).catch(() => undefined);
+      for (const previous of backups) await fs.rename(previous.backup, previous.target).catch(() => undefined);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const cancelled = controller.signal.aborted;
+    reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal, total: totalExpected, phase: cancelled ? 'cancelled' : 'error', error: cancelled ? undefined : message });
+    throw new Error(cancelled ? 'Download cancelled.' : message);
+  } finally {
+    modelDownloadControllers.delete(activeId);
+  }
+}
 ipcMain.handle('models:download', async (_, repo: string, file: string, category: ModelCategory): Promise<InstalledModel> => {
   if(!['conversational','image','video'].includes(category))throw new Error('Unknown model category.');
   if(category!=='conversational'&&!await diffusionManager.isInstalled())throw new Error('Install Orion’s managed native image/video engine from the Create page before downloading image or video models.');
   validRepo(repo);
-  validHubFile(file);const extension=path.extname(file).toLowerCase();if(category==='conversational'&&extension!=='.gguf')throw new Error('Conversational model downloads must be GGUF files.');if(category==='image'&&!['.safetensors','.ckpt','.gguf'].includes(extension))throw new Error('Stable Diffusion checkpoints must be safetensors, GGUF, or CKPT files.');if(category==='video'&&extension!=='.gguf')throw new Error('Wan video model downloads must be GGUF files.');
+  validHubFile(file);const extension=path.extname(file).toLowerCase();if(category==='conversational'&&extension!=='.gguf'&&!exl2BranchPattern.test(file))throw new Error('Conversational model downloads must be GGUF files or EXL2 quantizations.');if(category==='image'&&!['.safetensors','.ckpt','.gguf'].includes(extension))throw new Error('Stable Diffusion checkpoints must be safetensors, GGUF, or CKPT files.');if(category==='video'&&extension!=='.gguf')throw new Error('Wan video model downloads must be GGUF files.');
   const selectionId = `${category}|${repo}|${file}`;
   const selected=(await getHubFiles(repo,category)).find(item=>item.name===file);if(!selected)throw new Error('That model file is not present in the selected Hugging Face repository.');
+  if (category==='conversational'&&selected.revision&&selected.bundle==='exl2') return downloadExl2Bundle(repo, selected);
   const related=selected.relatedFiles??[],names=[file,...related.map(part=>part.name)],sizes=new Map<string,number>([[file,selected.size],...related.map(part=>[part.name,part.size] as [string,number])]);
   const installedRows=await readInstalledModels(),existing=installedRows.find(item=>item.id===selectionId&&item.category===category);
   if(existing){const oldFiles=existing.files?.length?existing.files:[existing.path];const valid=oldFiles.length===names.length&&await Promise.all(names.map(async name=>{const index=names.indexOf(name),relative=oldFiles[index],expected=sizes.get(name)??0;if(!relative)return false;const target=path.resolve(modelsRoot(),relative);return target.startsWith(`${path.resolve(modelsRoot())}${path.sep}`)&&fs.stat(target).then(stat=>stat.isFile()&&(!expected||stat.size===expected),()=>false);})).then(values=>values.every(Boolean));if(valid){if(category==='conversational')await llamaManager.install();return existing;}await serializeMutation('models',()=>atomicWrite(modelIndexFile(),JSON.stringify(installedRows.filter(item=>item.id!==selectionId),null,2)));}
@@ -1098,19 +1240,19 @@ ipcMain.handle('models:delete', async (_, id: string) => {
   const root = path.resolve(modelsRoot()), files = item.files?.length ? item.files : [item.path];
   const targets = files.map(file => path.resolve(root, file));
   if (targets.some(target => !target.startsWith(`${root}${path.sep}`))) throw new Error('Model index contains an invalid path.');
-  if (item.category === 'conversational') await llamaManager.stop(); else await diffusionManager.stop();
+  if (item.category === 'conversational') { await Promise.allSettled([llamaManager.stop(), exllamaManager.stop()]); } else await diffusionManager.stop();
   for (const target of targets) await fs.rm(target, { force: true });
   await serializeMutation('models', () => atomicWrite(modelIndexFile(), JSON.stringify(all.filter(model => model.id !== id), null, 2)));
-  const settings=await getSettings();let changed=false;if(settings.defaultImageModel===id||settings.defaultImageModel.startsWith(`image|${item.repo}|`)){settings.defaultImageModel='';changed=true;}if(settings.defaultVideoModel===id||settings.defaultVideoModel.startsWith(`video|${item.repo}|`)){settings.defaultVideoModel='';changed=true;}if(settings.selectedModel===`orion-gguf:${id}`){settings.selectedModel='';changed=true;}if(changed)await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));
+  const settings=await getSettings();let changed=false;if(settings.defaultImageModel===id||settings.defaultImageModel.startsWith(`image|${item.repo}|`)){settings.defaultImageModel='';changed=true;}if(settings.defaultVideoModel===id||settings.defaultVideoModel.startsWith(`video|${item.repo}|`)){settings.defaultVideoModel='';changed=true;}if(settings.selectedModel===`orion-gguf:${id}`||settings.selectedModel===`orion-exl2:${id}`){settings.selectedModel='';changed=true;}if(changed)await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));
 });
 ipcMain.handle('create:enter', async () => diffusionManager.enter());
 ipcMain.handle('create:state', async () => diffusionManager.getState());
 ipcMain.handle('create:install', async () => diffusionManager.install());
 async function markLlamaIntroSeen() { const marker=path.join(app.getPath('userData'),'orion','migrations','llama-onboarding-v2-seen');await fs.mkdir(path.dirname(marker),{recursive:true});await fs.writeFile(marker,'seen',{mode:0o600}); }
 ipcMain.handle('llama:intro', async () => {
-  // Profiles that already have the managed runtime do not need onboarding,
+  // Profiles that already have a managed engine do not need onboarding,
   // including profiles upgraded from versions with older marker locations.
-  if (await llamaManager.isInstalled()) { await markLlamaIntroSeen(); return false; }
+  if (await llamaManager.isInstalled() || await exllamaManager.isInstalled()) { await markLlamaIntroSeen(); return false; }
   // Versioned markers let existing profiles migrate through newly added
   // first-run experiences without old profile state suppressing the prompt.
   const marker = path.join(app.getPath('userData'), 'orion', 'migrations', 'llama-onboarding-v2-seen');
@@ -1119,16 +1261,25 @@ ipcMain.handle('llama:intro', async () => {
 ipcMain.handle('llama:dismiss-intro', async () => markLlamaIntroSeen());
 ipcMain.handle('llama:install', async () => { await markLlamaIntroSeen(); return llamaManager.install(); });
 ipcMain.handle('llama:status', async () => llamaManager.isInstalled());
+ipcMain.handle('exl2:install', async () => { await markLlamaIntroSeen(); return exllamaManager.install(); });
+ipcMain.handle('exl2:status', async () => exllamaManager.isInstalled());
 ipcMain.handle('models:check-compatibility', async (event, id: string) => {
   if (!win || event.sender !== win.webContents) throw new Error('Compatibility checking is unavailable.');
   if (modelCompatibilityBusy || activeAbort) throw new Error('Wait for the current chat or compatibility check to finish.');
   modelCompatibilityBusy = true;
   try {
-    if (!await llamaManager.isInstalled()) throw new Error('Install Orion’s managed llama.cpp engine first.');
     if ((await diffusionManager.getState()).running) throw new Error('Wait for image or video generation to finish.');
     const model = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
     if (!model) throw new Error('Compatibility checking is available only for installed Orion conversational models.');
-    const root = path.resolve(modelsRoot()), modelPath = path.resolve(root, model.path);
+    const root = path.resolve(modelsRoot());
+    if (model.engine === 'exllamav2') {
+      if (!await exllamaManager.isInstalled()) throw new Error('Install Orion’s managed ExLlamaV2 engine first.');
+      const modelDirectory = path.dirname(path.resolve(root, model.path));
+      if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
+      return await exllamaManager.checkCompatibility(modelDirectory, Math.min((await getSettings()).contextWindow, 4096));
+    }
+    if (!await llamaManager.isInstalled()) throw new Error('Install Orion’s managed llama.cpp engine first.');
+    const modelPath = path.resolve(root, model.path);
     if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
     return await llamaManager.checkCompatibility(modelPath, Math.min((await getSettings()).contextWindow, 4096), modelMmprojPath(model, root));
   } finally { modelCompatibilityBusy = false; }
@@ -1376,19 +1527,30 @@ ipcMain.handle('tools:list', async () => {
 });
 
 async function getModelIdentity(model: string) {
-  if (!model.startsWith('orion-gguf:')) return model;
+  if (!model.startsWith('orion-gguf:') && !model.startsWith('orion-exl2:')) return model;
+  const prefix = model.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
   const installed = await readInstalledModels();
-  const item = installed.find(candidate => `orion-gguf:${candidate.id}` === model);
-  return item ? `${item.repo} (${path.basename(item.file)})` : 'the selected local GGUF model';
+  const item = installed.find(candidate => `${prefix}${candidate.id}` === model);
+  return item ? `${item.repo} (${item.file})` : 'the selected local model';
 }
 function modelMmprojPath(item: InstalledModel, root: string) {
   const companion = (item.files ?? []).find(file => /(?:mmproj|projector)/i.test(path.basename(file)) && file.toLowerCase().endsWith('.gguf'));
   return companion ? path.resolve(root, companion) : undefined;
 }
 
-async function prepareModelToolSupport(model: string, context: number, loadManaged = (modelPath: string, context: number, mmproj?: string) => llamaManager.ensureServer(modelPath, context, mmproj)): Promise<string | undefined> {
+async function prepareModelToolSupport(model: string, context: number, loadManaged = (modelPath: string, context: number, mmproj?: string) => llamaManager.ensureServer(modelPath, context, mmproj), loadExl2 = (modelDirectory: string, context: number) => exllamaManager.ensureServer(modelDirectory, context)): Promise<string | undefined> {
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before loading a chat model.');
   const key = `${settingsCache.ollamaUrl}\0${model}`;
+  if (model.startsWith('orion-exl2:')) {
+    const id = model.slice('orion-exl2:'.length);
+    const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
+    if (!installed) { installedToolSupport.set(key, false); return undefined; }
+    const root = path.resolve(modelsRoot()), modelDirectory = path.dirname(path.resolve(root, installed.path));
+    if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
+    // EXL2 models use Orion's text-based tool protocol; no native tool template.
+    installedToolSupport.set(key, false);
+    return await loadExl2(modelDirectory, context);
+  }
   if (model.startsWith('orion-gguf:')) {
     const id = model.slice('orion-gguf:'.length);
     const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
@@ -1492,17 +1654,26 @@ async function withMediaModelHandoffLocked<T>(model: string, context: number, op
   let restore: (() => Promise<void>) | undefined;
   if (remote) restore = await providerMediaRestore(remote.provider, remote.model, context);
   else if (!model) return operation();
-  else {
+    else {
     const settings = await getSettings();
-    if (model.startsWith('orion-gguf:')) {
-      const id = model.slice('orion-gguf:'.length);
+    if (model.startsWith('orion-gguf:') || model.startsWith('orion-exl2:')) {
+      const prefix = model.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
+      const id = model.slice(prefix.length);
       const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
       if (!installed) throw new Error('The active Orion chat model is no longer installed.');
-      const root = path.resolve(modelsRoot()), modelPath = path.resolve(root, installed.path);
-      if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
-      const mmproj = modelMmprojPath(installed, root);
-      await llamaManager.stop();
-      restore = async () => { await llamaManager.ensureServer(modelPath, context, mmproj); };
+      const root = path.resolve(modelsRoot());
+      if (installed.engine === 'exllamav2') {
+        const modelDirectory = path.dirname(path.resolve(root, installed.path));
+        if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
+        await exllamaManager.stop();
+        restore = async () => { await exllamaManager.ensureServer(modelDirectory, context); };
+      } else {
+        const modelPath = path.resolve(root, installed.path);
+        if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
+        const mmproj = modelMmprojPath(installed, root);
+        await llamaManager.stop();
+        restore = async () => { await llamaManager.ensureServer(modelPath, context, mmproj); };
+      }
     } else {
       const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/generate`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1663,7 +1834,7 @@ ipcMain.handle('system:prompt', async (_event, model?: string, mode?: ToolMode) 
   const remote = resolveProviderModel(await readProviders(), activeModel);
   // Prompt inspection is read-only: never start llama-server or warm a model.
   // Ollama /api/show reads stored metadata without loading inference weights.
-  if (!remote && activeModel && !activeModel.startsWith('orion-gguf:')) await getModelInformation(activeModel);
+  if (!remote && activeModel && !activeModel.startsWith('orion-gguf:') && !activeModel.startsWith('orion-exl2:')) await getModelInformation(activeModel);
   const activeMode: ToolMode = 'chat';
   const promptTools = toolsForModel();
   const native = remote ? remote.provider.tools : installedToolSupport.get(`${currentSettings.ollamaUrl}\0${activeModel}`) === true;
@@ -1701,9 +1872,10 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const privateVoice = conversation?.localOnly || conversation?.privateVoice || input.messages.some(message=>message.voiceInput);
   if(privateVoice&&remote)throw Error('This conversation stays on this computer. Select an Orion-managed or local Ollama model.');
   const installedConversational = remote ? [] : await readInstalledModels();
-  const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
-  const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
-  if(privateVoice&&!routedModel.startsWith('orion-gguf:')){
+  const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === `orion-exl2:${item.id}` || input.model === item.id || input.model === item.repo));
+  const routedEngine = routedManaged?.engine === 'exllamav2' ? 'exllamav2' : 'llama.cpp';
+  const routedModel = remote ? input.model : routedManaged ? `${routedEngine === 'exllamav2' ? 'orion-exl2:' : 'orion-gguf:'}${routedManaged.id}` : input.model;
+  if(privateVoice&&!routedModel.startsWith('orion-gguf:')&&!routedModel.startsWith('orion-exl2:')){
     if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(routedModel))throw Error('Ollama cloud models cannot be used for this local conversation. Select a downloaded local model.');
     const info=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:routedModel}),signal:AbortSignal.timeout(10000)});
     if(!info.ok)throw Error('Could not verify that this Ollama model is local. Select an installed local model and try again.');
@@ -1713,9 +1885,10 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
 
   const checkedCompatibility = new Set<string>();
   const loadManaged = async (modelPath: string, context: number, mmproj?: string, initialFailure?: Error): Promise<string> => {
+    const startEngine = () => routedEngine === 'exllamav2' ? exllamaManager.ensureServer(modelPath, context) : llamaManager.ensureServer(modelPath, context, mmproj);
     try {
       if (initialFailure) throw initialFailure;
-      return await llamaManager.ensureServer(modelPath, context, mmproj);
+      return await startEngine();
     } catch (error) {
       if (!isModelCompatibilityError(error)) throw error;
       const failure = (message: string) => Object.assign(new Error(message), { name: 'ModelCompatibilityError' });
@@ -1726,7 +1899,9 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       publish('started', 'The managed model reported an incompatibility. Checking available repairs…');
       modelCompatibilityBusy = true;
       try {
-        const report = await llamaManager.checkCompatibility(modelPath, Math.min(context, 4096), mmproj, detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)));
+        const report = routedEngine === 'exllamav2'
+          ? await exllamaManager.checkCompatibility(modelPath, Math.min(context, 4096), detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)))
+          : await llamaManager.checkCompatibility(modelPath, Math.min(context, 4096), mmproj, detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)));
         const success = report.status === 'compatible' || report.status === 'repaired';
         const detail = [report.detail, ...(report.actions ?? []), report.restoreWarning].filter(Boolean).join('\n');
         publish('finished', detail, success);
@@ -1735,7 +1910,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         if (!(checkError instanceof Error && checkError.name === 'ModelCompatibilityError')) publish('finished', checkError instanceof Error ? checkError.message : String(checkError));
         throw failure(checkError instanceof Error ? checkError.message : String(checkError));
       } finally { modelCompatibilityBusy = false; }
-      return llamaManager.ensureServer(modelPath, context, mmproj);
+      return startEngine();
     }
   };
   if (!remote) {
@@ -1986,11 +2161,13 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   };
   const requestAbort = new AbortController(); activeAbort = requestAbort;
   try {
-    if (remote || routedManaged || routedModel.startsWith('orion-gguf:')) {
-      const managedId = routedManaged?.id ?? routedModel.slice('orion-gguf:'.length);
+    if (remote || routedManaged || routedModel.startsWith('orion-gguf:') || routedModel.startsWith('orion-exl2:')) {
+      const routedPrefix = routedModel.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
+      const managedId = routedManaged?.id ?? routedModel.slice(routedPrefix.length);
       const managed = routedManaged ?? (await readInstalledModels()).find(item => item.id === managedId && item.category === 'conversational');
-      if (!managed && !remote) throw new Error('The selected Orion GGUF model is no longer installed. Open Models → Manage and refresh your models.');
-      const modelRoot = path.resolve(modelsRoot()), modelPath = path.resolve(modelRoot, managed?.path ?? '.');
+      if (!managed && !remote) throw new Error('The selected Orion model is no longer installed. Open Models → Manage and refresh your models.');
+      const modelRoot = path.resolve(modelsRoot());
+      const modelPath = routedEngine === 'exllamav2' ? path.dirname(path.resolve(modelRoot, managed?.path ?? '.')) : path.resolve(modelRoot, managed?.path ?? '.');
       if (!remote && !modelPath.startsWith(`${modelRoot}${path.sep}`)) throw new Error('The selected model path is invalid.');
       const managedEndpoint = async () => `${await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
       let repeatedLoopDetected = false;

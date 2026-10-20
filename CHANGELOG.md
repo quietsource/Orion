@@ -4,6 +4,8 @@
 - Reuse the existing Orion data directory, installed engines, models and encrypted data. Unlock the original Windows encryption key without replacing it.
 - Embed the full browser UI and native browser tabs in the right Canvas sidebar, with document/browser switching, resizing, navigation, page extraction and keyboard shortcuts.
 - Use native tray, file dialogs and process supervision; preserve local voice and OFS workers under Bun.
+- Add Orion-managed ExLlamaV2 as a second local engine alongside llama.cpp. Engine setup verifies the NVIDIA driver and installs the exact prebuilt ExLlamaV2 wheel, PyTorch build and CUDA tier for the detected hardware.
+- Extend the model browser with engine tags (#llama.cpp, #exllamav2, or both), engine-filtered conversational browsing, and full EXL2 support: quantization branches are listed as complete bundles, downloaded with SHA-256 verification, managed in Manage, and routed to the ExLlamaV2 server in chat exactly like GGUF models.
 - Build Tauri-specific Windows installers and portable ZIPs. Keep update packages separate from Electron assets.
 
 # Orion 0.2.0 — Conversation memory, alternate paths and local voice

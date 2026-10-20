@@ -25,10 +25,11 @@ export interface UserQuestionRequest { id: string; conversationId: string; quest
 export type ScheduledJobStatus = 'scheduled'|'queued'|'running'|'completed'|'error';
 export interface ScheduledJob { id: string; name: string; cron: string; timezone: string; prompt: string; model: string; agent: boolean; createdBy: 'user'|'agent'; enabled: boolean; status: ScheduledJobStatus; nextRunAt: number|null; lastRunAt: number|null; lastOutput?: string; lastConversationId?: string; createdAt: number; updatedAt: number; }
 export type ModelCategory = 'conversational'|'image'|'video';
-export interface HubModel { id: string; author?: string; downloads?: number; likes?: number; pipelineTag?: string; description?: string; license?: string; }
+export type ModelEngine = 'llama.cpp'|'exllamav2';
+export interface HubModel { id: string; author?: string; downloads?: number; likes?: number; pipelineTag?: string; description?: string; license?: string; engines?: ModelEngine[]; }
 export interface HubSearchPage { models: HubModel[]; nextUrl: string | null; }
-export interface HubFile { name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string; relatedFiles?: Array<{ name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string }>; }
-export interface InstalledModel { id: string; repo: string; file: string; category: ModelCategory; path: string; files?: string[]; fileSha256?: Record<string,string>; bundleVersion?: number; size: number; downloadedAt: number; source?: string; invokeKey?: string; }
+export interface HubFile { name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string; revision?: string; bundle?: 'exl2'; relatedFiles?: Array<{ name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string }>; }
+export interface InstalledModel { id: string; repo: string; file: string; category: ModelCategory; path: string; files?: string[]; fileSha256?: Record<string,string>; bundleVersion?: number; size: number; downloadedAt: number; source?: string; invokeKey?: string; engine?: ModelEngine; revision?: string; }
 export interface DownloadProgress { id: string; repo: string; file: string; received: number; total: number; phase: 'downloading'|'complete'|'cancelled'|'error'; error?: string; }
 export interface BackendState { installed: boolean; running: boolean; firstEntrySeen: boolean; phase: string; detail: string; gpu: string; port?: number; }
 export interface CreateProgress { id: string; phase: string; detail: string; percent?: number; imagePath?: string; mediaType?: 'image'|'video'; error?: string; download?: { repo: string; file: string; received: number; total: number; phase: DownloadProgress['phase'] }; }
@@ -75,13 +76,14 @@ export interface OrionAPI {
   getSystemInfo(): Promise<{ platform: string; ollama: boolean; ollamaInstalled: boolean; cpuUsagePercent: number|null; usedRamMB: number; totalRamMB: number; gpuUsagePercent: number|null; usedVramMB: number | null; totalVramMB: number }>;
   listScheduledJobs(): Promise<ScheduledJob[]>; saveScheduledJob(job: Partial<ScheduledJob>): Promise<ScheduledJob>; deleteScheduledJob(id: string): Promise<void>;
   onScheduledJob(callback: (job: ScheduledJob) => void): () => void; onScheduledJobsChanged(callback: () => void): () => void; completeScheduledJob(id: string, status: 'completed'|'error', output: string, conversationId: string): Promise<void>;
-  searchHub(query: string, category: ModelCategory, nextUrl?: string|null): Promise<HubSearchPage>; getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
+  searchHub(query: string, category: ModelCategory, nextUrl?: string|null, engine?: ModelEngine): Promise<HubSearchPage>; getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
   getHuggingFaceTokenConfigured(): Promise<boolean>;
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;
   enterCreate(): Promise<{ state: BackendState; showInstallPrompt: boolean }>; getCreateEngineState(): Promise<BackendState>; installCreateEngine(): Promise<BackendState>;
   shouldShowLlamaIntro(): Promise<boolean>; dismissLlamaIntro(): Promise<void>; installLlama(): Promise<void>;
   llamaStatus(): Promise<boolean>;
+  exl2Status(): Promise<boolean>; installExl2(): Promise<void>;
   checkModelCompatibility(id: string): Promise<ModelCompatibilityReport>;
   listGeneratedMedia(): Promise<GeneratedMedia[]>;
   openGeneratedFolder(): Promise<void>;
