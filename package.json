@@ -13,7 +13,7 @@
     "build": "bun scripts/build-tauri.mjs",
     "dev": "bun run build && bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
     "start": "bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
-    "typecheck": "bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json",
+    "typecheck": "bun node_modules/typescript/bin/tsc --noEmit -p tsconfig.main.json && bun node_modules/typescript/bin/tsc --noEmit -p tsconfig.renderer.json",
     "dist": "bun run build && bun scripts/package-tauri.mjs",
     "verify:source": "bun scripts/verify-original.mjs",
     "icons": "bun node_modules/@tauri-apps/cli/tauri.js icon build/icons/orion-logo-source.png --output build/icons/tauri"

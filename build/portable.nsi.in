@@ -1,0 +1,23 @@
+Unicode true
+!include "FileFunc.nsh"
+Name "Orion Tauri Nightly"
+VIProductVersion "@VERSION@.0"
+VIAddVersionKey "ProductName" "Orion Tauri Nightly"
+VIAddVersionKey "ProductVersion" "@VERSION@"
+VIAddVersionKey "FileVersion" "@VERSION@"
+VIAddVersionKey "FileDescription" "Orion Tauri Nightly Portable"
+VIAddVersionKey "LegalCopyright" "Orion contributors"
+OutFile "@OUTPUT@"
+Icon "@ICON@"
+RequestExecutionLevel user
+SilentInstall silent
+AutoCloseWindow true
+SetCompressor /SOLID lzma
+Section
+ InitPluginsDir
+ SetOutPath "$PLUGINSDIR\OrionTauri"
+ File /r "@FILES@"
+ ${GetParameters} $R0
+ ExecWait '"$PLUGINSDIR\OrionTauri\orion-tauri.exe" $R0' $0
+ SetErrorLevel $0
+SectionEnd

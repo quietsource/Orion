@@ -24,7 +24,7 @@ if(process.platform==='win32'){
  const portableExe=path.join(destination,`Orion-Tauri_${version}_x64-portable.exe`);
  const script=path.join(root,'.migration','portable.nsi');
  const escape=value=>value.replaceAll('$','$$').replaceAll('"','$\\"');
- await writeFile(script,`Unicode true\n!include "FileFunc.nsh"\nName "Orion Tauri Nightly"\nOutFile "${escape(portableExe)}"\nIcon "${escape(path.join(root,'build/icons/orion.ico'))}"\nRequestExecutionLevel user\nSilentInstall silent\nAutoCloseWindow true\nSetCompressor /SOLID lzma\nSection\n InitPluginsDir\n SetOutPath "$PLUGINSDIR\\OrionTauri"\n File /r "${escape(path.join(portable,'*'))}"\n \${GetParameters} $R0\n ExecWait '\"$PLUGINSDIR\\OrionTauri\\orion-tauri.exe\" $R0' $0\n SetErrorLevel $0\nSectionEnd\n`);
+ await writeFile(script,(await readFile(path.join(root,'build/portable.nsi.in'),'utf8')).replaceAll('@VERSION@',version).replaceAll('@OUTPUT@',escape(portableExe)).replaceAll('@ICON@',escape(path.join(root,'build/icons/orion.ico'))).replaceAll('@FILES@',escape(path.join(portable,'*'))));
  const portableBuild=Bun.spawn([compiler,'/V2',script],{env:{...process.env,NSISDIR:nsis},stdout:'inherit',stderr:'inherit'});
  if(await portableBuild.exited!==0)throw Error('Portable EXE packaging failed');
 }

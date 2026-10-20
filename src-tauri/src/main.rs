@@ -55,7 +55,7 @@ fn browser_navigation_state(app: &AppHandle, view: &tauri::Webview) {
     }
     #[cfg(target_os = "linux")]
     {
-      use webkit2gtk::prelude::*;
+      use webkit2gtk::WebViewExt;
       let view = platform.inner();
       host_event(&app, json!({"type":"host-event","event":"browser-event","label":label,"back":view.can_go_back(),"forward":view.can_go_forward()}));
     }
