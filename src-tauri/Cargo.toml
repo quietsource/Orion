@@ -1,0 +1,39 @@
+[package]
+name = "orion-tauri"
+version = "2.5.0"
+description = "Orion native desktop application"
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2.7.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.4", features = ["tray-icon", "unstable", "devtools"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
+rfd = "0.15"
+open = "5"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.9"
+sha2 = "0.10"
+aes-gcm = "0.10"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "=2.0.2"
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
+secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

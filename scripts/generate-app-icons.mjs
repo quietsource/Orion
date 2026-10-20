@@ -1,0 +1,1 @@
+const child=Bun.spawn(['bun','node_modules/@tauri-apps/cli/tauri.js','icon','build/icons/orion-logo-source.png','--output','build/icons/tauri'],{stdout:'inherit',stderr:'inherit'});process.exit(await child.exited);

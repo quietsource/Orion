@@ -1,0 +1,8 @@
+{
+  "identifier": "browser-result",
+  "description": "Remote tabs can only return nonce-authenticated pending page extraction results.",
+  "local": false,
+  "remote": { "urls": ["https://*"] },
+  "webviews": ["browser-tab-*"],
+  "permissions": ["allow-browser-result", "allow-browser-shortcut"]
+}

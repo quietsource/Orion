@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": false,
+    "types": ["node"]
+  },
+  "include": [
+    "src/main/providers.ts",
+    "src/main/contextBudget.ts",
+    "src/main/memory.ts",
+    "src/main/llama.ts",
+    "src/main/orionHelp.ts",
+    "src/shared/**/*.ts"
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orion",
+  "version": "2.5.0",
+  "identifier": "com.quietsource.orion.tauri",
+  "build": {
+    "frontendDist": "../dist/renderer"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Orion",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 820,
+        "minHeight": 620,
+        "decorations": false,
+        "backgroundColor": "#242428",
+        "visible": false,
+        "dragDropEnabled": true,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*; frame-src 'self' data: blob:",
+      "capabilities": [
+        "main",
+        "browser-result"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "icon": [
+      "../build/icons/orion.ico",
+      "../build/icons/orion-512.png"
+    ],
+    "externalBin": [
+      "binaries/orion-service"
+    ],
+    "resources": {
+      "../dist/main/": "dist/main/",
+      "../build/icons/": "build/icons/"
+    },
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {},
+      "rpm": {}
+    }
+  }
+}

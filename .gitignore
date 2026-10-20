@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/binaries/*.exe
+src-tauri/binaries/orion-service-*
+*.log
+.migration/*
+!.migration/source-baseline.json
+release/

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-result"
+description = "Enables the browser_result command without any pre-configured scope."
+commands.allow = ["browser_result"]
+
+[[permission]]
+identifier = "deny-browser-result"
+description = "Denies the browser_result command without any pre-configured scope."
+commands.deny = ["browser_result"]

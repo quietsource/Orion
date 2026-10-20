@@ -1,0 +1,6 @@
+.empty-state.orion-idle{height:100%;min-height:0;max-height:none;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;user-select:none;pointer-events:none}
+.orion-idle-art{width:min(300px,28vw,calc(100dvh - 340px));min-width:130px;max-width:85%;aspect-ratio:1;background:transparent;flex-shrink:0}
+.orion-idle-art canvas{display:block;width:100%;height:100%;background:transparent}
+.orion-idle-greeting{margin:0;color:var(--muted);font-size:13px;font-weight:400;letter-spacing:.01em;line-height:1.5;text-align:center}
+
+.orion-loading-art{display:flex;align-items:center;gap:8px;min-height:36px}.orion-loading-art .orion-idle-art{width:36px;min-width:36px;height:36px;max-width:none;flex:none}.orion-loading-art .orion-idle-greeting{font-size:12px;text-align:left}.chat-loading{gap:0}

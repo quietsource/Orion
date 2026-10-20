@@ -1,0 +1,44 @@
+{
+  "name": "orion-tauri",
+  "version": "2.5.0",
+  "private": true,
+  "packageManager": "bun@1.4.3",
+  "description": "Local-first conversational AI workspace",
+  "author": {
+    "name": "Orion",
+    "email": "hello@orion.local"
+  },
+  "homepage": "https://orion.local",
+  "scripts": {
+    "build": "bun scripts/build-tauri.mjs",
+    "dev": "bun run build && bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
+    "start": "bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
+    "typecheck": "bunx --bun tsc --noEmit -p tsconfig.main.json && bunx --bun tsc --noEmit -p tsconfig.renderer.json",
+    "dist": "bun run build && bun scripts/package-tauri.mjs",
+    "verify:source": "bun scripts/verify-original.mjs",
+    "icons": "bun node_modules/@tauri-apps/cli/tauri.js icon build/icons/orion-logo-source.png --output build/icons/tauri"
+  },
+  "dependencies": {
+    "croner": "^10.0.1",
+    "cross-spawn": "^7.0.6",
+    "dompurify": "^3.4.16",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.18.9",
+    "marked": "^18.0.14",
+    "officeparser": "^8.1.1",
+    "systeminformation": "^5.33.13",
+    "@tauri-apps/api": "2.12.4"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "@tauri-apps/cli": "2.12.3",
+    "@types/bun": "latest"
+  },
+  "engines": {
+    "bun": ">=1.4.3"
+  },
+  "desktopName": "Orion",
+  "license": "MIT"
+}

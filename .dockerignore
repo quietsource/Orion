@@ -1,0 +1,10 @@
+node_modules
+src-tauri/target
+src-tauri/binaries
+.migration
+release
+dist
+website
+.git
+.velo
+*.log
