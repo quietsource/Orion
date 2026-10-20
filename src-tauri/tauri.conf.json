@@ -4,6 +4,7 @@
   "version": "0.2.5",
   "identifier": "com.quietsource.orion.tauri",
   "build": {
+    "devUrl": "http://127.0.0.1:4173",
     "frontendDist": "../dist/renderer"
   },
   "app": {
@@ -12,6 +13,7 @@
       {
         "label": "main",
         "title": "Orion",
+        "url": "index.html",
         "width": 1440,
         "height": 940,
         "minWidth": 820,

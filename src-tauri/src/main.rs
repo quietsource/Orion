@@ -311,7 +311,8 @@ fn main() {
       WebviewWindowBuilder::from_config(app, &configuration)?
         .on_navigation(|url| {
           let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost")) || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"));
-          if !local && url.scheme() == "https" { let _ = open::that(url.as_str()); } local
+          let dev = cfg!(debug_assertions) && url.scheme() == "http" && url.host_str() == Some("127.0.0.1") && url.port() == Some(4173);
+          if !local && !dev && url.scheme() == "https" { let _ = open::that(url.as_str()); } local || dev
         })
         .on_new_window(|url, _| { if url.scheme() == "https" { let _ = open::that(url.as_str()); } NewWindowResponse::Deny })
         .build()?;

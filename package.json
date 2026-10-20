@@ -11,7 +11,7 @@
   "homepage": "https://orion.local",
   "scripts": {
     "build": "bun scripts/build-tauri.mjs",
-    "dev": "bun run build && bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
+    "dev": "bun run build && bun scripts/dev-tauri.mjs",
     "start": "bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch",
     "typecheck": "bun node_modules/typescript/bin/tsc --noEmit -p tsconfig.main.json && bun node_modules/typescript/bin/tsc --noEmit -p tsconfig.renderer.json",
     "dist": "bun run build && bun scripts/package-tauri.mjs",

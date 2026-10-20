@@ -28,7 +28,14 @@ export class OFSClient {
       if (this.stopPromise) await this.stopPromise;
       await this.storage?.prepare();
       this.prepared = true;
-      const worker = new Worker(this.workerPath, { workerData: this.config });
+      // Tauri's packaged Windows resource resolver returns extended-length paths
+      // (\\?\C:\...). Bun's compiled module resolver treats that prefix as part
+      // of the module name and reports "Module not found", even when the worker
+      // exists. Keep the normal absolute DOS path for Bun's worker loader.
+      const workerPath = process.platform === 'win32' && /^\\\\\?\\[A-Za-z]:\\/.test(this.workerPath)
+        ? this.workerPath.slice(4)
+        : this.workerPath;
+      const worker = new Worker(workerPath, { workerData: this.config });
       this.worker = worker;
       worker.on('message', (response: { id: number; result?: unknown; error?: string }) => {
         const request = this.pending.get(response.id);

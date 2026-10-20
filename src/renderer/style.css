@@ -141,6 +141,16 @@ body.sidebar-collapsed .sidebar:hover #collapse,body.sidebar-collapsed .sidebar:
 .settings-nav-item{min-height:34px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--secondary);font-size:11px;text-align:left;cursor:pointer}
 .settings-nav-item:hover{background:#17171c;color:var(--text)}.settings-nav-item.active{background:#211f2b;color:#d0c9ff}
 .settings-content{min-width:0;contain:layout style}
+.engine-manager-list{display:grid;gap:9px}
+.engine-manager-card{min-width:0;padding:12px 13px;border:1px solid var(--border-soft);border-radius:10px;background:#0d0d10}
+.engine-manager-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.engine-manager-head h4{margin:0;font-size:12px;font-weight:600}
+.engine-manager-status{flex:none;color:#aaa2ce;font-size:10px}
+.engine-manager-card>p{margin:5px 0 8px;font-size:10px;line-height:1.5}
+.engine-manager-card .engine-manager-detail{min-height:15px;color:var(--secondary);overflow-wrap:anywhere}
+.engine-manager-card progress{display:block;width:100%;height:5px;margin:5px 0 9px;accent-color:#9a8dff}
+.engine-manager-card progress[hidden]{display:none}
+.engine-manager-card button{min-height:30px;padding:0 10px;font-size:10px}
 .settings-section{min-width:0}.settings-section h3{margin:3px 0 5px;font-size:16px;font-weight:580;letter-spacing:-.02em}.settings-section>p.muted:first-of-type{margin:0 0 14px}
 .settings-section>label:not(.job-check){min-width:0;margin:0 0 9px;padding:10px 11px;border:1px solid var(--border-soft);border-radius:9px;background:#0d0d10}
 .settings-section>label:not(.job-check)>input,.settings-section>label:not(.job-check)>select,.settings-section .workspace-picker{width:100%;min-width:0}

@@ -1,5 +1,5 @@
 import { expose, ipcRenderer, webUtils } from '../platform/rendererBridge';
-import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, AppUpdateState } from '../shared/types';
+import type { OrionAPI, ScheduledJob, CreateProgress, DownloadProgress, GeneratedMedia, UserQuestionRequest, AppUpdateState, EngineInstallProgress } from '../shared/types';
 
 const api: OrionAPI = {
   voice: {
@@ -92,6 +92,8 @@ const api: OrionAPI = {
   enterCreate: () => ipcRenderer.invoke('create:enter'),
   getCreateEngineState: () => ipcRenderer.invoke('create:state'),
   installCreateEngine: () => ipcRenderer.invoke('create:install'),
+  installOllama: () => ipcRenderer.invoke('ollama:install'),
+  onEngineInstallProgress: callback => { const listener = (_: unknown, progress: EngineInstallProgress) => callback(progress); ipcRenderer.on('engine:install-progress', listener); return () => ipcRenderer.removeListener('engine:install-progress', listener); },
   shouldShowLlamaIntro: () => ipcRenderer.invoke('llama:intro'),
   dismissLlamaIntro: () => ipcRenderer.invoke('llama:dismiss-intro'),
   installLlama: () => ipcRenderer.invoke('llama:install'),

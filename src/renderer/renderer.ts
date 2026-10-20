@@ -390,9 +390,10 @@ async function renderMemoryUsage() {
   catch (error) {
     if (current?.id !== conversationId) return;
     memoryFailureCount++;
+    const detail = error instanceof Error ? error.message : String(error);
     $('memory-label').textContent = memoryFailureCount < 3 ? 'Starting…' : 'Unavailable';
-    $('memory-label').title = error instanceof Error ? error.message : String(error);
-    $('memory-progress').textContent = memoryFailureCount < 3 ? 'OrionFS is reconnecting to its local memory store…' : 'OrionFS could not open its local memory store. Hover for the error, then use Rebuild OrionFS memory in Settings → Memory & privacy.';
+    $('memory-label').title = detail;
+    $('memory-progress').textContent = memoryFailureCount < 3 ? 'OrionFS is reconnecting to its local memory store…' : `OrionFS could not open its local memory store: ${detail.slice(0, 220)}${detail.length > 220 ? '…' : ''}`;
   }
 }
 async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; memoryFailureCount = 0; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
@@ -1338,6 +1339,89 @@ async function refreshMemoryInspector() {
     more.hidden = memoryInspectorOffset + page.items.length >= page.total;
   } catch (error) { if (request === memoryInspectorRequest) status.textContent = `Could not load memory: ${error instanceof Error ? error.message : String(error)}`; }
 }
+type ManagedEngineKey = 'llama'|'exllama'|'diffusion'|'ollama';
+let engineManagementPanel: HTMLElement | null = null;
+const engineInstallBusy = new Set<ManagedEngineKey>();
+function updateEngineCard(key: ManagedEngineKey, status: string, detail?: string, progress?: number) {
+  const card = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"]`);
+  if (!card) return;
+  const statusNode = card.querySelector<HTMLElement>('.engine-manager-status');
+  const detailNode = card.querySelector<HTMLElement>('.engine-manager-detail');
+  const bar = card.querySelector<HTMLProgressElement>('progress');
+  const button = card.querySelector<HTMLButtonElement>('button');
+  if (statusNode) statusNode.textContent = status;
+  if (detailNode && detail !== undefined) detailNode.textContent = detail;
+  if (bar) { bar.hidden = progress === undefined; if (progress !== undefined) { bar.max = 100; bar.value = Math.min(100, Math.max(0, progress)); } }
+  if (button) button.disabled = engineInstallBusy.has(key) || status === 'Installed' || status === 'Running' || status === 'Installer running';
+}
+async function refreshEngineManagement() {
+  if (!engineManagementPanel) return;
+  for (const key of ['llama','exllama','diffusion','ollama'] as const) if (!engineInstallBusy.has(key)) updateEngineCard(key, 'Checking…', 'Reading local installation status.');
+  const values = await Promise.allSettled([window.orion.llamaStatus(), window.orion.exl2Status(), window.orion.getCreateEngineState(), window.orion.getSystemInfo()]);
+  if (!engineManagementPanel) return;
+  const llama = values[0], exllama = values[1], diffusion = values[2], system = values[3];
+  if (llama.status === 'fulfilled') updateEngineCard('llama', llama.value ? 'Installed' : 'Not installed', llama.value ? 'Orion managed GGUF inference runtime is ready.' : 'Install the managed llama.cpp runtime to run GGUF models locally.');
+  else updateEngineCard('llama', 'Status unavailable', llama.reason instanceof Error ? llama.reason.message : String(llama.reason));
+  if (exllama.status === 'fulfilled') updateEngineCard('exllama', exllama.value ? 'Installed' : 'Not installed', exllama.value ? 'Orion managed EXL2 inference runtime is ready.' : 'Install ExLlamaV2 for supported EXL2 models. Requires NVIDIA CUDA.');
+  else updateEngineCard('exllama', 'Status unavailable', exllama.reason instanceof Error ? exllama.reason.message : String(exllama.reason));
+  if (diffusion.status === 'fulfilled') updateEngineCard('diffusion', diffusion.value.installed ? 'Installed' : 'Not installed', diffusion.value.detail || 'Orion managed stable-diffusion.cpp engine for local image and video generation.');
+  else updateEngineCard('diffusion', 'Status unavailable', diffusion.reason instanceof Error ? diffusion.reason.message : String(diffusion.reason));
+  if (system.status === 'fulfilled') updateEngineCard('ollama', system.value.ollamaInstalled ? 'Installed' : system.value.ollama ? 'Running' : 'Not installed', system.value.ollama ? 'Ollama is installed and responding on the configured local endpoint.' : system.value.ollamaInstalled ? 'Ollama is installed. Start its local service to use Ollama models.' : 'Download and run the official Ollama installer.');
+  else updateEngineCard('ollama', 'Status unavailable', system.reason instanceof Error ? system.reason.message : String(system.reason));
+}
+function createEngineManagementPanel() {
+  const panel = document.createElement('div'); panel.className = 'engine-manager-list'; engineManagementPanel = panel;
+  const entries: Array<{ key: ManagedEngineKey; title: string; description: string; action: string }> = [
+    { key: 'llama', title: 'Orion managed · llama.cpp', description: 'Local GGUF chat inference. Installs on first use or from here.', action: 'Install llama.cpp' },
+    { key: 'exllama', title: 'Orion managed · ExLlamaV2', description: 'Local EXL2 chat inference through NVIDIA CUDA.', action: 'Install ExLlamaV2' },
+    { key: 'diffusion', title: 'Orion managed · stable-diffusion.cpp', description: 'Local image and video inference with the Vulkan backend.', action: 'Install stable-diffusion.cpp' },
+    { key: 'ollama', title: 'Ollama', description: 'Use Ollama as an external local model server. Installer comes from ollama.com.', action: 'Download official installer' }
+  ];
+  for (const entry of entries) {
+    const card = document.createElement('article'); card.className = 'engine-manager-card'; card.dataset.engine = entry.key;
+    const head = document.createElement('div'); head.className = 'engine-manager-head'; const title = document.createElement('h4'); title.textContent = entry.title; const status = document.createElement('span'); status.className = 'engine-manager-status'; status.textContent = 'Checking…'; head.append(title,status);
+    const description = document.createElement('p'); description.className = 'muted'; description.textContent = entry.description;
+    const detail = document.createElement('p'); detail.className = 'engine-manager-detail'; detail.textContent = 'Reading local installation status.';
+    const progress = document.createElement('progress'); progress.hidden = true; progress.max = 100;
+    const action = document.createElement('button'); action.type = 'button'; action.className = 'secondary'; action.textContent = entry.action;
+    action.addEventListener('click', () => void installManagedEngine(entry.key));
+    card.append(head,description,detail,progress,action); panel.append(card);
+  }
+  return panel;
+}
+async function installManagedEngine(key: ManagedEngineKey) {
+  if (engineInstallBusy.has(key)) return;
+  const state = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`)?.textContent;
+  if (state === 'Installed' || state === 'Running') return;
+  engineInstallBusy.add(key); updateEngineCard(key, 'Installing…', 'Preparing the installer.');
+  try {
+    if (key === 'llama') await window.orion.installLlama();
+    else if (key === 'exllama') await window.orion.installExl2();
+    else if (key === 'diffusion') await window.orion.installCreateEngine();
+    else {
+      const result = await window.orion.installOllama();
+      updateEngineCard(key, result.launched ? 'Installer running' : 'Manual setup', result.detail);
+      return;
+    }
+    await refreshEngineManagement();
+    showNotice(`${key === 'llama' ? 'llama.cpp' : key === 'exllama' ? 'ExLlamaV2' : 'stable-diffusion.cpp'} setup completed.`, 'Engine ready');
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    updateEngineCard(key, 'Setup failed', detail); showNotice(detail, 'Engine setup failed');
+  } finally { engineInstallBusy.delete(key); const statusNode = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`); if (statusNode?.textContent === 'Installing…') updateEngineCard(key, 'Setup interrupted', 'Open Settings → Engines to retry.'); else { const button = statusNode?.closest<HTMLElement>('[data-engine]')?.querySelector<HTMLButtonElement>('button'); if (button) button.disabled = ['Installed','Running','Installer running'].includes(statusNode?.textContent ?? ''); } }
+}
+window.orion.onEngineInstallProgress(progress => {
+  if (progress.engine !== 'ollama') return;
+  const percent = progress.total ? progress.received! / progress.total * 100 : undefined;
+  updateEngineCard('ollama', progress.phase === 'downloading' ? 'Downloading…' : progress.phase === 'error' ? 'Setup failed' : progress.phase === 'complete' ? 'Installed' : 'Installer running', progress.detail, percent);
+  if(progress.phase==='complete')window.setTimeout(()=>void refreshEngineManagement(),2500);
+});
+window.orion.onDownloadProgress(progress => {
+  const key = progress.repo === 'Orion llama.cpp' ? 'llama' : progress.repo === 'Orion ExLlamaV2' ? 'exllama' : null;
+  if (!key || !engineInstallBusy.has(key)) return;
+  const percent = progress.total ? progress.received / progress.total * 100 : undefined;
+  updateEngineCard(key, progress.phase === 'error' ? 'Setup failed' : progress.phase === 'complete' ? 'Finalizing…' : 'Downloading…', `${progress.file} · ${Math.round(progress.received / 1048576)} MB`, percent);
+});
 function organizeSettingsPanel() {
   const form = $('settings-form');
   if (form.dataset.organized) return;
@@ -1364,6 +1448,7 @@ function organizeSettingsPanel() {
   const systemPrompt = all.find(node => node.matches('#settings-system-prompt') || node.querySelector('#settings-system-prompt'));
   const groups: Array<{ name: string; ids: string[]; extras: HTMLElement[]; description: string }> = [
     { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel','auto-collapse-thinking'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
+    { name: 'Engines', ids: [], extras: [createEngineManagementPanel()], description: 'Install and manage Orion’s local inference engines and Ollama.' },
     { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
     { name: 'Voice', ids: [], extras: [voiceControls.settingsSection()], description: 'Private local dictation and natural neural read aloud. Nothing installs until first use.' },
     { name: 'Startup', ids: ['keep-in-tray', 'start-new-conversation'], extras: [], description: 'Choose what Orion does when its window closes or opens.' },
@@ -1384,7 +1469,7 @@ function organizeSettingsPanel() {
     for (const id of group.ids) { const field = byId(id); if (field) section.append(field); }
     for (const extra of group.extras) section.append(extra);
     const button = document.createElement('button'); button.type = 'button'; button.className = `settings-nav-item${index === 0 ? ' active' : ''}`; button.textContent = group.name; button.setAttribute('aria-current', index === 0 ? 'page' : 'false');
-    button.onclick = () => { nav.querySelectorAll('.settings-nav-item').forEach(item => { item.classList.remove('active'); item.setAttribute('aria-current', 'false'); }); content.querySelectorAll('.settings-section').forEach(item => { item.classList.remove('active'); (item as HTMLElement).hidden = true; }); button.classList.add('active'); button.setAttribute('aria-current', 'page'); section.hidden = false; section.classList.add('active'); if (group.name === 'System prompt') void loadSettingsSystemPrompt(); if (group.name === 'Memory & privacy') { memoryInspectorOffset = 0; void refreshMemoryInspector(); } };
+    button.onclick = () => { nav.querySelectorAll('.settings-nav-item').forEach(item => { item.classList.remove('active'); item.setAttribute('aria-current', 'false'); }); content.querySelectorAll('.settings-section').forEach(item => { item.classList.remove('active'); (item as HTMLElement).hidden = true; }); button.classList.add('active'); button.setAttribute('aria-current', 'page'); section.hidden = false; section.classList.add('active'); if (group.name === 'System prompt') void loadSettingsSystemPrompt(); if (group.name === 'Memory & privacy') { memoryInspectorOffset = 0; void refreshMemoryInspector(); } if (group.name === 'Engines') void refreshEngineManagement(); };
     nav.append(button); content.append(section);
   });
   if (actions) form.append(actions);
@@ -1397,7 +1482,7 @@ async function loadSettingsSystemPrompt() {
   try { output.textContent = await window.orion.getSystemPrompt(($('model') as HTMLSelectElement).value, chatMode); }
   catch (error) { output.textContent = `Could not load the system prompt: ${error instanceof Error ? error.message : String(error)}`; }
 }
-$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); await voiceControls.refreshSettings(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('auto-collapse-thinking') as HTMLInputElement).checked = settings.autoCollapseThinking; ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
+$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); await voiceControls.refreshSettings(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('auto-collapse-thinking') as HTMLInputElement).checked = settings.autoCollapseThinking; ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Engines") void refreshEngineManagement(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
 settingsDialog.addEventListener('close', () => applyTheme());
 $('workspace-browse').onclick = async () => { const selected = await window.orion.selectWorkspace(); if (selected) ($('workspace-path') as HTMLInputElement).value = selected; };
 $('rebuild-memory').onclick = () => { $('memory-progress').textContent = 'Re-indexing saved conversations…'; void window.orion.rebuildMemory(); };
@@ -1430,6 +1515,7 @@ function patchLiveGenerationCall(call: ToolCallRecord) {
   let detail=generation.querySelector<HTMLElement>('.tool-generation-detail');if(!detail){detail=document.createElement('div');detail.className='tool-generation-detail';generation.append(detail);}detail.textContent=call.imagePath?'Restoring chat model…':call.progressDetail??'Generating locally…';
 }
 window.orion.onCreateProgress(progress=>{
+  if(engineInstallBusy.has('diffusion'))updateEngineCard('diffusion',progress.phase==='error'?'Setup failed':progress.phase==='complete'?'Finalizing…':'Installing…',progress.error??progress.detail,progress.percent);
   const isCreatePageJob=createPageGenerationIds.has(progress.id);
   if(isCreatePageJob||engineInstallPending)createProgress.set(progress.id,progress);
   if(engineInstallPending)engineProgressId=progress.id;

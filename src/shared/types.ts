@@ -35,6 +35,7 @@ export interface BackendState { installed: boolean; running: boolean; firstEntry
 export interface CreateProgress { id: string; phase: string; detail: string; percent?: number; imagePath?: string; mediaType?: 'image'|'video'; error?: string; download?: { repo: string; file: string; received: number; total: number; phase: DownloadProgress['phase'] }; }
 export interface GeneratedMedia { id: string; prompt: string; modelId: string; path: string; mediaType: 'image'|'video'; createdAt: number; }
 export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'installing'|'error'; version?: string; notes?: string; received?: number; total?: number; detail?: string; }
+export interface EngineInstallProgress { id: string; engine: 'ollama'; phase: 'downloading'|'launched'|'complete'|'error'; received?: number; total?: number; detail: string; }
 export interface OrionAPI {
   voice: import('./voice').VoiceAPI;
   memoryHistory: import('./memoryHistory').MemoryHistoryAPI;
@@ -81,6 +82,7 @@ export interface OrionAPI {
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;
   enterCreate(): Promise<{ state: BackendState; showInstallPrompt: boolean }>; getCreateEngineState(): Promise<BackendState>; installCreateEngine(): Promise<BackendState>;
+  installOllama(): Promise<{ launched: boolean; detail: string }>; onEngineInstallProgress(callback: (progress: EngineInstallProgress) => void): () => void;
   shouldShowLlamaIntro(): Promise<boolean>; dismissLlamaIntro(): Promise<void>; installLlama(): Promise<void>;
   llamaStatus(): Promise<boolean>;
   exl2Status(): Promise<boolean>; installExl2(): Promise<void>;

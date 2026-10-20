@@ -12,7 +12,7 @@ import { OfficeParser } from 'officeparser';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState } from '../shared/types';
+import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState, EngineInstallProgress } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
 import { VoiceManager } from './voice';
@@ -1263,6 +1263,59 @@ ipcMain.handle('llama:install', async () => { await markLlamaIntroSeen(); return
 ipcMain.handle('llama:status', async () => llamaManager.isInstalled());
 ipcMain.handle('exl2:install', async () => { await markLlamaIntroSeen(); return exllamaManager.install(); });
 ipcMain.handle('exl2:status', async () => exllamaManager.isInstalled());
+let ollamaInstallerRunning = false;
+ipcMain.handle('ollama:install', async () => {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    await shell.openExternal(process.platform === 'linux' ? 'https://ollama.com/download/linux' : 'https://ollama.com/download');
+    return { launched: false, detail: 'Ollama’s official installer page is open. Follow its instructions to install on this system.' };
+  }
+  if (ollamaInstallerRunning) throw new Error('The Ollama installer is already downloading or running.');
+  ollamaInstallerRunning = true;
+  const id = randomUUID();
+  let installerDirectory = '';
+  let installerLaunched = false;
+  const report = (value: Omit<EngineInstallProgress, 'engine'>) => { if (win && !win.isDestroyed()) win.webContents.send('engine:install-progress', { ...value, engine: 'ollama' }); };
+  try {
+    const response = await fetch('https://registry.ollama.com/download/OllamaSetup.exe', { headers: { 'user-agent': 'Orion-Local-AI' }, signal: AbortSignal.timeout(20 * 60_000) });
+    if (!response.ok || !response.body) throw new Error(`Ollama installer download failed (${response.status}).`);
+    const total = Number(response.headers.get('content-length')) || 0;
+    if (total > 2 * 1024 * 1024 * 1024) throw new Error('The official Ollama installer exceeded the 2 GB safety limit.');
+    installerDirectory = await fs.mkdtemp(path.join(app.getPath('temp'), 'Orion-Ollama-'));
+    const installerPath = path.join(installerDirectory, 'OllamaSetup.exe');
+    const file = await fs.open(installerPath, 'wx', 0o700);
+    const reader = response.body.getReader(); let received = 0; const header: number[] = [];
+    report({ id, phase: 'downloading', detail: 'Downloading the official Ollama installer…', total });
+    try {
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        if (header.length < 2) for (const byte of value.slice(0, 2 - header.length)) header.push(byte);
+        received += value.byteLength;
+        if (received > 2 * 1024 * 1024 * 1024) throw new Error('The official Ollama installer exceeded the 2 GB safety limit.');
+        await file.writeFile(value);
+        report({ id, phase: 'downloading', detail: `Downloading Ollama installer · ${Math.round(received / 1048576)} MB`, received, total });
+      }
+      await file.sync();
+    } finally { await file.close(); }
+    if (header[0] !== 0x4d || header[1] !== 0x5a) throw new Error('The downloaded Ollama installer is not a valid Windows application.');
+    const child = spawn(installerPath, [], { detached: true, windowsHide: false, stdio: 'ignore' });
+    await new Promise<void>((resolve, reject) => { child.once('spawn', () => resolve()); child.once('error', reject); });
+    child.unref();
+    child.once('close', code => {
+      void fs.rm(installerDirectory, { recursive: true, force: true });
+      ollamaInstallerRunning = false;
+      if (code !== 0) report({ id, phase: 'error', detail: `The Ollama installer exited with code ${code ?? 'unknown'}.` });
+      else report({ id, phase: 'complete', detail: 'The Ollama installer finished.' });
+    });
+    installerLaunched = true;
+    report({ id, phase: 'launched', detail: 'Ollama setup is open. Complete its steps, then return to Orion.' });
+    return { launched: true, detail: 'Ollama setup is open. Complete its steps, then return to Orion.' };
+  } catch (error) {
+    if (installerDirectory) await fs.rm(installerDirectory, { recursive: true, force: true }).catch(() => undefined);
+    const detail = error instanceof Error ? error.message : String(error);
+    report({ id, phase: 'error', detail });
+    throw new Error(detail);
+  } finally { if (!installerLaunched) ollamaInstallerRunning = false; }
+});
 ipcMain.handle('models:check-compatibility', async (event, id: string) => {
   if (!win || event.sender !== win.webContents) throw new Error('Compatibility checking is unavailable.');
   if (modelCompatibilityBusy || activeAbort) throw new Error('Wait for the current chat or compatibility check to finish.');
