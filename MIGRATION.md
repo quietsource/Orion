@@ -30,7 +30,7 @@ Initial checks use isolated synthetic profiles. The existing Windows Orion profi
 
 ## Validation limits
 
-Windows setup/portable packages and Linux AppImage, DEB and RPM packages are built for the 2.5.0 nightly. Linux desktop behavior still requires a runtime check. The retained Wan video pipeline has not yet run end to end in this copy. Voice quality remains that of the existing downloaded models. Published Electron assets are excluded from this edition's updater.
+Windows setup/portable packages and Linux AppImage, DEB and RPM packages are built for the 0.2.5 nightly. Linux desktop behavior still requires a runtime check. The retained Wan video pipeline has not yet run end to end in this copy. Voice quality remains that of the existing downloaded models. Published Electron assets are excluded from this edition's updater.
 
 ## Diagnostics
 

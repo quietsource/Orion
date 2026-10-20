@@ -1,4 +1,4 @@
-# Orion Tauri 2.5.0 Nightly
+# Orion Tauri 0.2.5 Nightly
 
 Nightly Tauri v2 conversion of Orion, based on the 0.2.0 application. The original source in the parent directory is unchanged.
 
@@ -19,7 +19,7 @@ Subsequent launches can use `bun run start` after building once. No Vite or Elec
 
 ## Packaging
 
-Run `bun run dist`. Windows produces an NSIS setup EXE, a self-extracting portable EXE and a portable ZIP under `release/2.5.0`. Linux targets DEB, RPM and AppImage when built on Linux. Linux needs WebKitGTK 4.1, AppIndicator, librsvg, OpenSSL, libsecret, D-Bus and a working desktop Secret Service. macOS is not supported.
+Run `bun run dist`. Windows produces an NSIS setup EXE, a self-extracting portable EXE and a portable ZIP under `release/0.2.5`. Linux targets DEB, RPM and AppImage when built on Linux. Linux needs WebKitGTK 4.1, AppIndicator, librsvg, OpenSSL, libsecret, D-Bus and a working desktop Secret Service. macOS is not supported.
 
 Distribute the setup EXE, portable EXE, or complete portable ZIP; never distribute the bare native host EXE: the Bun service is a separate bundled executable. Update assets must contain Tauri in their names. The packaging script applies that name and generates SHA256SUMS, preventing this edition from installing Electron releases.
 

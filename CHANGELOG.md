@@ -1,4 +1,13 @@
-# Orion Tauri 2.5.0 — Nightly
+# Orion Tauri 0.2.5 — Nightly
+
+## Fixes and improvements
+
+- Route managed EXL2 model chat requests through the ExLlamaV2 server and find each installed model root from its `config.json`, including models indexed by earlier nightly builds.
+- Remove the engine installation card from the model browser's Manage page.
+- Add RAM and VRAM fit estimates for conversational model variants, filters for models that fit this PC, GPU fits, CPU or partial GPU fits, and models that may exceed available memory, plus best-fit sorting.
+- Preserve the visible model card when quantization files are opened or model results refresh.
+- Anchor populated chat messages to the bottom so new conversations flow upward from the latest exchange.
+- Recover OrionFS after an unexpected worker failure and allow its regular status refresh to reconnect.
 
 - Replace Electron with Tauri v2 and a standalone Bun backend while retaining the Orion interface and application features.
 - Reuse the existing Orion data directory, installed engines, models and encrypted data. Unlock the original Windows encryption key without replacing it.

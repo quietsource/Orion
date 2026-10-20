@@ -36,3 +36,5 @@ body.sidebar-collapsed .app { --layout-sidebar:0px; }
 #model-server-row[hidden] { display:none!important; }
 body:not(.sidebar-collapsed) .sidebar #collapse { position:absolute;top:3px;right:10px;height:28px; }
 body:not(.sidebar-collapsed) .sidebar .nav-chat-row { padding-right:34px; }
+#messages{display:flex;flex-direction:column;justify-content:flex-end}
+#messages>.message{flex:0 0 auto}

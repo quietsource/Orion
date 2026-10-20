@@ -9,6 +9,7 @@ export class OFSClient {
   private stopPromise: Promise<void> | null = null;
   private sequence = 0;
   private failed: Error | null = null;
+  private recovery: Promise<void> | null = null;
   private closed = false;
   private inFlight = 0;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -19,6 +20,8 @@ export class OFSClient {
   constructor(private readonly config: OFSConfig, private readonly workerPath: string, private readonly storage?: StorageLifecycle) {}
 
   private async startWorker() {
+    if (this.recovery) await this.recovery;
+    if (this.failed) throw this.failed;
     if (this.worker) return this.worker;
     if (this.startPromise) return this.startPromise;
     this.startPromise = (async () => {
@@ -34,14 +37,23 @@ export class OFSClient {
         if (response.error) request.reject(new Error(response.error)); else request.resolve(response.result);
       });
       const fail = (error: Error) => {
+        if (this.worker !== worker) return;
         this.failed = error;
         for (const request of this.pending.values()) request.reject(error);
         this.pending.clear();
+        this.worker = null;
+        this.recovery = worker.terminate().catch(() => 0).then(async () => {
+          if (this.prepared) await this.storage?.seal().catch(() => undefined);
+          this.prepared = false;
+        }).finally(() => {
+          this.failed = null;
+          this.recovery = null;
+        });
       };
       worker.on('error', fail);
       worker.on('exit', code => {
-        if (this.worker === worker) this.worker = null;
-        if (!this.closed && !this.stopPromise) fail(new Error(`OrionFS worker exited (${code})`));
+        if (this.worker === worker && !this.closed && !this.stopPromise) fail(new Error(`OrionFS worker exited unexpectedly (${code})`));
+        else if (this.worker === worker) this.worker = null;
       });
       return worker;
     })().catch(async error => {
@@ -53,7 +65,6 @@ export class OFSClient {
 
   private async call<T>(method: string, args: unknown[] = []): Promise<T> {
     if (this.closed) throw new Error('OrionFS is closing');
-    if (this.failed) throw this.failed;
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     this.inFlight++;
     try {
@@ -61,7 +72,8 @@ export class OFSClient {
       return await new Promise<T>((resolve, reject) => {
         const id = ++this.sequence;
         this.pending.set(id, { resolve: value => resolve(value as T), reject });
-        worker.postMessage({ id, method, args });
+        try { worker.postMessage({ id, method, args }); }
+        catch (error) { this.pending.delete(id); reject(error instanceof Error ? error : new Error(String(error))); }
       });
     } finally {
       this.inFlight--;
@@ -120,6 +132,7 @@ export class OFSClient {
     if (this.closed) return;
     this.closed = true;
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    await this.recovery?.catch(() => undefined);
     await this.startPromise?.catch(() => undefined);
     await this.stopWorker();
   }

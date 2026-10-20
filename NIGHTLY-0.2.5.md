@@ -1,8 +1,13 @@
-# Orion Tauri 2.5.0 Nightly
+# Orion Tauri 0.2.5 Nightly
 
 This nightly introduces Orion's Tauri v2 desktop application, with the existing Orion interface and features backed by a standalone Bun service.
 
 - Reuses the existing Orion data directory, conversations, encrypted settings and API keys, OrionFS memories, installed models, managed llama.cpp and diffusion engines, and local voice setup.
+- Corrects managed ExLlamaV2 model routing so EXL2 chats use the ExLlamaV2 endpoint, and resolves older model indexes from their `config.json` files.
+- Removes the engine installation card from Manage; runtime installation remains available through the engine setup flow.
+- Shows estimated RAM/VRAM fit for conversational model quantizations, with hardware fit filters and best-fit sorting.
+- Keeps the visible model card anchored while model quantization files load, and starts populated chats at the latest messages.
+- Recovers the OrionFS worker after an unexpected worker failure and retries through the normal stats refresh instead of immediately marking memory unavailable.
 - Unlocks the existing Windows encryption key in place; no reinstallation or data import is needed.
 - Moves Orion Browser into the right Canvas sidebar with visible tabs, address/navigation controls, keyboard shortcuts and AI page-reading tools.
 - Retains local chat, streaming tools, web search, native graphs, Canvas documents, conversation history, local dictation/read aloud, and Vulkan image/video generation.

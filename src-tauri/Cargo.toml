@@ -1,6 +1,6 @@
 [package]
 name = "orion-tauri"
-version = "2.5.0"
+version = "0.2.5"
 description = "Orion native desktop application"
 edition = "2024"
 

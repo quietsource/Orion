@@ -139,7 +139,14 @@ let createPromptDraft = '', createKind: 'image'|'video' = 'image';
 let engineInstallPending = false;
 let engineProgressId = '';
 let activeCreateGeneration: { id: string; prompt: string; kind: 'image'|'video' } | null = null;
-const modelCardSizes = new Map<string, Promise<{total:number;count:number;quantizations:number}>>();
+type ModelFit = 'gpu'|'hybrid'|'cpu'|'large'|'unknown';
+type ModelVariant = { name: string; size: number; revision?: string; fit: ModelFit; quant: string };
+type ModelSizeSummary = { total:number; count:number; quantizations:number; variants:ModelVariant[]; bestFit:ModelFit; recommendation?:ModelVariant };
+const modelCardSizes = new Map<string, Promise<ModelSizeSummary>>();
+let modelFitResources: Awaited<ReturnType<typeof window.orion.getSystemInfo>> | null = null;
+let modelFitResourcesLoading = false;
+let modelFitFilter: 'all'|'fits'|'gpu'|'cpu'|'large' = 'all';
+let modelBrowserSort: 'popular'|'fit' = 'popular';
 const generatedMedia: GeneratedMedia[] = [];
 const mediaUrlCache = new Map<string, Promise<string>>();
 function generatedMediaUrl(path: string) { let value=mediaUrlCache.get(path);if(!value){value=window.orion.readGeneratedMedia(path);mediaUrlCache.set(path,value);while(mediaUrlCache.size>12)mediaUrlCache.delete(mediaUrlCache.keys().next().value!);value.catch(()=>mediaUrlCache.delete(path));}return value; }
@@ -376,16 +383,19 @@ document.addEventListener('contextmenu', event => { const target = event.target 
 function createMessage(role: Message['role'], content: string): Message { return { id: id(), role, content, createdAt: now() }; }
 function newConversation(reuseEmpty = false) { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); const reusable = reuseEmpty ? conversations.find(isReusableUntitledConversation) : undefined; current = reusable ?? { id: id(), title: 'Untitled', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; current.title='Untitled'; switchCanvasConversation(current.id); if(!reusable)conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
 let memoryRenderSequence = 0;
+let memoryFailureCount = 0;
 async function renderMemoryUsage() {
   const conversationId = current?.id;
   try { await updateMemoryUsage(); }
   catch (error) {
     if (current?.id !== conversationId) return;
-    $('memory-label').textContent = 'Unavailable';
+    memoryFailureCount++;
+    $('memory-label').textContent = memoryFailureCount < 3 ? 'Starting…' : 'Unavailable';
     $('memory-label').title = error instanceof Error ? error.message : String(error);
+    $('memory-progress').textContent = memoryFailureCount < 3 ? 'OrionFS is reconnecting to its local memory store…' : 'OrionFS could not open its local memory store. Hover for the error, then use Rebuild OrionFS memory in Settings → Memory & privacy.';
   }
 }
-async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
+async function updateMemoryUsage() { const request = ++memoryRenderSequence; const conversationId = current?.id ?? ''; const interConversation = settings.interConversationMemory; const label = $('memory-label'), fill = $('memory-fill'); $('memory-engine-name').textContent = 'OrionFS (OFS)'; const stats = await window.orion.memoryStats(conversationId); if (request !== memoryRenderSequence || current?.id !== conversationId || settings.interConversationMemory !== interConversation) return; memoryFailureCount = 0; const count = stats.activeMemories ?? stats.chunks; label.textContent = `${count.toLocaleString()} memories`; label.title = `${count.toLocaleString()} active OrionFS memory nodes · ${stats.indexedTokens.toLocaleString()} estimated tokens · ${stats.links ?? 0} graph links · ${stats.databaseBytes ? (stats.databaseBytes / 1048576).toFixed(1) + ' MB' : 'database size unavailable'} · ${stats.workingTurns ?? 0} active working turns. Stored locally; no model or network required.`; fill.style.width = `${Math.min(100, count / 5000 * 100)}%`; ($('install-memory-embedding') as HTMLButtonElement).hidden = true; $('memory-progress').textContent = stats.rebuilding ? 'OrionFS is indexing saved conversations…' : 'OrionFS is active. Memories are stored locally and recalled without a model.'; }
 async function save(conversation: Conversation | null = current, indexMemory = false) { if (!conversation) return; conversation.updatedAt = now(); await window.orion.saveConversation(conversation, indexMemory); renderHistory(); void renderMemoryUsage(); }
 function scheduleSave(conversation: Conversation) { const timer = persistTimers.get(conversation.id); if (timer) clearTimeout(timer); persistTimers.set(conversation.id, window.setTimeout(() => { persistTimers.delete(conversation.id); void save(conversation); }, 900)); }
 function renderHistory() { historyBox.replaceChildren(); const groups: [string, Conversation[]][] = [['Today', []], ['Yesterday', []], ['Previous 7 days', []], ['Older', []]]; const day = new Date().setHours(0,0,0,0); for (const c of [...conversations].sort((a,b)=>b.updatedAt-a.updatedAt)) { const age = day - new Date(c.updatedAt).setHours(0,0,0,0); groups[age <= 0 ? 0 : age <= 86400000 ? 1 : age <= 7 * 86400000 ? 2 : 3]![1].push(c); } for (const [name, items] of groups) { if (!items.length) continue; const g = document.createElement('div'); g.className = 'history-group'; const label=document.createElement('div');label.className='section-label';label.textContent=name;g.append(label); for (const c of items) { const b = document.createElement('button'); b.className = `conversation${current?.id === c.id ? ' current' : ''}`; b.dataset.id = c.id; b.textContent = c.title; b.title = 'Right click to delete'; b.onclick = () => { activeView = 'Chat'; updateActiveNav('Chat'); voiceControls.changedConversation(); storeCanvasSession(); current = c; switchCanvasConversation(c.id); chatMode = 'chat'; updateChatModeUi(); renderMessages(true); renderHistory(); void window.orion.saveConversation(c, true).then(() => renderMemoryUsage()); }; g.append(b); } historyBox.append(g); } }
@@ -541,8 +551,83 @@ function appendCompatibilityCheck(card: HTMLElement, modelId: string) {
     card.append(result);
   }
 }
+function assessModelFit(size: number, engine: 'llama.cpp'|'exllamav2'): ModelFit {
+  if (!modelFitResources || size <= 0) return 'unknown';
+  const ramFree = Math.max(0, modelFitResources.totalRamMB - modelFitResources.usedRamMB) / 1024;
+  const vramTotal = modelFitResources.totalVramMB / 1024;
+  const vramUsed = modelFitResources.usedVramMB === null ? vramTotal * .25 : modelFitResources.usedVramMB / 1024;
+  const vramFree = Math.max(0, vramTotal - vramUsed);
+  const weights = size / (1024 ** 3);
+  const gpuNeed = weights * 1.18 + 1.25;
+  const ramNeed = weights * 1.25 + 2;
+  if (vramTotal > 0 && vramFree >= gpuNeed) return 'gpu';
+  if (engine === 'exllamav2') return 'large';
+  if (ramFree >= ramNeed) return vramFree >= 1.5 ? 'hybrid' : 'cpu';
+  return 'large';
+}
+function modelFitLabel(fit: ModelFit) {
+  return fit === 'gpu' ? 'Good fit · GPU' : fit === 'hybrid' ? 'Fits · partial GPU offload' : fit === 'cpu' ? 'Fits · CPU' : fit === 'large' ? 'May exceed free memory' : 'Checking PC fit…';
+}
+function modelQuantLabel(file: HubFile) {
+  if (file.revision) return file.revision;
+  const base = file.name.split('/').at(-1) ?? file.name;
+  return base.match(/(?:^|[._-])((?:I?Q)\d+(?:_[A-Z0-9]+)*)(?:[._-]|$)/i)?.[1] ?? base.replace(/\.(?:gguf|safetensors|ckpt)$/i, '');
+}
+const fitRank: Record<ModelFit,number> = { gpu:0, hybrid:1, cpu:2, unknown:3, large:4 };
+function renderModelFit(card: HTMLElement, summary: ModelSizeSummary) {
+  const engine = browseEngine;
+  const variants = summary.variants.map(variant => ({ ...variant, fit: assessModelFit(variant.size, engine) }));
+  variants.sort((a,b) => fitRank[a.fit] - fitRank[b.fit] || b.size - a.size);
+  const recommendation = variants.find(variant => variant.fit !== 'large' && variant.fit !== 'unknown') ?? variants[0];
+  card.dataset.fit = recommendation?.fit ?? 'unknown';
+  const label = card.querySelector<HTMLElement>('.model-fit-recommendation');
+  if (label) label.textContent = recommendation ? `Best fit: ${recommendation.quant} · ${modelFitLabel(recommendation.fit)} · ${modelSize(recommendation.size)}` : 'No supported quantization found';
+}
+function applyModelBrowserFilters() {
+  const results = document.querySelector<HTMLElement>('.model-results');
+  if (!results || modelTab !== 'conversational') return;
+  const cards = [...results.querySelectorAll<HTMLElement>('.model-card[data-repo]')];
+  for (const card of cards) {
+    const fit = (card.dataset.fit ?? 'unknown') as ModelFit;
+    card.hidden = modelFitFilter === 'fits' ? !['gpu','hybrid','cpu'].includes(fit) : modelFitFilter === 'gpu' ? fit !== 'gpu' : modelFitFilter === 'cpu' ? !['hybrid','cpu'].includes(fit) : modelFitFilter === 'large' ? fit !== 'large' : false;
+  }
+  if ((modelBrowserSort === 'fit' && modelFitResources) || modelBrowserSort === 'popular') {
+    const next = results.querySelector<HTMLElement>('.model-next-page');
+    cards.sort((a,b) => modelBrowserSort === 'fit'
+      ? (fitRank[(a.dataset.fit ?? 'unknown') as ModelFit] ?? 3) - (fitRank[(b.dataset.fit ?? 'unknown') as ModelFit] ?? 3) || Number(b.dataset.downloads ?? 0) - Number(a.dataset.downloads ?? 0)
+      : Number(b.dataset.downloads ?? 0) - Number(a.dataset.downloads ?? 0));
+    for (const card of cards) results.insertBefore(card, next);
+  }
+}
+function ensureModelFitResources() {
+  if (modelFitResources || modelFitResourcesLoading) return;
+  modelFitResourcesLoading = true;
+  void window.orion.getSystemInfo().then(info => {
+    modelFitResources = info;
+    document.querySelectorAll<HTMLSelectElement>('.model-browser-filters select').forEach(select => { select.disabled = false; });
+    const note=document.querySelector<HTMLElement>('.model-fit-note');if(note)note.textContent='Estimates use current free RAM and VRAM. Actual use depends on context length and other apps.';
+    document.querySelectorAll<HTMLElement>('.model-card[data-fit-key]').forEach(card => { const pending=modelCardSizes.get(card.dataset.fitKey??'');if(pending)void pending.then(summary=>{if(card.isConnected){renderModelFit(card,summary);applyModelBrowserFilters();}}); });
+    applyModelBrowserFilters();
+  }).catch(() => { const note=document.querySelector<HTMLElement>('.model-fit-note');if(note)note.textContent='Could not read this PC’s memory. Model estimates will appear when available.'; }).finally(() => { modelFitResourcesLoading = false; });
+}
+function appendModelFileControls(actions: HTMLElement, repo: string, category: ModelCategory, files: HubFile[]) {
+  actions.querySelector('.hub-file-select')?.remove();
+  actions.querySelector('.hub-file-fit')?.remove();
+  actions.querySelector('.hub-model-download')?.remove();
+  const select=document.createElement('select');select.className='hub-file-select';
+  for(const file of files){const size=file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0);const fit=category==='conversational'?assessModelFit(size,browseEngine):'unknown';const option=new Option(`${file.name} · ${modelSize(size)}${file.revision?' · complete EXL2 bundle':file.relatedFiles?.length?` · ${file.relatedFiles.length+1} files`:''}${category==='conversational'?` · ${modelFitLabel(fit)}`:''}`,file.name);option.dataset.fit=fit;option.dataset.size=String(size);select.add(option);}
+  const fit=document.createElement('span');fit.className='hub-file-fit';fit.textContent=category==='conversational'?`${modelFitLabel(assessModelFit(Number(select.selectedOptions[0]?.dataset.size??0),browseEngine))}. Estimate varies with context length and other running apps.`:'';
+  select.onchange=()=>{const option=select.selectedOptions[0];fit.textContent=category==='conversational'?`${modelFitLabel((option?.dataset.fit??'unknown') as ModelFit)} · ${modelSize(Number(option?.dataset.size??0))}. Estimate varies with context length and other running apps.`:'';};
+  const download=document.createElement('button');download.type='button';download.className='primary hub-model-download';download.textContent='Download';download.onclick=()=>void beginModelDownload(repo,select.value,category,download);
+  actions.append(select,fit,download);
+}
 function renderModelsView() {
   const restoreScrollTop = chatScroller.scrollTop;
+  const oldScrollerRect = chatScroller.getBoundingClientRect();
+  const oldCards = [...chatBox.querySelectorAll<HTMLElement>('.model-card[data-repo]')];
+  const scrollAnchor = oldCards.find(card => card.getBoundingClientRect().bottom > oldScrollerRect.top);
+  const scrollAnchorRepo = scrollAnchor?.dataset.repo;
+  const scrollAnchorOffset = scrollAnchor ? scrollAnchor.getBoundingClientRect().top - oldScrollerRect.top : 0;
   if(modelTab !== 'providers' && hfTokenConfigured===null&&!hfTokenConfigLoading){hfTokenConfigLoading=true;void window.orion.getHuggingFaceTokenConfigured().then(configured=>{hfTokenConfigured=configured;hfTokenConfigLoading=false;if(activeView==='Models' && modelTab !== 'providers')renderModelsView();}).catch(()=>{hfTokenConfigured=false;hfTokenConfigLoading=false;});}
   document.body.classList.add('models-view'); document.body.classList.remove('create-view');
   $('model-selector-wrap').hidden = true; $('create-composer-wrap').hidden = true;
@@ -566,19 +651,42 @@ function renderModelsView() {
     }
     const browseCategory=modelTab==='conversational'?'conversational':creativeCategory;
     const browseCacheKey=`${browseCategory}|${browseCategory==='conversational'?browseEngine:'default'}`;
-    if (modelTab==='conversational') { const enginesRow=document.createElement('div'); enginesRow.className='model-tabs model-subtabs model-engine-tabs'; for (const [value,label] of [['llama.cpp','#llama.cpp · GGUF models'],['exllamav2','#exllamav2 · EXL2 models']] as const) { const b=document.createElement('button');b.type='button';b.className=`model-tab${browseEngine===value?' active':''}`;b.textContent=label;b.title=`Browse models for the managed ${value} engine`;b.onclick=()=>{if(browseEngine!==value){hubModels=[];hubNextUrl=null;modelQuery='';activeHubRepo='';activeHubFiles=[];}browseEngine=value;void renderModelsView();void loadPopularHubModels('conversational');};enginesRow.append(b);} page.append(enginesRow); }
+    if (modelTab==='conversational') {
+      ensureModelFitResources();
+      const enginesRow=document.createElement('div'); enginesRow.className='model-tabs model-subtabs model-engine-tabs';
+      for (const [value,label] of [['llama.cpp','#llama.cpp · GGUF models'],['exllamav2','#exllamav2 · EXL2 models']] as const) { const b=document.createElement('button');b.type='button';b.className=`model-tab${browseEngine===value?' active':''}`;b.textContent=label;b.title=`Browse models for the managed ${value} engine`;b.onclick=()=>{if(browseEngine!==value){hubModels=[];hubNextUrl=null;modelQuery='';activeHubRepo='';activeHubFiles=[];}browseEngine=value;void renderModelsView();void loadPopularHubModels('conversational');};enginesRow.append(b);}
+      page.append(enginesRow);
+      const filters=document.createElement('div');filters.className='model-browser-filters';
+      const fitLabel=document.createElement('label');fitLabel.textContent='Hardware fit';const fitSelect=document.createElement('select');fitSelect.setAttribute('aria-label','Filter by estimated hardware fit');fitSelect.innerHTML='<option value="all">All models</option><option value="fits">Fits this PC</option><option value="gpu">Good GPU fit</option><option value="cpu">CPU or partial GPU fit</option><option value="large">May exceed memory</option>';fitSelect.value=modelFitFilter;fitSelect.disabled=!modelFitResources;fitSelect.onchange=()=>{modelFitFilter=fitSelect.value as typeof modelFitFilter;applyModelBrowserFilters();};fitLabel.append(fitSelect);
+      const sortLabel=document.createElement('label');sortLabel.textContent='Sort';const sortSelect=document.createElement('select');sortSelect.setAttribute('aria-label','Sort model results');sortSelect.innerHTML='<option value="popular">Most popular</option><option value="fit">Best fit for this PC</option>';sortSelect.value=modelBrowserSort;sortSelect.disabled=!modelFitResources&&modelBrowserSort==='fit';sortSelect.onchange=()=>{modelBrowserSort=sortSelect.value as typeof modelBrowserSort;applyModelBrowserFilters();};sortLabel.append(sortSelect);
+      const note=document.createElement('span');note.className='model-fit-note';note.textContent=modelFitResources?'Estimates use current free RAM and VRAM. Actual use depends on context length and other apps.':'Reading current RAM and VRAM…';
+      filters.append(fitLabel,sortLabel,note);page.append(filters);
+    }
     const search = document.createElement('div'); search.className = 'model-search'; const input=document.createElement('input'); input.placeholder = modelTab==='conversational' ? (browseEngine==='exllamav2'?'Search Hugging Face chat models (e.g. EXL2)':'Search Hugging Face chat models (e.g. Qwen GGUF)') : `Search Hugging Face ${creativeCategory} models`; input.value = modelQuery; input.oninput=()=>{modelQuery=input.value;};
     const searchButton=document.createElement('button');searchButton.type='button';searchButton.className='primary';searchButton.textContent='Search';searchButton.onclick=async()=>{modelQuery=input.value.trim();hubModels=[];hubNextUrl=null;popularHubRequest++;popularHubLoading=null;popularHubError='';results.replaceChildren();results.textContent='Searching Hugging Face…';try{const found=await window.orion.searchHub(modelQuery,browseCategory,null,browseCategory==='conversational'?browseEngine:undefined);hubModels=found.models;hubNextUrl=found.nextUrl;await renderModelsView();}catch(error){results.textContent=`Search failed: ${error instanceof Error?error.message:String(error)}`;}};
     input.id='hub-query'; input.addEventListener('keydown',e=>{if(e.key==='Enter')searchButton.click();}); search.append(input,searchButton); page.append(search);
     const popularLabel=document.createElement('p');popularLabel.className='muted hub-popular-label';popularLabel.textContent=modelQuery?'Search results':'Popular on Hugging Face · sorted by downloads';page.append(popularLabel);
     if (hubModels.length) for (const model of hubModels) {
-      const card=document.createElement('article');card.className='model-card';card.dataset.repo=model.id;const top=document.createElement('div');top.className='model-card-top';const name=document.createElement('h2');name.textContent=model.id==='QuantStack/Wan2.2-TI2V-5B-GGUF'?'Wan 2.2 TI2V 5B':model.id;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=modelTab==='creative'?'Hugging Face repository':model.pipelineTag??'Hugging Face';top.append(name,badge);card.append(top);
+      const card=document.createElement('article');card.className='model-card';card.dataset.repo=model.id;card.dataset.fit='unknown';const top=document.createElement('div');top.className='model-card-top';const name=document.createElement('h2');name.textContent=model.id==='QuantStack/Wan2.2-TI2V-5B-GGUF'?'Wan 2.2 TI2V 5B':model.id;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=modelTab==='creative'?'Hugging Face repository':model.pipelineTag??'Hugging Face';top.append(name,badge);card.append(top);
       if (model.engines?.length) { const tags=document.createElement('div'); tags.className='model-tags'; for (const engine of model.engines) { const chip=document.createElement('span'); chip.className=`model-engine-tag${browseEngine===engine?' active':''}`; chip.textContent=`#${engine}`; chip.title=`Runs on the managed ${engine} engine`; tags.append(chip); } card.append(tags); }
-      const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=`${(model.downloads??0).toLocaleString()} downloads${model.likes?` · ${model.likes.toLocaleString()} likes`:''}${model.license?` · License: ${model.license}`:''}${model.description?` · ${model.description.slice(0,180)}`:''}`;card.append(meta);const size=document.createElement('p');size.className='model-download-size';size.textContent='Checking supported download size…';card.append(size);const sizeKey=`${model.id}|${modelTab==='conversational'?'conversational':creativeCategory}`;let sizePromise=modelCardSizes.get(sizeKey);if(!sizePromise){sizePromise=window.orion.getHubFiles(model.id,modelTab==='conversational'?'conversational':creativeCategory).then(files=>{const seen=new Set<string>();let total=0;let quantizations=0;for(const f of files){if(!seen.has(f.name)){seen.add(f.name);total+=f.size;}if(f.revision)quantizations++;if(!f.revision)for(const shard of f.relatedFiles??[])if(!seen.has(shard.name)){seen.add(shard.name);total+=shard.size;}}return{total,count:files.length,quantizations};});modelCardSizes.set(sizeKey,sizePromise);}void sizePromise.then(({total,count,quantizations})=>{if(!size.isConnected)return;size.textContent=modelTab==='conversational'?(quantizations?`${quantizations} EXL2 quantization${quantizations===1?'':'s'}${count>quantizations?` · ${count-quantizations} GGUF file${count-quantizations===1?'':'s'}`:''} · ${modelSize(total)} total`:`Available GGUF files · ${modelSize(total)} total`):count?`${count===1?'Supported download':'Supported downloads'} · ${modelSize(total)}`:'No complete supported bundle available';}).catch(()=>{if(size.isConnected)size.textContent='Download size unavailable';});
+      card.dataset.downloads=String(model.downloads??0);
+      const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=`${(model.downloads??0).toLocaleString()} downloads${model.likes?` · ${model.likes.toLocaleString()} likes`:''}${model.license?` · License: ${model.license}`:''}${model.description?` · ${model.description.slice(0,180)}`:''}`;card.append(meta);
+      const size=document.createElement('p');size.className='model-download-size';size.textContent='Checking supported download size…';card.append(size);
+      const fit=document.createElement('p');fit.className='model-fit-recommendation';fit.textContent='Checking model quantizations against this PC…';if(modelTab==='conversational')card.append(fit);
+      const sizeKey=`${model.id}|${modelTab==='conversational'?'conversational':creativeCategory}`;if(modelTab==='conversational')card.dataset.fitKey=sizeKey;
+      let sizePromise=modelCardSizes.get(sizeKey);
+      if(!sizePromise){sizePromise=window.orion.getHubFiles(model.id,modelTab==='conversational'?'conversational':creativeCategory).then(files=>{
+        const seen=new Set<string>();let total=0;let quantizations=0;
+        for(const f of files){if(!seen.has(f.name)){seen.add(f.name);total+=f.revision?f.size:f.size+(f.relatedFiles??[]).reduce((sum,file)=>sum+(seen.has(file.name)?0:file.size),0);}if(f.revision)quantizations++;if(!f.revision)for(const shard of f.relatedFiles??[])seen.add(shard.name);}
+        const variants=files.map(file=>({name:file.name,size:file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0),...(file.revision?{revision:file.revision}:{}),fit:assessModelFit(file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0),browseEngine),quant:modelQuantLabel(file)}));
+        const ordered=[...variants].sort((a,b)=>fitRank[a.fit]-fitRank[b.fit]||b.size-a.size);
+        return{total,count:files.length,quantizations,variants,bestFit:ordered[0]?.fit??'unknown',recommendation:ordered[0]};
+      });modelCardSizes.set(sizeKey,sizePromise);}
+      void sizePromise.then(summary=>{if(!size.isConnected)return;size.textContent=modelTab==='conversational'?(summary.quantizations?`${summary.quantizations} EXL2 quantization${summary.quantizations===1?'':'s'}${summary.count>summary.quantizations?` · ${summary.count-summary.quantizations} GGUF file${summary.count-summary.quantizations===1?'':'s'}`:''} · ${modelSize(summary.total)} total`:`Available GGUF files · ${modelSize(summary.total)} total`):summary.count?`${summary.count===1?'Supported download':'Supported downloads'} · ${modelSize(summary.total)}`:'No complete supported bundle available';if(modelTab==='conversational'){renderModelFit(card,summary);applyModelBrowserFilters();}}).catch(()=>{if(size.isConnected){size.textContent='Download size unavailable';fit.textContent='Hardware fit unavailable';}});
       const actions=document.createElement('div');actions.className='model-actions';
       const downloadCategory=modelTab==='conversational'?'conversational':creativeCategory;
-      const filesButton=document.createElement('button');filesButton.type='button';filesButton.className='secondary';filesButton.textContent=activeHubRepo===model.id?'Reload files':modelTab==='conversational'?'Choose quantization / file':creativeCategory==='video'?'View supported Wan bundle':'View Stable Diffusion checkpoints';filesButton.onclick=async()=>{activeHubRepo=model.id;activeHubFiles=[];try{activeHubFiles=await window.orion.getHubFiles(model.id,downloadCategory);activeHubFiles=activeHubFiles.filter(file=>modelTab==='conversational'?Boolean(file.revision)||/\.gguf$/i.test(file.name):creativeCategory==='image'?/\.(safetensors|ckpt|gguf)$/i.test(file.name):/\.(safetensors|ckpt|gguf)$/i.test(file.name));if(!activeHubFiles.length&&modelTab==='creative')showNotice(creativeCategory==='video'?'This repository does not have a complete Wan bundle supported by Orion yet.':'This repository contains no complete, single-file Stable Diffusion checkpoint supported by Orion.');await renderModelsView();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not list model files');}};actions.append(filesButton);
-      if(activeHubRepo===model.id&&activeHubFiles.length){const select=document.createElement('select');select.className='hub-file-select';for(const file of activeHubFiles){const option=new Option(`${file.name} · ${modelSize(file.size)}${file.revision?' · complete EXL2 bundle':file.relatedFiles?.length?` · ${file.relatedFiles.length+1} files`:''}`,file.name);select.add(option);}const download=document.createElement('button');download.type='button';download.className='primary';download.textContent='Download';download.onclick=()=>void beginModelDownload(model.id,select.value,downloadCategory,download);actions.append(select,download);}
+      const filesButton=document.createElement('button');filesButton.type='button';filesButton.className='secondary';filesButton.textContent=activeHubRepo===model.id?'Reload files':modelTab==='conversational'?'Choose quantization / file':creativeCategory==='video'?'View supported Wan bundle':'View Stable Diffusion checkpoints';filesButton.onclick=async()=>{activeHubRepo=model.id;filesButton.disabled=true;filesButton.textContent='Loading files…';try{activeHubFiles=await window.orion.getHubFiles(model.id,downloadCategory);activeHubFiles=activeHubFiles.filter(file=>modelTab==='conversational'?Boolean(file.revision)||/\.gguf$/i.test(file.name):/\.(safetensors|ckpt|gguf)$/i.test(file.name));if(!activeHubFiles.length&&modelTab==='creative')showNotice(creativeCategory==='video'?'This repository does not have a complete Wan bundle supported by Orion yet.':'This repository contains no complete, single-file Stable Diffusion checkpoint supported by Orion.');else appendModelFileControls(actions,model.id,downloadCategory,activeHubFiles);}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not list model files');}finally{filesButton.disabled=false;filesButton.textContent='Reload files';}};actions.append(filesButton);
+      if(activeHubRepo===model.id&&activeHubFiles.length)appendModelFileControls(actions,model.id,downloadCategory,activeHubFiles);
       card.append(actions);const inlineProgress=document.createElement('div');inlineProgress.className='model-download-progress';inlineProgress.hidden=true;const progressText=document.createElement('div');progressText.className='download-detail';const progressBar=document.createElement('progress');const cancelDownload=document.createElement('button');cancelDownload.type='button';cancelDownload.className='download-cancel';cancelDownload.textContent='Cancel download';cancelDownload.onclick=()=>{const active=[...downloadProgress.values()].find(item=>item.repo===model.id&&item.phase==='downloading');if(active){cancellingModelDownloads.add(active.id);cancelDownload.disabled=true;cancelDownload.textContent='Cancelling…';void window.orion.cancelModelDownload(active.id);}};inlineProgress.append(progressText,progressBar,cancelDownload);card.append(inlineProgress);results.append(card);
     } else if (popularHubLoading===browseCacheKey) { const hint=document.createElement('p');hint.className='muted model-hint';hint.textContent='Loading popular models from Hugging Face…';results.append(hint); }
     else if (popularHubError) { const hint=document.createElement('p');hint.className='muted model-hint';hint.textContent=`Could not load popular models: ${popularHubError}. Search Hugging Face above to retry.`;results.append(hint); }
@@ -586,15 +694,15 @@ function renderModelsView() {
     if (hubNextUrl) { const next=document.createElement('button');next.type='button';next.className='secondary model-next-page';next.textContent=hubNextLoading?'Loading next page…':'Load next page';next.disabled=hubNextLoading;next.onclick=async()=>{if(!hubNextUrl||hubNextLoading)return;hubNextLoading=true;const previousHeight=chatScroller.scrollHeight;void renderModelsView();try{const found=await window.orion.searchHub(modelQuery,browseCategory,hubNextUrl,browseCategory==='conversational'?browseEngine:undefined);hubModels=[...hubModels,...found.models];hubNextUrl=found.nextUrl;if(!modelQuery)popularHubCache.set(browseCacheKey,{models:hubModels,nextUrl:hubNextUrl});}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not load next model page');}finally{hubNextLoading=false;void renderModelsView();requestAnimationFrame(()=>{if(hubModels.length)chatScroller.scrollTop=previousHeight;});}};results.append(next); }
   } else {
     const refresh=document.createElement('button');refresh.type='button';refresh.className='secondary';refresh.textContent='Refresh installed models';refresh.onclick=async()=>{installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();};page.append(refresh);
-    if(!managedLlamaInstalled||!managedExl2Installed){const setup=document.createElement('section');setup.className='create-setup-card model-engine-setup';const title=document.createElement('h2');title.textContent='Managed model engines';const detail=document.createElement('p');detail.textContent='Orion installs private, managed runtimes for downloaded models. llama.cpp runs GGUF models on the CPU or GPU; ExLlamaV2 runs EXL2 models on NVIDIA GPUs.';const actions=document.createElement('div');actions.className='model-actions';
-    if(!managedLlamaInstalled){const b=document.createElement('button');b.type='button';b.className='primary';b.textContent='Install llama.cpp';b.onclick=async()=>{b.disabled=true;b.textContent='Installing llama.cpp…';try{await window.orion.installLlama();await refreshLlamaStatus();showNotice('The managed llama.cpp runtime is ready. Download a GGUF model from Models to get started.','Setup complete');}catch(error){showNotice(error instanceof Error?error.message:String(error),'llama.cpp setup failed');}finally{if(activeView==='Models'&&modelTab==='manage')renderModelsView();}};actions.append(b);}
-    if(!managedExl2Installed){const b=document.createElement('button');b.type='button';b.className='primary';b.title='Requires an NVIDIA GPU';b.textContent='Install ExLlamaV2';b.onclick=async()=>{b.disabled=true;b.textContent='Installing ExLlamaV2…';try{await window.orion.installExl2();await refreshExl2Status();showNotice('The managed ExLlamaV2 runtime is ready. Download an EXL2 model from Models to get started.','Setup complete');}catch(error){showNotice(error instanceof Error?error.message:String(error),'ExLlamaV2 setup failed');}finally{if(activeView==='Models'&&modelTab==='manage')renderModelsView();}};actions.append(b);}
-    setup.append(title,detail,actions);page.append(setup);}
     const all=[...installedModels.map(model=>({id:model.id,name:model.invokeKey?model.file:model.repo,file:model.invokeKey?'Managed by native image/video engine':model.engine==='exllamav2'?`EXL2 · ${model.file}`:model.file,size:model.size,origin:model.engine==='exllamav2'?'Orion · ExLlamaV2':'Orion',category:model.category==='conversational'?'conversational':'creative'})),...models.filter(model=>model.source!=='orion' && model.source!=='api').map(model=>({id:model.name,name:model.name,file:'',size:model.size,origin:'Ollama',category:'conversational'}))];
     all.sort((a,b)=>a.category===b.category?0:a.category==='conversational'?-1:1);
     if(!all.length){results.textContent='No models are installed yet.';} else { let currentCategory=''; for(const item of all){if(currentCategory!==item.category){currentCategory=item.category;const sectionTitle=document.createElement('h2');sectionTitle.className='model-manage-heading';sectionTitle.textContent=currentCategory==='conversational'?'Conversational models':'Image / video models';results.append(sectionTitle);}const card=document.createElement('article');card.className='model-card';const top=document.createElement('div');top.className='model-card-top';const title=document.createElement('h2');title.textContent=item.name;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=item.origin;top.append(title,badge);card.append(top);const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=[item.file,modelSize(item.size)].filter(Boolean).join(' · ');card.append(meta);const del=document.createElement('button');del.type='button';del.className='secondary danger-button';del.textContent='Delete model';del.onclick=async()=>{if(!(await askConfirm(`Delete ${item.name} from this device?`, 'Delete model')))return;try{if(item.origin==='Ollama')await window.orion.deleteOllamaModel(item.id);else await window.orion.deleteInstalledModel(item.id);installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not delete model');}};del.disabled=Boolean(checkingModelId);card.append(del);if(item.origin==='Orion'&&item.category==='conversational')appendCompatibilityCheck(card,item.id);results.append(card);} }
   }
-  page.append(results); chatBox.append(page); requestAnimationFrame(()=>{chatScroller.scrollTop=restoreScrollTop;});
+  page.append(results); chatBox.append(page); requestAnimationFrame(()=>{
+    const anchor = scrollAnchorRepo ? [...chatBox.querySelectorAll<HTMLElement>('.model-card[data-repo]')].find(card => card.dataset.repo === scrollAnchorRepo) : undefined;
+    if (anchor) chatScroller.scrollTop += anchor.getBoundingClientRect().top - chatScroller.getBoundingClientRect().top - scrollAnchorOffset;
+    else chatScroller.scrollTop=restoreScrollTop;
+  });
 }
 function renderCreateView() {
   document.body.classList.add('create-view'); document.body.classList.remove('models-view');

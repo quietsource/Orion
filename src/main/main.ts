@@ -1111,7 +1111,7 @@ async function downloadExl2Bundle(repo: string, selection: HubFile): Promise<Ins
       await fs.rename(target.temporary, target.target);
       finalized.push(target.target);
     }
-    const installed: InstalledModel = { id: selectionId, repo, file: selection.name, category: 'conversational', path: targets[0]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now(), engine: 'exllamav2', revision };
+    const installed: InstalledModel = { id: selectionId, repo, file: selection.name, category: 'conversational', path: targets.find(target => target.name === 'config.json')!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now(), engine: 'exllamav2', revision };
     await fs.mkdir(root, { recursive: true });
     await serializeMutation('models', async () => {
       const all = await readInstalledModels(), previous = all.find(item => item.id === installed.id);
@@ -1274,7 +1274,7 @@ ipcMain.handle('models:check-compatibility', async (event, id: string) => {
     const root = path.resolve(modelsRoot());
     if (model.engine === 'exllamav2') {
       if (!await exllamaManager.isInstalled()) throw new Error('Install Orion’s managed ExLlamaV2 engine first.');
-      const modelDirectory = path.dirname(path.resolve(root, model.path));
+      const modelDirectory = exl2ModelDirectory(model, root);
       if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
       return await exllamaManager.checkCompatibility(modelDirectory, Math.min((await getSettings()).contextWindow, 4096));
     }
@@ -1538,6 +1538,15 @@ function modelMmprojPath(item: InstalledModel, root: string) {
   return companion ? path.resolve(root, companion) : undefined;
 }
 
+function exl2ModelDirectory(item: InstalledModel, root: string) {
+  // Older nightly indexes stored an arbitrary weight file as `path`; resolve
+  // the model root from config.json so every EXL2 entry launches consistently.
+  const config = item.files?.find(file => path.basename(file).toLowerCase() === 'config.json');
+  const candidate = path.dirname(path.resolve(root, config ?? item.path));
+  if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
+  return candidate;
+}
+
 async function prepareModelToolSupport(model: string, context: number, loadManaged = (modelPath: string, context: number, mmproj?: string) => llamaManager.ensureServer(modelPath, context, mmproj), loadExl2 = (modelDirectory: string, context: number) => exllamaManager.ensureServer(modelDirectory, context)): Promise<string | undefined> {
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before loading a chat model.');
   const key = `${settingsCache.ollamaUrl}\0${model}`;
@@ -1545,7 +1554,7 @@ async function prepareModelToolSupport(model: string, context: number, loadManag
     const id = model.slice('orion-exl2:'.length);
     const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
     if (!installed) { installedToolSupport.set(key, false); return undefined; }
-    const root = path.resolve(modelsRoot()), modelDirectory = path.dirname(path.resolve(root, installed.path));
+    const root = path.resolve(modelsRoot()), modelDirectory = exl2ModelDirectory(installed, root);
     if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
     // EXL2 models use Orion's text-based tool protocol; no native tool template.
     installedToolSupport.set(key, false);
@@ -1663,7 +1672,7 @@ async function withMediaModelHandoffLocked<T>(model: string, context: number, op
       if (!installed) throw new Error('The active Orion chat model is no longer installed.');
       const root = path.resolve(modelsRoot());
       if (installed.engine === 'exllamav2') {
-        const modelDirectory = path.dirname(path.resolve(root, installed.path));
+        const modelDirectory = exl2ModelDirectory(installed, root);
         if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
         await exllamaManager.stop();
         restore = async () => { await exllamaManager.ensureServer(modelDirectory, context); };
@@ -2169,7 +2178,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       const modelRoot = path.resolve(modelsRoot());
       const modelPath = routedEngine === 'exllamav2' ? path.dirname(path.resolve(modelRoot, managed?.path ?? '.')) : path.resolve(modelRoot, managed?.path ?? '.');
       if (!remote && !modelPath.startsWith(`${modelRoot}${path.sep}`)) throw new Error('The selected model path is invalid.');
-      const managedEndpoint = async () => `${await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
+      const managedEndpoint = async () => `${await (routedEngine === 'exllamav2' ? exllamaManager.ensureServer(modelPath, contextBudget) : loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot)))}/v1/chat/completions`;
       let repeatedLoopDetected = false;
       for (;;) {
         if (toolRounds++ >= 20) { event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: '\n\nI stopped this run after 20 tool rounds so it would not loop indefinitely. The tool results above are available if you want me to continue from them.' }); break; }
