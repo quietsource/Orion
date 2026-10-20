@@ -9,7 +9,7 @@ import { isModelCompatibilityError } from './llama';
 
 type Asset = { name: string; size: number; browser_download_url: string };
 type Release = { tag_name: string; prerelease: boolean; assets: Asset[] };
-type Exl2State = { version: string; cuda: string; torch: string; python: string; gpu: string; backend: 'cuda'; uvBinary: string; pythonBin: string; envDirectory: string; serverScript: string };
+type Exl2State = { version: string; cuda: string; torch: string; python: string; gpu: string; backend: 'cuda'; uvBinary: string; pythonBin: string; envDirectory: string; serverScript: string; runtimeDependencies?: number };
 type DownloadSink = (progress: DownloadProgress) => void;
 
 // Prebuilt ExLlamaV2 wheels are keyed by CUDA tier, torch version and Python
@@ -355,11 +355,43 @@ export class ExllamaManager {
   constructor(dataRoot: string, emit: DownloadSink) { this.root = path.join(dataRoot, 'orion', 'backends', 'exllamav2'); this.stateFile = path.join(this.root, 'orion-state.json'); this.emit = emit; }
   get directory() { return this.root; }
   private report(id: string, file: string, received: number, total: number, phase: DownloadProgress['phase'], error?: string) { this.emit({ id, repo: 'Orion ExLlamaV2', file, received, total, phase, ...(error ? { error } : {}) }); }
-  private async loadState() { if (this.state) return this.state; try { this.state = JSON.parse(await fs.readFile(this.stateFile, 'utf8')) as Exl2State; return this.state; } catch { return null; } }
+  private async loadState() {
+    if (this.state) return this.state;
+    try {
+      const state = JSON.parse(await fs.readFile(this.stateFile, 'utf8')) as Exl2State;
+      const uvName = process.platform === 'win32' ? 'uv.exe' : 'uv';
+      const sharedUvRoot = path.join(path.dirname(this.root), 'uv');
+      let sharedUv = await this.findBinary(sharedUvRoot, uvName);
+      if (!sharedUv) {
+        // Older nightly installs kept a private uv copy in this backend.
+        // Copy it into Orion's shared runtime location before starting it.
+        const legacyUvRoot = path.join(this.root, 'uv');
+        if (await this.findBinary(legacyUvRoot, uvName)) {
+          await fs.mkdir(path.dirname(sharedUvRoot), { recursive: true });
+          await fs.cp(legacyUvRoot, sharedUvRoot, { recursive: true, force: false, errorOnExist: false }).catch(() => undefined);
+          sharedUv = await this.findBinary(sharedUvRoot, uvName);
+        }
+      }
+      if (sharedUv && state.uvBinary !== sharedUv) {
+        state.uvBinary = sharedUv;
+        await fs.writeFile(this.stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
+      }
+      this.state = state;
+      return state;
+    } catch { return null; }
+  }
   private markerFile() { return path.join(this.root, 'installed.ok'); }
+  private async ensureRuntimeDependencies(state: Exl2State) {
+    if (state.runtimeDependencies === 2) return;
+    const dependencies = await run(state.uvBinary, ['pip', 'install', '--python', state.pythonBin, 'setuptools', 'wheel', 'jinja2', 'tokenizers'], 20 * 60_000);
+    if (dependencies.code !== 0) throw new Error(`Could not repair the ExLlamaV2 Python runtime dependencies: ${(dependencies.stderr || dependencies.stdout).slice(-1200)}`);
+    state.runtimeDependencies = 2;
+    await fs.writeFile(this.stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
+  }
   async isInstalled() {
     const state = await this.loadState();
-    return Boolean(state && await fs.access(state.pythonBin).then(() => true, () => false) && await fs.access(this.markerFile()).then(() => true, () => false));
+    if (!state || !await fs.access(state.pythonBin).then(() => true, () => false) || !await fs.access(this.markerFile()).then(() => true, () => false)) return false;
+    try { await this.ensureRuntimeDependencies(state); return true; } catch { return false; }
   }
   private async gpuHardware(): Promise<{ label: string; driverMajor: number }> {
     const candidates = process.platform === 'win32'
@@ -426,26 +458,39 @@ export class ExllamaManager {
     const installId = randomUUID();
     await fs.mkdir(this.root, { recursive: true });
     this.report(installId, 'Preparing the managed ExLlamaV2 runtime', 0, 0, 'downloading');
-    const uvRoot = path.join(this.root, 'uv');
-    await fs.rm(uvRoot, { recursive: true, force: true });
-    const uvAsset = process.platform === 'win32' ? 'uv-x86_64-pc-windows-msvc.zip' : 'uv-x86_64-unknown-linux-gnu.tar.gz';
-    const uvArchive = await this.fetchToFile(`https://github.com/astral-sh/uv/releases/latest/download/${uvAsset}`, path.join(this.root, uvAsset), installId, uvAsset);
+    // Keep one Orion-managed uv installation shared by Python-backed engines,
+    // instead of downloading a private copy inside the ExLlamaV2 folder.
+    const uvRoot = path.join(path.dirname(this.root), 'uv');
+    const uvName = process.platform === 'win32' ? 'uv.exe' : 'uv';
     await fs.mkdir(uvRoot, { recursive: true });
-    const unpacked = await run('tar', ['-xf', uvArchive, '-C', uvRoot], 10 * 60 * 1000);
-    if (unpacked.code !== 0) throw new Error(`Could not unpack the Python environment manager: ${unpacked.stderr.slice(-800)}`);
-    await fs.rm(uvArchive, { force: true });
-    const uvBinary = (await this.findBinary(uvRoot, process.platform === 'win32' ? 'uv.exe' : 'uv'));
-    if (!uvBinary) throw new Error('The downloaded Python environment manager is incomplete.');
+    let uvBinary = await this.findBinary(uvRoot, uvName);
+    if (!uvBinary) {
+      await fs.rm(uvRoot, { recursive: true, force: true });
+      await fs.mkdir(uvRoot, { recursive: true });
+      const uvAsset = process.platform === 'win32' ? 'uv-x86_64-pc-windows-msvc.zip' : 'uv-x86_64-unknown-linux-gnu.tar.gz';
+      const uvArchive = await this.fetchToFile(`https://github.com/astral-sh/uv/releases/latest/download/${uvAsset}`, path.join(uvRoot, uvAsset), installId, uvAsset);
+      const unpacked = await run('tar', ['-xf', uvArchive, '-C', uvRoot], 10 * 60 * 1000);
+      if (unpacked.code !== 0) throw new Error(`Could not unpack Orion's Python environment manager: ${(unpacked.stderr || unpacked.stdout).slice(-800)}`);
+      await fs.rm(uvArchive, { force: true });
+      uvBinary = await this.findBinary(uvRoot, uvName);
+    }
+    if (!uvBinary) throw new Error("Orion's shared uv installation is incomplete.");
     const envDirectory = path.join(this.root, 'env');
     const pythonBin = process.platform === 'win32' ? path.join(envDirectory, 'Scripts', 'python.exe') : path.join(envDirectory, 'bin', 'python');
     await fs.rm(envDirectory, { recursive: true, force: true }).catch(() => undefined);
     const venv = await run(uvBinary, ['venv', envDirectory, '--python', EXL2_PYTHON], 20 * 60_000);
     if (venv.code !== 0) throw new Error(`Could not prepare the managed Python environment: ${(venv.stderr || venv.stdout).slice(-1200)}`);
+    // torch.utils.cpp_extension imports setuptools even when ExLlamaV2 is
+    // installed from its prebuilt wheel. uv-created environments do not
+    // include setuptools, so provision the runtime dependency explicitly
+    // before installing or importing either package.
+    const buildTools = await run(uvBinary, ['pip', 'install', '--python', pythonBin, 'setuptools', 'wheel'], 15 * 60_000);
+    if (buildTools.code !== 0) throw new Error(`Could not install the ExLlamaV2 Python support packages: ${(buildTools.stderr || buildTools.stdout).slice(-1200)}`);
     this.report(installId, `PyTorch ${tier.torch} (${tier.cuda.toUpperCase()} · several GB, no progress available)`, 0, 0, 'downloading');
     const torch = await run(uvBinary, ['pip', 'install', '--python', pythonBin, `torch==${tier.torch}`, '--index-url', tier.index], 90 * 60_000);
     if (torch.code !== 0) throw new Error(`Could not install PyTorch: ${(torch.stderr || torch.stdout).slice(-1600)}`);
-    const jinja = await run(uvBinary, ['pip', 'install', '--python', pythonBin, 'jinja2'], 15 * 60_000);
-    if (jinja.code !== 0) throw new Error(`Could not install the chat template renderer: ${(jinja.stderr || jinja.stdout).slice(-1200)}`);
+    const runtimePackages = await run(uvBinary, ['pip', 'install', '--python', pythonBin, 'jinja2', 'tokenizers'], 15 * 60_000);
+    if (runtimePackages.code !== 0) throw new Error(`Could not install the ExLlamaV2 runtime packages: ${(runtimePackages.stderr || runtimePackages.stdout).slice(-1200)}`);
     const releaseResponse = await fetch('https://api.github.com/repos/turboderp/exllamav2/releases/latest', { headers: { 'user-agent': 'Orion-Local-AI/0.1', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30000) });
     if (!releaseResponse.ok) throw new Error(`Could not check ExLlamaV2 releases (${releaseResponse.status}).`);
     const release = await releaseResponse.json() as Release;
@@ -456,9 +501,9 @@ export class ExllamaManager {
     if (wheelInstall.code !== 0) throw new Error(`Could not install ExLlamaV2: ${(wheelInstall.stderr || wheelInstall.stdout).slice(-1600)}`);
     const serverScript = path.join(this.root, 'orion-exl2-server.py');
     await fs.writeFile(serverScript, EXL2_SERVER_SCRIPT, { mode: 0o600 });
-    const verify = await run(pythonBin, ['-c', 'import exllamav2, jinja2; print(exllamav2.__version__)'], 120_000);
+    const verify = await run(uvBinary, ['run', '--python', pythonBin, '--no-project', 'python', '-c', 'import setuptools; from torch.utils.cpp_extension import load; import exllamav2, jinja2; print(exllamav2.__version__)'], 120_000);
     if (verify.code !== 0) throw new Error(`The ExLlamaV2 runtime failed verification: ${(verify.stderr || verify.stdout).slice(-1200)}`);
-    this.state = { version: verify.stdout.trim() || EXL2_VERSION, cuda: tier.cuda, torch: tier.torch, python: EXL2_PYTHON, gpu: `${gpu.label} (driver ${gpu.driverMajor})`, backend: 'cuda', uvBinary, pythonBin, envDirectory, serverScript };
+    this.state = { version: verify.stdout.trim() || EXL2_VERSION, cuda: tier.cuda, torch: tier.torch, python: EXL2_PYTHON, gpu: `${gpu.label} (driver ${gpu.driverMajor})`, backend: 'cuda', uvBinary, pythonBin, envDirectory, serverScript, runtimeDependencies: 2 };
     await fs.writeFile(this.stateFile, JSON.stringify(this.state, null, 2), { mode: 0o600 });
     await fs.writeFile(this.markerFile(), 'seen', { mode: 0o600 });
     this.report(installId, 'Managed ExLlamaV2 runtime', 1, 1, 'complete');
@@ -476,6 +521,7 @@ export class ExllamaManager {
     if (!await fs.stat(modelDirectory).then(stat => stat.isDirectory(), () => false)) throw new Error('The selected EXL2 model folder is missing. Re-download it from Models.');
     const state = await this.loadState() ?? (await this.install(), await this.loadState());
     if (!state) throw new Error('The ExLlamaV2 backend did not install.');
+    await this.ensureRuntimeDependencies(state);
     check();
     if (this.process && this.process.exitCode === null && !this.process.killed && this.activeModel === modelDirectory && this.activeContext === context) {
       const healthy = await fetch(`http://127.0.0.1:${this.port}/health`, { signal: AbortSignal.timeout(2500) }).then(response => response.ok).catch(() => false);
@@ -487,7 +533,7 @@ export class ExllamaManager {
     const args = [state.serverScript, '--model', modelDirectory, '--host', '127.0.0.1', '--port', String(this.port), '--max-context', String(Math.max(1024, context))];
     check();
     this.serverLog = '';
-    const child = spawn(state.pythonBin, args, { cwd: this.root, env: process.env, windowsHide: true, detached: false, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(state.uvBinary, ['run', '--python', state.pythonBin, '--no-project', 'python', ...args], { cwd: this.root, env: process.env, windowsHide: true, detached: false, stdio: ['ignore', 'ignore', 'pipe'] });
     child.stderr?.on('data', chunk => { this.serverLog = (this.serverLog + String(chunk)).slice(-8000); });
     this.process = child;
     const spawnFailure: { error: Error | null } = { error: null };
