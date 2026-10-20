@@ -28,7 +28,7 @@ if(process.platform==='win32'){
  const portableBuild=Bun.spawn([compiler,'/V2',script],{env:{...process.env,NSISDIR:nsis},stdout:'inherit',stderr:'inherit'});
  if(await portableBuild.exited!==0)throw Error('Portable EXE packaging failed');
 }
-const hashes=[];for(const name of await readdir(destination)){if(name==='SHA256SUMS.txt')continue;const bytes=await readFile(path.join(destination,name));hashes.push(createHash('sha256').update(bytes).digest('hex')+'  '+name);}
+const hashes=[];for(const name of (await readdir(destination)).sort()){if(name.startsWith('SHA256SUMS'))continue;const bytes=await readFile(path.join(destination,name));hashes.push(createHash('sha256').update(bytes).digest('hex')+'  '+name);}
 await writeFile(path.join(destination,'SHA256SUMS.txt'),hashes.join('\n')+'\n');
 await writeFile(path.join(destination,'SHA256SUMS'),hashes.join('\n')+'\n');
 console.log('Native packages staged in '+destination);
