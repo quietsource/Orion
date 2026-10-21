@@ -1,32 +1,44 @@
-# Orion Tauri 0.2.5 Nightly
+# Orion 0.2.5 Nightly
 
-This nightly introduces Orion's Tauri v2 desktop application, with the existing Orion interface and features backed by a standalone Bun service.
+This nightly is the Tauri v2 edition of Orion, developed alongside the stable Electron release. It carries forward the stable 0.2.0 conversation history, checkpoint and branch tools, source receipts, local voice, OrionFS memory and creation features, and adds the changes below. It uses the existing Orion per-user data directory so conversations, encrypted settings and API keys, memories, installed models, engines and voice setup remain available.
 
-- Reuses the existing Orion data directory, conversations, encrypted settings and API keys, OrionFS memories, installed models, managed llama.cpp and diffusion engines, and local voice setup.
-- Corrects managed ExLlamaV2 model routing so EXL2 chats use the ExLlamaV2 endpoint, and resolves older model indexes from their `config.json` files.
-- Removes the engine installation card from Manage; runtime installation remains available through the engine setup flow.
-- Shows estimated RAM/VRAM fit for conversational model quantizations, with hardware fit filters and best-fit sorting.
-- Keeps the visible model card anchored while model quantization files load, and starts populated chats at the latest messages.
-- Recovers the OrionFS worker after an unexpected worker failure and retries through the normal stats refresh instead of immediately marking memory unavailable.
-- Unlocks the existing Windows encryption key in place; no reinstallation or data import is needed.
-- Moves Orion Browser into the right Canvas sidebar with visible tabs, address/navigation controls, keyboard shortcuts and AI page-reading tools.
-- Retains local chat, streaming tools, web search, native graphs, Canvas documents, conversation history, local dictation/read aloud, and Vulkan image/video generation.
-- Uses native Tauri windows, tray, dialogs and process supervision.
+## New since stable Orion 0.2.0
 
-## New in this nightly: Orion-managed ExLlamaV2
+### Tauri desktop runtime
 
-- The startup engine panel now offers two managed engines: llama.cpp for GGUF models and ExLlamaV2 for EXL2 models. Either or both can be installed; the model browser also installs either engine later.
-- The ExLlamaV2 installer detects the NVIDIA GPU and driver, then installs the matching prebuilt ExLlamaV2 wheel, PyTorch build and CUDA tier into a private managed Python environment (cu128, cu124, cu121 or cu118). Non-NVIDIA devices keep using llama.cpp and are told why.
-- Model browser results carry engine tags: #llama.cpp for GGUF, #exllamav2 for EXL2, and both when a repository serves both formats. Engine chips switch the conversational listing between formats.
-- EXL2 repositories list each bpw quantization branch as a complete bundle with total size; downloading verifies every file's SHA-256 and installs it as one model. Installed EXL2 models appear in the chat model selector, run through the ExLlamaV2 server with the model's own chat template, support the compatibility check, and unload/reload around image and video generation exactly like GGUF models.
-- EXL2 models use Orion's text-based tool protocol in this nightly and do not accept image attachments.
+- Rebuild Orion's desktop shell with Tauri v2 and a standalone Bun service. Bun, Node.js and npm are not required on users' computers.
+- Use native Tauri windows, tray integration, dialogs and child-process supervision while keeping Orion's familiar interface and workflows.
+- Open Orion Browser inside the right Canvas sidebar, with tabs, address and navigation controls, page-reading tools, keyboard shortcuts and a resizable panel.
+- Reuse the existing Orion data directory and unlock the existing Windows encryption key in place. The nightly does not require reinstalling models or importing conversations.
 
-## Downloads
+### Local engines and model browsing
 
-- Windows x64: setup EXE or portable EXE.
-- Linux x64: AppImage, DEB or RPM.
+- Add an Engines settings tab to install, update and repair, or uninstall Orion-managed llama.cpp, ExLlamaV2 and stable-diffusion.cpp engines. Ollama can be installed by opening its official installer.
+- Add managed ExLlamaV2 for EXL2 models alongside llama.cpp for GGUF. Setup uses Orion's managed uv runtime, detects the available NVIDIA/CUDA combination and verifies the installed runtime.
+- Browse EXL2 quantization branches as complete model bundles, verify downloaded files, and route installed models through the ExLlamaV2 server. EXL2 supports text chat and Orion's tool protocol; image attachments use GGUF-capable engines.
+- Show estimated RAM and VRAM fit for conversational model variants, with filters for models that fit the PC, GPU fit, CPU or partial GPU fit, and models that may exceed available memory. Sort by best fit.
+- Keep model cards in place while quantization choices load and separate conversational models from image and video models in Manage.
+
+### Documents, OrionFS and Canvas
+
+- Import documents and folders into the active conversation's OrionFS memory from Canvas. Orion extracts text from supported documents, PDFs and source files, and uses local OCR for supported scanned PDFs and images. Imported passages keep their source details for retrieval and citation.
+- Automatically index supported chat attachments into that conversation's OrionFS context, so follow-up questions can use the material without uploading it to a separate service.
+- Store encrypted OrionFS snapshots in a compact, versioned `.ofs` container using Orion's existing at-rest encryption. Snapshot sealing reclaims unused SQLite pages, removes obsolete chunks and versions, and keeps only the current snapshot while preserving the encrypted data format.
+- Keep memory recall local and model-free. Warmed vector retrieval runs from an in-memory cache, while the compact snapshot reduces startup extraction and disk use.
+- Give the Create page more room for generation and make its creations panel independently scrollable.
+
+### Chat and runtime reliability
+
+- Anchor populated conversations at the latest messages so new chats begin near the composer and flow upward naturally.
+- Recover the OrionFS worker after an unexpected failure and reconnect through the normal status refresh.
+- Route managed EXL2 chats through the right server, resolve older model indexes from each model's `config.json`, and keep model loads from starting automatically on app launch.
+
+All stable 0.2.0 conversation history, memory checkpoints, branching and comparison, source receipts, local handoff, voice, Canvas, chat tools, web search and image/video creation remain part of this nightly.
+
+## Downloads and support
+
+- Windows x64: setup EXE, portable EXE and portable ZIP.
+- Linux x64: AppImage, DEB and RPM.
 - macOS is not currently supported.
 
-This is a prerelease for testing. Linux desktop behavior, legacy Linux keyring migration, and full Wan video generation need further runtime validation. The packaged application was not launched during nightly packaging. Previously checked Windows paths include existing-profile access, llama.cpp streaming, browser tools in Canvas, voice, OFS history/branches and SDXL Vulkan generation.
-
-The existing stable Orion release remains available. This nightly does not replace the stable release or change the original Electron source.
+This is a prerelease for testing. Linux desktop and legacy Linux keyring migration need further runtime validation, and full Wan video generation may vary with model and hardware. EXL2 requires a supported NVIDIA GPU; GGUF through llama.cpp remains available on other systems. The original Electron source and stable release remain unchanged.
