@@ -19,8 +19,9 @@ type Host = {
   draft(text: string): void;
   rerender(): void;
   cleaned(conversationId: string, canvasIds: string[]): void;
+  openPassage(name: string, passage: string, conversationId: string): void;
 };
-type Tab = "Timeline" | "Memory" | "Local handoff" | "Compare" | "Cleanup";
+type Tab = "Timeline" | "Memory" | "More";
 const node = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
   text?: string,
@@ -71,7 +72,7 @@ export function installMemoryHistory(host: Host) {
   const subtitle = node("p", "", "memory-subtitle");
   const navigation = node("nav", undefined, "memory-tabs");
   navigation.setAttribute("aria-label", "Conversation history sections");
-  const content = node("section", undefined, "memory-studio-body");
+  let content = node("section", undefined, "memory-studio-body");
   const status = node("p", "", "memory-status");
   status.setAttribute("role", "status");
   dialog.append(header, subtitle, navigation, content, status);
@@ -82,7 +83,7 @@ export function installMemoryHistory(host: Host) {
     request = 0,
     changing = false;
   const cache = new Map<string, MemoryContext>();
-  const tabs: Tab[] = ["Timeline", "Memory", "Local handoff", "Compare", "Cleanup"];
+  const tabs: Tab[] = ["Timeline", "Memory", "More"];
   const navButtons = tabs.map((name) => {
     const item = button(name, async () => {
       if (changing) return;
@@ -197,31 +198,68 @@ export function installMemoryHistory(host: Host) {
     content.replaceChildren();
     if (tab === "Timeline") timeline();
     if (tab === "Memory") {
-      const details = node("details", undefined, "history-assumptions");
-      details.append(node("summary", "Decisions and assumptions"));
-      assumptions();
-      for (const child of [...content.children]) details.append(child);
-      content.replaceChildren();
+      const rehearsalPanel = rehearsal();
+      const memoryDetails = node("details", undefined, "history-assumptions");
+      memoryDetails.append(node("summary", "Memory settings and saved items"));
       lens();
-      content.prepend(details);
+      for (const child of [...content.children]) memoryDetails.append(child);
+      const assumptionDetails = node("details", undefined, "history-assumptions");
+      assumptionDetails.append(node("summary", "Decisions and assumptions"));
+      assumptions();
+      for (const child of [...content.children]) assumptionDetails.append(child);
+      content.replaceChildren();
+      content.append(rehearsalPanel, memoryDetails, assumptionDetails);
     }
-    if (tab === "Local handoff") {
-      content.append(note("Building a reviewable packet from local evidence…"));
-      try {
-        const packet = await api.packet(conversationId);
-        if (sequence === request) carry(packet);
-      } catch (error) {
-        if (sequence === request) status.textContent = String(error);
-      }
-    }
-    if (tab === "Compare") compare();
-    if (tab === "Cleanup") {
-      content.append(note("Inspecting this conversation’s saved items…"));
-      try { const preview = await api.cleanupPreview(conversationId); if(sequence === request) cleanup(preview); }
-      catch(error) { if(sequence === request)status.textContent=String(error); }
-    }
+    if (tab === "More") more();
   }
-  function timeline() {
+  function rehearsal() {
+    const panel = node("section", undefined, "memory-rehearsal");
+    panel.append(node("h3", "What Orion remembers"), note("Preview the local passages that match a question before relying on them. Nothing here is sent to a model."));
+    const query = input("Ask what Orion would remember about…"); query.maxLength = 2000;
+    const run = button("Preview recall", async () => {
+      const list = panel.querySelector<HTMLElement>(".memory-rehearsal-results")!;
+      if (!query.value.trim()) { query.focus(); return; }
+      run.disabled = true; run.textContent = "Finding sources…"; list.replaceChildren(note("Searching this conversation’s allowed OrionFS memories…"));
+      try {
+        const result = await api.retrievalPreview(conversationId, query.value), selected = structuredClone((await api.context(conversationId)).lens);
+        list.replaceChildren();
+        if (!result.items.length) list.append(note("No matching memory or document passages were found."));
+        for (const item of result.items) {
+          const card = node("article", undefined, "memory-entry"), correction = node("textarea"); correction.value = item.content; correction.maxLength = 4000;
+          card.append(node("p", `${item.sourceName ?? "Conversation memory"}${item.sourcePage ? ` · page ${item.sourcePage}` : item.sourcePart ? ` · passage ${item.sourcePart}` : ""}`), node("small", item.reason ?? "Selected by local recall."), correction);
+          const actions = node("div", undefined, "memory-row");
+          actions.append(button("Save correction", mutation(() => api.memoryEdit(conversationId, item.id, correction.value))));
+          const retention = node("select"); retention.setAttribute("aria-label", "Memory retention");
+          for (const [value,label] of [["temporary","Temporary · 30 days"],["conversation","Conversation only"],["durable","Durable"]]) retention.add(new Option(label,value));
+          retention.value = item.retention ?? "conversation";
+          retention.onchange = () => void mutation(() => api.memoryRetention(conversationId,item.id,retention.value as "temporary"|"conversation"|"durable"))();
+          actions.append(retention, button("Exclude here", mutation(async () => { selected.excluded = [...new Set([...selected.excluded,item.id])]; await api.lens(conversationId,selected); })), button("Never save", mutation(() => api.memoryRetention(conversationId,item.id,"never-save"))));
+          card.append(actions); list.append(card);
+        }
+      } catch (error) { list.replaceChildren(note(error instanceof Error ? error.message : String(error))); }
+      finally { run.disabled = false; run.textContent = "Preview recall"; }
+    }, "primary");
+    query.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); run.click(); } };
+    panel.append(node("div", undefined, "memory-row")); panel.lastElementChild!.append(query,run);
+    panel.append(node("div", undefined, "memory-rehearsal-results"));
+    return panel;
+  }
+  function more() {
+    const root = content, nav = node("nav", undefined, "memory-more-nav"), body = node("section", undefined, "memory-more-body");
+    root.append(nav, body);
+    const sections = ["Cleanup", "Compare", "Local handoff"] as const;
+    let selected: typeof sections[number] | null = null, renderVersion = 0;
+    const render = async () => {
+      const version = ++renderVersion;
+      nav.replaceChildren(); body.replaceChildren();
+      for (const name of sections) { const item = button(name, () => { selected = name; void render(); }); item.setAttribute("aria-current", String(name === selected)); nav.append(item); }
+      if (selected === null) body.append(note("Open cleanup, compare branches, or prepare a local handoff when you need it."));
+      if (selected === "Cleanup") { body.append(note("Preparing a review of saved items…")); try { const preview = await api.cleanupPreview(conversationId); if (version !== renderVersion) return; body.replaceChildren(); content = body; cleanup(preview); content = root; } catch(error) { if(version === renderVersion) body.replaceChildren(note(String(error))); } }
+      if (selected === "Compare") { content = body; compare(); content = root; }
+      if (selected === "Local handoff") { body.append(note("Building a reviewable packet from local evidence…")); try { const packet = await api.packet(conversationId); if (version === renderVersion) { content = body; carry(packet); content = root; } } catch(error) { if(version === renderVersion) body.replaceChildren(note(String(error))); } }
+    };
+    void render();
+  }  function timeline() {
     const checkpoints = data!.checkpoints;
     const capture = node("div", undefined, "memory-row");
     const name = input("Checkpoint name (optional)");
@@ -503,13 +541,15 @@ export function installMemoryHistory(host: Host) {
       );
       for (const memory of matches.slice(0, 100)) {
         const row = node("section", undefined, "memory-entry");
+        const editable = node("textarea"); editable.value = memory.content; editable.maxLength = 4000; editable.setAttribute("aria-label", "Correct saved memory");
         row.append(
-          node("p", memory.content),
+          editable,
           note(
-            `${memory.type} · ${date(memory.createdAt)}${memory.conversationId === conversationId ? " · This conversation" : ""}`,
+            `${memory.sourceName ?? memory.type}${memory.sourcePage ? ` · page ${memory.sourcePage}` : memory.sourcePart ? ` · passage ${memory.sourcePart}` : ""} · ${memory.retention ?? "conversation"} · ${date(memory.createdAt)}${memory.conversationId === conversationId ? " · This conversation" : ""}`,
           ),
         );
         const actions = node("div", undefined, "memory-row");
+        actions.append(button("Save correction", mutation(() => api.memoryEdit(conversationId, memory.id, editable.value))));
         for (const [key, label] of [
           ["pinned", "Pin"],
           ["excluded", "Exclude"],
@@ -546,13 +586,14 @@ export function installMemoryHistory(host: Host) {
           })();
         };
         actions.append(tag);
+        const retention = node("select"); retention.setAttribute("aria-label", "Memory retention");
+        for (const [value,label] of [["temporary","Temporary · 30 days"],["conversation","Conversation only"],["durable","Durable"],["never-save","Never save · remove from memory"]]) retention.add(new Option(label,value));
+        retention.value = memory.retention ?? "conversation";
+        retention.onchange = () => void mutation(() => api.memoryRetention(conversationId,memory.id,retention.value as "temporary"|"conversation"|"durable"|"never-save"))();
+        actions.append(retention);
         if (memory.sourceMessageId)
           actions.append(
-            source({
-              conversationId: memory.conversationId,
-              messageId: memory.sourceMessageId,
-              label: "Source message",
-            }),
+            memory.sourceName ? button(`Open ${memory.sourceName}${memory.sourcePage ? ` · page ${memory.sourcePage}` : memory.sourcePart ? ` · passage ${memory.sourcePart}` : ""}`, () => host.openPassage(memory.sourceName!, memory.content, memory.conversationId), "memory-source") : source({ conversationId: memory.conversationId, messageId: memory.sourceMessageId, label: "Source message" }),
           );
         row.append(actions);
         list.append(row);
@@ -686,7 +727,8 @@ export function installMemoryHistory(host: Host) {
     updateTotal();
   }
   function cleanup(preview: CleanupPreview) {
-    content.replaceChildren(node("h3", "Clean up this conversation"), note("Choose individual items, then review the selection. Memories are removed from the active memory engine. Checkpoints and existing branches keep their historical copies. Removing a Canvas copy does not delete the original file on disk. Saved chat text and past source receipts stay in the conversation. Unused attachment cache is checked across all conversations and checkpoints; only unreferenced cached images older than 24 hours are eligible."));
+    content.replaceChildren(node("h3", "Clean up this conversation"), note("Review exactly what will change before removing it. Orion saves an encrypted recovery checkpoint first, so the latest cleanup can be undone."));
+    content.append(button("Undo last cleanup", mutation(async () => { if (!await api.cleanupUndo(conversationId)) throw Error("There is no cleanup to undo."); await host.activate(conversationId); }), "secondary"));
     const selection: ConversationCleanup = { memoryIds: [], checkpointIds: [], assumptionIds: [], canvasIds: [], attachmentIds: [] };
     const filter = input("Filter by text or document name…"); filter.setAttribute("aria-label", "Filter cleanup items");
     const list = node("div"), summary = note("Nothing selected"), reviewPane = node("section");
@@ -718,7 +760,7 @@ export function installMemoryHistory(host: Host) {
       if(!list.children.length)list.append(note("No matching saved items."));
     };
     const review=button("Review cleanup",()=>{
-      reviewPane.replaceChildren(node("h3","Review selected items"),note("The selected active memories and records will be removed. Historical snapshots can still contain older copies. This cannot be undone here."));
+      reviewPane.replaceChildren(node("h3","Review selected items"),note("These items will be removed from the active conversation. Orion will keep an encrypted checkpoint so you can undo this cleanup."));
       for(const key of Object.keys(labels) as Array<keyof ConversationCleanup>) {
         const selected=rows.filter(row=>row.key===key&&selection[key].includes(row.id));
         if(!selected.length)continue;
@@ -870,10 +912,10 @@ export function installMemoryHistory(host: Host) {
       const memories=message.memoryUsed??[], files=[...new Map((message.sourceFiles??[]).map(file=>[file.id,file])).values()];
       if(!memories.length&&!files.length)return null;
       const details=node("details",undefined,"source-receipt");
-      details.append(node("summary","Sources"),note("Context supplied to this response. Inclusion does not prove the model relied on it. Sources may have changed or been removed since then."));
+      details.append(node("summary",`Sources · ${memories.length+files.length}`),note("These passages were supplied as context. Orion cannot verify which ones shaped the answer."));
       for(const memory of memories) {
-        const row=node("div",undefined,"source-receipt-item");row.append(node("span","OrionFS memory"),node("p",memory.text));
-        row.append(button("Open source",async()=>{try{await host.activate(memory.conversationId,memory.messageId);}catch{row.append(note("The source is no longer available."));}},"memory-source"));details.append(row);
+        const row=node("div",undefined,"source-receipt-item");row.append(node("span",`${memory.sourceName ?? "OrionFS memory"}${memory.sourcePage ? ` · page ${memory.sourcePage}` : memory.sourcePart ? ` · passage ${memory.sourcePart}` : ""}`),node("p",memory.text),note(memory.reason ?? "Selected by local recall."));
+        row.append(button(memory.sourceName ? "Open passage in Canvas" : "Open source message",async()=>{try{if(memory.sourceName)host.openPassage(memory.sourceName,memory.text,memory.conversationId);else await host.activate(memory.conversationId,memory.messageId);}catch{row.append(note("The source is no longer available."));}},"memory-source"));details.append(row);
       }
       for(const file of files) {
         const row=node("div",undefined,"source-receipt-item");row.append(node("span","Attached file"),node("p",file.name));

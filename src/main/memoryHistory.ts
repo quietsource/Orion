@@ -30,6 +30,8 @@ type Index = {
   contexts: Record<string, MemoryContext>;
   checkpoints: Array<MemoryCheckpoint & { digest: string }>;
   tags: Tags;
+  documents?: Record<string, Array<{ id: string; name: string; createdAt: number; chunks: number; pages?: Array<number | null> }>>;
+  cleanupUndo?: Record<string, { checkpointId: string; removedCheckpoints: Array<MemoryCheckpoint & { digest: string }>; selection: ConversationCleanup }>;
 };
 type CheckpointData = {
   conversation: Conversation;
@@ -41,7 +43,10 @@ type Dependencies = {
   attachmentDirectory?: string;
   readConversations(): Promise<Conversation[]>;
   saveConversation(value: Conversation): Promise<void>;
+  checkpointConversation?(conversation: Conversation, messageId: string): Promise<void>;
+  rollbackConversation?(conversationId: string, messageId: string): Promise<Conversation>;
   baseEngine(): Promise<OFSClient>;
+  reindexConversation?(conversation: Conversation): Promise<void>;
   createEngine(id: string): Promise<{ client: OFSClient; fresh: boolean }>;
   busy(): boolean;
   defaultScope?(): Promise<MemoryLens["scope"]>;
@@ -70,6 +75,7 @@ const entries = (snapshot: OFSSnapshot): MemoryEntry[] =>
       createdAt: Number(row.created_at),
       importance: Number(row.importance),
       entities: JSON.parse(String(row.entities)) as string[],
+      retention: row.retention === "temporary" || row.retention === "durable" ? row.retention : "conversation",
     }));
 export class MemoryHistory {
   private state: Index | undefined;
@@ -186,6 +192,58 @@ export class MemoryHistory {
       });
     }
     return pending;
+  }
+  async ingestDocument(id: string, name: string, text: string, sourceId?: string, retention: "temporary"|"conversation"|"durable"|"never-save" = "conversation") {
+    this.assertIdle();
+    const cleanName = path.basename(name).slice(0, 240) || "Document";
+    const normalized = text.replace(/\u0000/g, " ").replace(/\r\n?/g, "\n").trim();
+    if (!normalized) throw Error(`${cleanName} contains no extractable text.`);
+    if (normalized.length > 1_000_000) throw Error(`${cleanName} exceeds OrionFS's 1,000,000 character per-document limit.`);
+    sourceId ??= randomUUID();
+    const prior = (await this.index()).documents?.[id]?.find(item => item.id === sourceId);
+    if (prior) return { id: sourceId, name: prior.name, chunks: prior.chunks, characters: normalized.length };
+    const paragraphs = normalized.split(/\n{2,}/);
+    const chunks: string[] = [];
+    const pages: Array<number | null> = [];
+    let current = "";
+    let currentPage: number | null = null;
+    const pushChunk = () => { if (current.trim()) { chunks.push(current); pages.push(currentPage); } current = ""; };
+    for (const paragraph of paragraphs) {
+      const pageMatch = /^Page\s+(\d+)\s*\n/i.exec(paragraph);
+      if (pageMatch) currentPage = Number(pageMatch[1]);
+      let remaining = paragraph.trim();
+      while (remaining) {
+        const room = Math.max(1, 1100 - current.length - 1);
+        if (remaining.length <= room) {
+          current += `${current ? "\n" : ""}${remaining}`;
+          remaining = "";
+        } else {
+          let split = remaining.lastIndexOf(" ", room);
+          if (split < room * 0.55) split = room;
+          current += `${current ? "\n" : ""}${remaining.slice(0, split).trim()}`;
+          pushChunk();
+          remaining = remaining.slice(split).trim();
+        }
+      }
+      if (current.length >= 900) pushChunk();
+    }
+    pushChunk();
+    if (retention === "never-save") return { id: sourceId, name: cleanName, chunks: 0, characters: normalized.length };
+    const engine = await this.engine(id);
+    for (let index = 0; index < chunks.length; index++) {
+      await engine.ingestTurn("user", `Imported document: ${cleanName}\n${chunks[index]}`, {
+        conversationId: id,
+        messageId: `document:${sourceId}:${index}`,
+        createdAt: Date.now(),
+        retention,
+      });
+    }
+    const state = await this.index();
+    const documents = (state.documents ??= {});
+    const list = (documents[id] ??= []);
+    list.push({ id: sourceId, name: cleanName, createdAt: Date.now(), chunks: chunks.length, pages });
+    await this.persist();
+    return { id: sourceId, name: cleanName, chunks: chunks.length, characters: normalized.length };
   }
   private async saveSnapshot(snapshot: OFSSnapshot) {
     const memories = [];
@@ -391,6 +449,9 @@ export class MemoryHistory {
       state = await this.index(),
       all = await this.deps.readConversations(),
       tags = context.tags ?? state.tags;
+    const durableIds = (await (await this.engine(id)).exportSnapshot()).memories
+      .filter(row => row.retention === "durable" && row.superseded_by == null && (row.expires_at == null || Number(row.expires_at) > Date.now()))
+      .map(row => String(row.id));
     let scopes = [id];
     if (context.lens.scope === "all") scopes = all.map((item) => item.id);
     if (context.lens.scope === "project" && context.lens.project)
@@ -414,9 +475,114 @@ export class MemoryHistory {
       strict: true,
       pinnedIds: context.lens.pinned,
       conversationIds: [...new Set(scopes)],
-      memoryIds: [...new Set([...context.lens.pinned, ...tagged])],
+      memoryIds: [...new Set([...context.lens.pinned, ...tagged, ...durableIds])],
       excludedIds: context.lens.excluded,
+      activeConversationId: id,
     };
+  }
+  async sourceDetails(messageId: string) {
+    const match = /^document:([a-f0-9-]{36}):(\d+)$/i.exec(messageId);
+    if (!match) {
+      const attachment = /^([a-f0-9-]{36}):ocr:([a-f0-9-]{36})$/i.exec(messageId);
+      if (!attachment) return null;
+      const conversation = (await this.deps.readConversations()).find(item => item.messages.some(message => message.id === attachment[1]));
+      const message = conversation?.messages.find(item => item.id === attachment[1]);
+      const file = message?.attachments?.find(item => item.id === attachment[2]);
+      return file && conversation ? { conversationId: conversation.id, messageId: attachment[1]!, name: file.name, part: undefined } : null;
+    }
+    const state = await this.index();
+    for (const [conversationId, documents] of Object.entries(state.documents ?? {})) {
+      const document = documents.find(item => item.id === match[1]);
+      if (document) return { conversationId, messageId, name: document.name, part: Number(match[2]) + 1, page: document.pages?.[Number(match[2])] ?? undefined };
+    }
+    return null;
+  }
+  async retrievalPreview(id: string, query: string) {
+    const clean = String(query).trim().slice(0, 2000);
+    if (!clean) return { query: clean, items: [] };
+    const memories = await (await this.engine(id)).recall(clean, 2400, "__all__", [], await this.policy(id));
+    const items = await Promise.all(memories.slice(0, 16).map(async memory => {
+      const source = memory.sourceMessageId ? await this.sourceDetails(memory.sourceMessageId) : null;
+      return { id: memory.id, content: memory.content, type: memory.type, entities: memory.entities, importance: memory.importance, createdAt: memory.createdAt, conversationId: memory.conversationId, sourceMessageId: source?.messageId ?? memory.sourceMessageId, retention: memory.retention, sourceName: source?.name, sourcePart: source?.part, sourcePage: source?.page, score: memory.score, reason: memory.activationSource === "direct" ? "Matched this question directly" : "Related through connected memory" };
+    }));
+    return { query: clean, items };
+  }
+  async memoryEdit(id: string, memoryId: string, content: string) {
+    return this.exclusive(async () => { this.assertIdle(); await (await this.engine(id)).updateMemory(id, memoryId, String(content).slice(0, 4000)); await this.persist(); });
+  }
+  async memoryRetention(id: string, memoryId: string, retention: "temporary" | "conversation" | "durable" | "never-save") {
+    return this.exclusive(async () => {
+      this.assertIdle();
+      const engine = await this.engine(id);
+      if (retention === "never-save") await engine.forgetMemories(id, [memoryId]);
+      else {
+        const snapshot = await engine.exportSnapshot(), row = snapshot.memories.find(item => item.id === memoryId && item.conversation_id === id);
+        if (!row) throw Error("Memory is no longer available in this conversation.");
+        await engine.updateMemory(id, memoryId, String(row.content), retention);
+      }
+      await this.persist();
+    });
+  }
+  async messageRetention(id: string, messageId: string, retention: "temporary"|"conversation"|"durable"|"never-save") {
+    return this.exclusive(async () => {
+      if (!/^[a-f0-9-]{36}$/i.test(messageId)) throw Error("Invalid message reference.");
+      const conversation = await this.readConversation(id), messageIndex = conversation.messages.findIndex(item => item.id === messageId && item.role === "user");
+      if (messageIndex < 0) throw Error("This user message is no longer available.");
+      const turnMessages = [conversation.messages[messageIndex]!];
+      for (let index = messageIndex + 1; index < conversation.messages.length && conversation.messages[index]!.role !== "user"; index++) turnMessages.push(conversation.messages[index]!);
+      const wasNeverSaved = turnMessages[0]!.memoryRetention === "never-save";
+      for (const item of turnMessages) item.memoryRetention = retention;
+      await this.deps.saveConversation(conversation);
+      const engine = await this.engine(id);
+      if (retention === "never-save") {
+        for (const item of turnMessages) await engine.resetIngestedSource(id, item.id);
+        const attachmentIds = new Set(turnMessages.flatMap(item => (item.attachments ?? []).filter(file => file.kind === "document").map(file => file.id)));
+        const state = await this.index();
+        state.documents![id] = (state.documents?.[id] ?? []).filter(document => !attachmentIds.has(document.id));
+        await this.persist();
+      } else if (wasNeverSaved) {
+        for (const item of turnMessages) await engine.resetIngestedSource(id, item.id);
+        if (!this.deps.busy()) await this.deps.reindexConversation?.(conversation);
+      } else for (const item of turnMessages) await engine.setSourceRetention(id, item.id, retention);
+    });
+  }
+  async checkpointMessage(id: string, messageId: string) {
+    const conversation = await this.readConversation(id);
+    if (!conversation.messages.some(item => item.id === messageId && item.role === "user")) throw Error("This user message is no longer available.");
+    await this.deps.checkpointConversation?.(conversation, messageId);
+  }
+  async rollbackMessage(id: string, messageId: string) {
+    return this.exclusive(async () => {
+      this.assertIdle();
+      if (!/^[a-f0-9-]{36}$/i.test(messageId)) throw Error("Invalid message reference.");
+      if (!this.deps.rollbackConversation) throw Error("Managed Velo rollback is unavailable on this platform.");
+      const original = await this.readConversation(id);
+      const messageIndex = original.messages.findIndex(item => item.id === messageId && item.role === "user");
+      if (messageIndex < 0) throw Error("This user message is no longer available.");
+      const removed = original.messages.slice(messageIndex + 1);
+      await this.deps.checkpointConversation?.(original, messageId);
+      const rolled = await this.deps.rollbackConversation(id, messageId);
+      if (rolled.id !== id || !rolled.messages.some(item => item.id === messageId && item.role === "user")) throw Error("Velo returned an invalid conversation checkpoint.");
+      const engine = await this.engine(id), snapshot = await engine.exportSnapshot();
+      const sourceIds = new Set<string>();
+      for (const item of removed) {
+        sourceIds.add(item.id);
+        for (const file of item.attachments ?? []) sourceIds.add(`document:${file.id}`);
+      }
+      for (const turn of snapshot.turns) {
+        const source = String(turn.source_message_id ?? "");
+        if (removed.some(item => source === item.id || source.startsWith(`${item.id}:`))) sourceIds.add(source);
+        if (removed.some(item => (item.attachments ?? []).some(file => source === `document:${file.id}` || source.startsWith(`document:${file.id}:`)))) sourceIds.add(source);
+      }
+      for (const source of sourceIds) await engine.resetIngestedSource(id, source);
+      const removedFiles = new Set(removed.flatMap(item => (item.attachments ?? []).map(file => file.id)));
+      const state = await this.index();
+      state.documents ??= {};
+      state.documents![id] = (state.documents?.[id] ?? []).filter(document => !removedFiles.has(document.id));
+      await this.deps.saveConversation(rolled);
+      await this.persist();
+      return rolled;
+    });
   }
   async lens(id: string, value: MemoryLens) {
     return this.exclusive(async () => {
@@ -630,6 +796,10 @@ export class MemoryHistory {
       state = await this.index(),
       all = await this.deps.readConversations(),
       memories = entries(await (await this.engine(id)).exportSnapshot());
+    const enrichedMemories = await Promise.all(memories.map(async memory => {
+      const details = memory.sourceMessageId ? await this.sourceDetails(memory.sourceMessageId) : null;
+      return { ...memory, sourceName: details?.name, sourcePart: details?.part, sourcePage: details?.page };
+    }));
     const checkpoints = state.checkpoints.filter(
       (item) => item.conversationId === id,
     );
@@ -645,7 +815,7 @@ export class MemoryHistory {
     return {
       context: { ...context, tags: clone(context.tags ?? state.tags) },
       checkpoints,
-      memories: memories
+      memories: enrichedMemories
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, 1000),
       memoryTotal: memories.length,
@@ -708,6 +878,8 @@ export class MemoryHistory {
     };
   }
   async cleanup(id: string, selection: ConversationCleanup): Promise<void> {
+    this.assertIdle();
+    const recovery = await this.checkpoint(id, "Before cleanup", false);
     return this.exclusive(async () => {
       this.assertIdle();
       for (const key of ["memoryIds", "checkpointIds", "assumptionIds", "canvasIds", "attachmentIds"] as const) {
@@ -724,6 +896,14 @@ export class MemoryHistory {
       };
       for(const key of Object.keys(allowed) as Array<keyof ConversationCleanup>)if(selection[key].some(value=>!allowed[key].has(value)))throw Error("Some selected items changed. Refresh Cleanup and review again.");
       const removedCheckpoints = state.checkpoints.filter(item => item.conversationId === id && selection.checkpointIds.includes(item.id));
+      if (selection.attachmentIds.length && this.deps.attachmentDirectory) {
+        const backup = path.join(this.deps.directory, "cleanup-undo", id);
+        await fs.mkdir(backup, { recursive: true });
+        for (const file of selection.attachmentIds) await fs.copyFile(path.join(this.deps.attachmentDirectory, file), path.join(backup, file));
+      }
+      state.cleanupUndo ??= {};
+      state.cleanupUndo[id] = { checkpointId: recovery.id, removedCheckpoints: clone(removedCheckpoints), selection: clone(selection) };
+      await this.persist();
       await (await this.engine(id)).forgetMemories(id, selection.memoryIds);
       // Checkpoints and existing branches retain their own historical memory state.
       context.lens.pinned = context.lens.pinned.filter(value => !selection.memoryIds.includes(value));
@@ -735,9 +915,31 @@ export class MemoryHistory {
       await this.deps.saveConversation(conversation);
       await this.persist();
       for(const file of selection.attachmentIds)await fs.rm(path.join(this.deps.attachmentDirectory!,file),{force:true});
-      for (const checkpoint of removedCheckpoints) {
-        if (/^[a-f0-9-]{36}$/.test(checkpoint.id)) await fs.rm(path.join(this.deps.directory, `${checkpoint.id}.checkpoint.enc`), { force: true });
+      // Keep encrypted checkpoint payloads for the single-step cleanup undo.
+    });
+  }
+  async cleanupUndo(id: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      this.assertIdle();
+      const state = await this.index(), undo = state.cleanupUndo?.[id];
+      if (!undo) return false;
+      const saved = await this.checkpointData(undo.checkpointId), snapshot = await this.readSnapshot(state.checkpoints.find(item => item.id === undo.checkpointId)!.snapshotId);
+      await (await this.engine(id)).restoreConversationSnapshot(snapshot, id);
+      await this.deps.saveConversation(saved.conversation);
+      state.contexts[id] = clone(saved.context);
+      for (const memoryId of undo.selection.memoryIds) {
+        if (saved.tags[memoryId]) state.tags[memoryId] = clone(saved.tags[memoryId]!);
+        else delete state.tags[memoryId];
       }
+      for (const checkpoint of undo.removedCheckpoints) if (!state.checkpoints.some(item => item.id === checkpoint.id)) state.checkpoints.push(checkpoint);
+      delete state.cleanupUndo![id];
+      await this.persist();
+      if (this.deps.attachmentDirectory) {
+        const backup = path.join(this.deps.directory, "cleanup-undo", id);
+        for (const file of undo.selection.attachmentIds) await fs.copyFile(path.join(backup, file), path.join(this.deps.attachmentDirectory, file)).catch(() => undefined);
+        await fs.rm(backup, { recursive: true, force: true }).catch(() => undefined);
+      }
+      return true;
     });
   }
   async packet(id: string): Promise<CarryPacket> {

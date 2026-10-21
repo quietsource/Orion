@@ -100,6 +100,23 @@ body:not(.models-view):not(.create-view) .chat-inner{padding-left:40px}
 @media(max-width:680px){.create-page{width:calc(100% - 24px);padding:18px 0 24px;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(280px,auto) 330px;row-gap:0}.create-page>h1,.create-page>p,.create-stage,.create-gallery{grid-column:1}.create-page>h1{grid-row:1}.create-page>p{grid-row:2}.create-stage{grid-row:3;min-height:300px}.create-gallery{grid-row:4;position:relative;top:auto;height:330px;min-height:0;margin:18px 0 0}.create-gallery-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.generation-visual{min-height:300px}}
 @media(prefers-reduced-motion:reduce){.generation-dotfield::before{animation:none}.generation-dotfield i{animation:none;opacity:.65}.create-generation-card{animation:none!important}}
 
+/* Create uses the same inset workspace and composer proportions as chat. */
+body.create-view .chat{overflow:hidden}
+body.create-view .chat-inner{width:100%;height:100%;padding:12px 0;display:flex;flex-direction:column}
+body.create-view #messages{width:100%;height:100%;min-height:0;justify-content:stretch;overflow:hidden}
+body.create-view .create-page{width:100%;height:100%;min-height:0;flex:1;padding:16px 26px 132px;grid-template-columns:minmax(0,1fr) minmax(250px,310px);grid-template-rows:auto auto minmax(0,1fr);column-gap:20px;overflow:hidden}
+body.create-view .create-page>h1{font-size:23px;margin-bottom:0}
+body.create-view .create-page>p{margin-bottom:12px;font-size:12px}
+body.create-view .create-stage{height:100%;min-height:0;align-self:stretch}
+body.create-view .create-gallery{position:relative;top:auto;height:100%;min-height:0;max-height:none;display:flex;flex-direction:column;overflow:hidden}
+body.create-view .create-gallery-grid{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain}
+body.create-view .create-composer-wrap{padding:28px 24px 16px;background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--bg) 92%,transparent) 35%,var(--bg) 62%)}
+body.create-view .create-composer{width:min(820px,100%);padding:9px;border:1px solid var(--border);border-radius:15px;background:var(--composer-bg);box-shadow:0 12px 40px #0003;}
+body.create-view .create-composer textarea{min-height:62px;resize:none}
+body.create-view .create-composer-actions{gap:4px}
+@media(max-width:900px){body.create-view .create-page{grid-template-columns:minmax(0,1fr) minmax(215px,270px);column-gap:14px;padding-right:18px;padding-left:18px}}
+@media(max-width:680px){body.create-view .create-page{height:auto;min-height:100%;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(240px,1fr) minmax(220px,34vh);overflow:auto;padding:16px 14px 110px}.create-view .create-gallery{grid-column:1;grid-row:4;height:auto;min-height:0;margin:12px 0 0}.create-view .create-stage{grid-column:1;grid-row:3;min-height:240px}.create-view .create-gallery-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.create-view .create-composer-wrap{padding:28px 14px 14px}}
+
 /* Orion 0.3.1: focused conversation-first identity. */
 .nav-item[data-view="Schedules"],#chat-mode,#workspace-required,#workspace-review,#schedules-dialog,#git-rollback-dialog{display:none!important}
 .nav-icon{display:inline-grid;width:16px;place-items:center;font-size:15px;line-height:1;color:currentColor}

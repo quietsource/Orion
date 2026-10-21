@@ -1,4 +1,27 @@
 // This binary contains Bun and the backend. There is no Electron or system Node dependency.
+import path from 'node:path';
+import fs from 'node:fs';
+
+// Native N-API addons must remain next to Orion's packaged resources when the
+// Bun service is compiled. Point @napi-rs/canvas at that managed copy before
+// loading the backend bundle.
+const resourceRoot = process.env.ORION_RESOURCE_ROOT;
+if (resourceRoot) {
+  const nativeName = process.platform === 'win32' && process.arch === 'x64'
+    ? 'skia.win32-x64-msvc.node'
+    : process.platform === 'linux' && process.arch === 'x64'
+      ? 'skia.linux-x64-gnu.node'
+      : process.platform === 'linux' && process.arch === 'arm64'
+        ? 'skia.linux-arm64-gnu.node'
+        : process.platform === 'darwin' && process.arch === 'arm64'
+          ? 'skia.darwin-arm64.node'
+          : process.platform === 'darwin' && process.arch === 'x64'
+            ? 'skia.darwin-x64.node'
+            : null;
+  const nativePath = nativeName && path.join(resourceRoot, 'dist', 'native-canvas', nativeName);
+  if (nativePath && fs.existsSync(nativePath)) process.env.NAPI_RS_NATIVE_LIBRARY_PATH = nativePath;
+}
+
 if (process.argv.includes('--voice-worker')) {
   await import('./voiceWorker');
 } else {

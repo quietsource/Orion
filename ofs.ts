@@ -66,6 +66,8 @@ export interface MemoryNode {
   supersededBy?: string | null;
   conversationId: string;
   sourceMessageId: string | null;
+  retention: "temporary" | "conversation" | "durable";
+  expiresAt: number | null;
 }
 
 export interface ActivatedMemory extends MemoryNode {
@@ -88,13 +90,13 @@ export interface OFSConfig {
   coreSystemPrompt?: string;
 }
 
-export interface OFSTurnSource { conversationId: string; messageId: string; createdAt?: number; }
+export interface OFSTurnSource { conversationId: string; messageId: string; createdAt?: number; retention?: "temporary" | "conversation" | "durable" | "never-save"; }
 export interface OFSSnapshot {
   version: 1; createdAt: number; workingMemory: ChatTurn[];
   memories: Array<Record<string, unknown>>; links: Array<Record<string, unknown>>;
   turns: Array<Record<string, unknown>>; metadata: Array<Record<string, unknown>>;
 }
-export interface OFSRecallPolicy { pinnedIds?: string[]; conversationIds?: string[]; memoryIds?: string[]; excludedIds?: string[]; strict?: boolean }
+export interface OFSRecallPolicy { pinnedIds?: string[]; conversationIds?: string[]; memoryIds?: string[]; excludedIds?: string[]; strict?: boolean; activeConversationId?: string }
 
 export interface ExtractedKnowledge {
   facts: {
@@ -147,7 +149,7 @@ export class OrionFS {
   // In-memory hot cache for sub-millisecond vector scans
   private vectorCache: Map<
     string,
-    { vec: Float32Array; entities: string[]; importance: number; conversationId: string; sourceMessageId: string | null }
+    { vec: Float32Array; entities: string[]; importance: number; conversationId: string; sourceMessageId: string | null; retention: "temporary" | "conversation" | "durable"; expiresAt: number | null }
   > = new Map();
   private ingestionQueue: Promise<void> = Promise.resolve();
   private pendingTurns = new Set<string>();
@@ -186,7 +188,9 @@ export class OrionFS {
         superseded_by TEXT DEFAULT NULL,
         entity_key TEXT DEFAULT NULL,
         conversation_id TEXT NOT NULL DEFAULT '',
-        source_message_id TEXT DEFAULT NULL
+        source_message_id TEXT DEFAULT NULL,
+        retention TEXT NOT NULL DEFAULT 'conversation',
+        expires_at INTEGER DEFAULT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_ofs_memories_active
@@ -229,6 +233,8 @@ export class OrionFS {
 
     this.addColumnIfMissing("ofs_memories", "conversation_id", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("ofs_memories", "source_message_id", "TEXT DEFAULT NULL");
+    this.addColumnIfMissing("ofs_memories", "retention", "TEXT NOT NULL DEFAULT 'conversation'");
+    this.addColumnIfMissing("ofs_memories", "expires_at", "INTEGER DEFAULT NULL");
     this.addColumnIfMissing("ofs_links", "conversation_id", "TEXT NOT NULL DEFAULT ''");
     const linkColumns = this.db.query(`PRAGMA table_info(ofs_links)`).all() as { name: string; pk: number }[];
     const linkPrimaryKey = linkColumns.filter(column => column.pk > 0).sort((a, b) => a.pk - b.pk).map(column => column.name);
@@ -253,7 +259,7 @@ export class OrionFS {
   private warmVectorCache(): void {
     const rows = this.db
       .query(
-        `SELECT id, content, embedding, entities, importance, conversation_id, source_message_id
+        `SELECT id, content, embedding, entities, importance, conversation_id, source_message_id, retention, expires_at
          FROM ofs_memories
          WHERE superseded_by IS NULL`
       )
@@ -265,6 +271,8 @@ export class OrionFS {
       importance: number;
       conversation_id: string;
       source_message_id: string | null;
+      retention: "temporary" | "conversation" | "durable";
+      expires_at: number | null;
     }[];
 
     const version = this.db.query("SELECT value FROM ofs_metadata WHERE key = 'encoding'").all()[0]?.value;
@@ -281,6 +289,8 @@ export class OrionFS {
         importance: r.importance,
         conversationId: r.conversation_id ?? "",
         sourceMessageId: r.source_message_id ?? null,
+        retention: r.retention ?? "conversation",
+        expiresAt: r.expires_at ?? null,
       });
     }
     this.db.run("INSERT INTO ofs_metadata (key, value) VALUES ('encoding', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [OFS_ENCODING_VERSION]);
@@ -316,7 +326,8 @@ export class OrionFS {
         .run({ $id: sourceMessageId, $conversationId: conversationId, $now: source?.createdAt ?? Date.now() });
       this.workingMemory.push({ role, content, tokens: estimateTokens(content) });
       try {
-        await this.extractAndConsolidate(content, role, { ...source, conversationId, messageId: sourceMessageId });
+        const retention = source?.retention ?? "conversation";
+        if (retention !== "never-save") await this.extractAndConsolidate(content, role, { ...source, conversationId, messageId: sourceMessageId });
         this.db.prepare(`UPDATE ofs_ingested_turns SET status = 'complete' WHERE source_message_id = $id`).run({ $id: sourceMessageId });
       } catch (error) {
         this.db.run(`DELETE FROM ofs_ingested_turns WHERE source_message_id = ?`, [sourceMessageId]);
@@ -341,12 +352,14 @@ export class OrionFS {
     const now = source?.createdAt ?? Date.now();
     const conversationId = source?.conversationId || "__global__";
     const sourceMessageId = source?.messageId ?? null;
+    const retention = source?.retention === "temporary" || source?.retention === "durable" ? source.retention : "conversation";
+    const expiresAt = retention === "temporary" ? now + 30 * 24 * 60 * 60 * 1000 : null;
 
     const insertMem = this.db.prepare(`
       INSERT INTO ofs_memories (
-        id, content, type, entities, embedding, importance, access_count, created_at, last_accessed, entity_key, conversation_id, source_message_id
+        id, content, type, entities, embedding, importance, access_count, created_at, last_accessed, entity_key, conversation_id, source_message_id, retention, expires_at
       ) VALUES (
-        $id, $content, $type, $entities, $embedding, $importance, 1, $now, $now, $entityKey, $conversationId, $sourceMessageId
+        $id, $content, $type, $entities, $embedding, $importance, 1, $now, $now, $entityKey, $conversationId, $sourceMessageId, $retention, $expiresAt
       )
     `);
 
@@ -404,6 +417,8 @@ export class OrionFS {
           $entityKey: entityKey,
           $conversationId: conversationId,
           $sourceMessageId: sourceMessageId,
+          $retention: retention,
+          $expiresAt: expiresAt,
         });
 
         insertFts.run({
@@ -439,6 +454,8 @@ export class OrionFS {
         importance: fact.importance,
         conversationId,
         sourceMessageId,
+        retention,
+        expiresAt,
       });
     }
 
@@ -482,8 +499,10 @@ export class OrionFS {
     const excluded = new Set(excludedMessageIds);
     const scopes = new Set(policy?.conversationIds ?? []), explicit = new Set(policy?.memoryIds ?? []), blocked = new Set(policy?.excludedIds ?? []);
     const linkScopes = [...new Set([...scopes, ...[...explicit].map(id => this.vectorCache.get(id)?.conversationId).filter((id): id is string => Boolean(id))])];
-    const allowed = (cached: { conversationId: string; sourceMessageId: string | null }, id = '') =>
+    const allowed = (cached: { conversationId: string; sourceMessageId: string | null; retention: "temporary"|"conversation"|"durable"; expiresAt: number|null }, id = '') =>
       !blocked.has(id) && !excluded.has(cached.sourceMessageId ?? '') &&
+      (cached.expiresAt === null || cached.expiresAt > now) &&
+      (cached.retention === "durable" || cached.conversationId === policy?.activeConversationId || cached.conversationId === conversationId) &&
       (policy ? (!policy.strict || scopes.has(cached.conversationId) || explicit.has(id)) : (conversationId === '__all__' || cached.conversationId === conversationId || cached.conversationId === '__global__'));
 
     // STEP 1: Fast In-Memory Vector Scan
@@ -558,9 +577,9 @@ export class OrionFS {
       const batch = ids.slice(offset, offset + 400);
       const placeholders = batch.map(() => "?").join(",");
       rows.push(...this.db.query(
-        `SELECT id, content, type, entities, importance, access_count, created_at, last_accessed, conversation_id, source_message_id
-         FROM ofs_memories WHERE id IN (${placeholders}) AND superseded_by IS NULL AND (? = 1 OR conversation_id IN (?, '__global__'))`
-      ).all(...batch, conversationId === "__all__" ? 1 : 0, conversationId) as Record<string, unknown>[]);
+        `SELECT id, content, type, entities, importance, access_count, created_at, last_accessed, conversation_id, source_message_id, retention, expires_at
+         FROM ofs_memories WHERE id IN (${placeholders}) AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > ?) AND (? = 1 OR conversation_id IN (?, '__global__'))`
+      ).all(...batch, now, conversationId === "__all__" ? 1 : 0, conversationId) as Record<string, unknown>[]);
     }
     const typedRows = rows as {
       id: string;
@@ -573,6 +592,8 @@ export class OrionFS {
       last_accessed: number;
       conversation_id: string;
       source_message_id: string | null;
+      retention: "temporary" | "conversation" | "durable";
+      expires_at: number | null;
     }[];
 
     const scoredMemories: ActivatedMemory[] = [];
@@ -614,6 +635,8 @@ export class OrionFS {
           lastAccessed: r.last_accessed,
           conversationId: r.conversation_id,
           sourceMessageId: r.source_message_id,
+          retention: r.retention ?? "conversation",
+          expiresAt: r.expires_at ?? null,
           score: finalScore,
           activationSource: direct > synapticBoost ? "direct" : "synaptic_hop",
         });
@@ -650,10 +673,12 @@ export class OrionFS {
       );
     }
 
-    const elapsed = (performance.now() - startTime).toFixed(2);
-    console.log(
-      `[OrionFS] Recalled ${selected.length} memories (${usedTokens} tokens) in ${elapsed}ms`
-    );
+    if (process.env.ORION_OFS_PROFILE === "1") {
+      const elapsed = (performance.now() - startTime).toFixed(2);
+      console.info(
+        `[OrionFS] Recalled ${selected.length} memories (${usedTokens} tokens) in ${elapsed}ms`
+      );
+    }
 
     return selected;
   }
@@ -808,6 +833,29 @@ export class OrionFS {
     this.vectorCache.clear(); this.warmVectorCache();
   }
 
+  public async restoreConversationSnapshot(snapshot: OFSSnapshot, conversationId: string): Promise<void> {
+    await this.ingestionQueue;
+    if (snapshot.version !== 1) throw new Error("Unsupported OrionFS checkpoint.");
+    const memories = snapshot.memories.filter(row => row.conversation_id === conversationId);
+    this.db.transaction(() => {
+      const current = this.db.query("SELECT id FROM ofs_memories WHERE conversation_id = ?").all(conversationId);
+      for (const row of current) this.db.run("DELETE FROM ofs_memories_fts WHERE id = ?", [row.id]);
+      this.db.run("DELETE FROM ofs_memories WHERE conversation_id = ?", [conversationId]);
+      this.db.run("DELETE FROM ofs_links WHERE conversation_id = ?", [conversationId]);
+      this.db.run("DELETE FROM ofs_ingested_turns WHERE conversation_id = ?", [conversationId]);
+      for (const [table, rows] of [["ofs_memories", memories], ["ofs_links", snapshot.links.filter(row => row.conversation_id === conversationId)], ["ofs_ingested_turns", snapshot.turns.filter(row => row.conversation_id === conversationId)]] as const) {
+        const columns = (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(column => column.name);
+        for (const row of rows) {
+          const keys = columns.filter(key => Object.hasOwn(row, key));
+          const values = keys.map(key => key === "embedding" ? new Uint8Array(Buffer.from(String(row[key]), "base64")) : row[key]);
+          this.db.run(`INSERT OR REPLACE INTO ${table} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`, values);
+        }
+      }
+      this.db.run("INSERT INTO ofs_memories_fts (id,content,entities) SELECT id,content,entities FROM ofs_memories WHERE conversation_id = ?", [conversationId]);
+    })();
+    this.vectorCache.clear(); this.warmVectorCache();
+  }
+
   public listMemories(limit = 50, offset = 0) {
     limit = Math.max(1, Math.min(100, Math.floor(limit)));
     offset = Math.max(0, Math.floor(offset));
@@ -832,6 +880,48 @@ export class OrionFS {
     })();
   }
 
+  public async updateMemory(conversationId: string, id: string, content: string, retention?: "temporary" | "conversation" | "durable"): Promise<void> {
+    await this.ingestionQueue;
+    const clean = content.replace(/\u0000/g, " ").trim().slice(0, 4000);
+    if (!clean) throw new Error("A memory cannot be empty.");
+    const row = this.db.query("SELECT entities, importance, source_message_id, retention FROM ofs_memories WHERE id = ? AND conversation_id = ? AND superseded_by IS NULL").all(id, conversationId)[0];
+    if (!row) throw new Error("Memory is no longer available in this conversation.");
+    retention ??= row.retention === "temporary" || row.retention === "durable" ? row.retention : "conversation";
+    const vector = encodeLocal(clean);
+    const expiresAt = retention === "temporary" ? Date.now() + 30 * 24 * 60 * 60 * 1000 : null;
+    this.db.transaction(() => {
+      this.db.run("UPDATE ofs_memories SET content = ?, embedding = ?, retention = ?, expires_at = ? WHERE id = ? AND conversation_id = ?", [clean, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength), retention, expiresAt, id, conversationId]);
+      this.db.run("DELETE FROM ofs_memories_fts WHERE id = ?", [id]);
+      this.db.run("INSERT INTO ofs_memories_fts (id, content, entities) VALUES (?, ?, ?)", [id, clean, String(row.entities)]);
+    })();
+    this.vectorCache.set(id, { vec: vector, entities: this.parseEntities(String(row.entities)), importance: Number(row.importance), conversationId, sourceMessageId: row.source_message_id ? String(row.source_message_id) : null, retention, expiresAt });
+  }
+
+  public hasIngestedTurn(sourceMessageId: string): boolean {
+    return (this.db.query("SELECT status FROM ofs_ingested_turns WHERE source_message_id = ?").all(sourceMessageId)[0]?.status === "complete");
+  }
+
+  public async setSourceRetention(conversationId: string, sourceMessageId: string, retention: "temporary"|"conversation"|"durable"|"never-save"): Promise<void> {
+    await this.ingestionQueue;
+    const rows = this.db.query("SELECT id FROM ofs_memories WHERE conversation_id = ? AND (source_message_id = ? OR source_message_id LIKE ?)").all(conversationId, sourceMessageId, `${sourceMessageId}:%`);
+    const ids = rows.map(row => String(row.id));
+    if (retention === "never-save") { await this.forgetMemories(conversationId, ids); return; }
+    const expiresAt = retention === "temporary" ? Date.now() + 30 * 86400000 : null;
+    this.db.run("UPDATE ofs_memories SET retention = ?, expires_at = ? WHERE conversation_id = ? AND (source_message_id = ? OR source_message_id LIKE ?)", [retention, expiresAt, conversationId, sourceMessageId, `${sourceMessageId}:%`]);
+    for (const id of ids) { const cached = this.vectorCache.get(id); if (cached) { cached.retention = retention; cached.expiresAt = expiresAt; } }
+  }
+
+  public async resetIngestedSource(conversationId: string, sourceMessageId: string): Promise<void> {
+    await this.ingestionQueue;
+    const rows = this.db.query("SELECT id FROM ofs_memories WHERE conversation_id = ? AND (source_message_id = ? OR source_message_id LIKE ?)").all(conversationId, sourceMessageId, `${sourceMessageId}:%`);
+    this.db.transaction(() => {
+      for (const row of rows) { this.db.run("DELETE FROM ofs_memories_fts WHERE id = ?", [row.id]); this.db.run("DELETE FROM ofs_memories WHERE id = ?", [row.id]); }
+      this.db.run("DELETE FROM ofs_ingested_turns WHERE conversation_id = ? AND (source_message_id = ? OR source_message_id LIKE ?)", [conversationId, sourceMessageId, `${sourceMessageId}:%`]);
+      for (const row of rows) this.db.run("DELETE FROM ofs_links WHERE conversation_id = ? AND (source = ? OR target = ?)", [conversationId, row.id, row.id]);
+    })();
+    for (const row of rows) this.vectorCache.delete(String(row.id));
+  }
+
   public removeConversation(conversationId: string): void {
     const ids = this.db.query(`SELECT id FROM ofs_memories WHERE conversation_id = ?`).all(conversationId) as { id: string }[];
     this.db.transaction(() => {
@@ -847,7 +937,22 @@ export class OrionFS {
     if (this.closed) return;
     this.closed = true;
     // Seal the encrypted memory snapshot from a fully checkpointed database.
-    try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* Close still releases the connection; any WAL is sealed by storage recovery. */ }
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      const pages = Number((this.db.query('PRAGMA page_count').all()[0]?.page_count as number | undefined) ?? 0);
+      const freePages = Number((this.db.query('PRAGMA freelist_count').all()[0]?.freelist_count as number | undefined) ?? 0);
+      // SQLite keeps deleted rows in its freelist. Deflate can compress empty
+      // pages, but reused pages may still contain old payload bytes and cost
+      // CPU on every seal/open. Rebuild only when enough space is reclaimable.
+      if (pages > 0 && freePages >= 32 && freePages / pages >= 0.1) {
+        const startedAt = performance.now();
+        this.db.exec('VACUUM');
+        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        console.info(`[OrionFS] reclaimed ${freePages.toLocaleString()} of ${pages.toLocaleString()} free SQLite pages before sealing (${Math.round(performance.now() - startedAt)} ms).`);
+      }
+    } catch (error) {
+      console.warn('[OrionFS] database compaction skipped; the checkpointed database will still be sealed.', error);
+    }
     this.db.close();
   }
 }

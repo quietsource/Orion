@@ -78,6 +78,30 @@ body.sidebar-collapsed .header{padding-left:12px}
 .message-footer{display:flex;align-items:center;gap:10px;min-height:20px;margin-top:8px;color:var(--muted);font-size:10px}
 .message-copy{padding:2px 0;border:0;background:transparent;color:var(--muted);font-size:10px;cursor:pointer}
 .message-copy:hover{color:var(--secondary)}
+.message-icon-button{width:25px;height:25px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:7px;background:transparent;color:var(--muted);cursor:pointer;transition:background .14s ease,color .14s ease}
+.message-icon-button:hover{background:#ffffff0b;color:var(--text)}
+.message-icon-button:focus-visible,.message-retention-trigger:focus-visible,.message-retention-option:focus-visible,.message-inline-action:focus-visible{outline:2px solid #8175dc;outline-offset:2px}
+.message-icon-button svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
+.message-edit-send{color:var(--accent,#a493ff)}
+.message-retention-control{position:relative;display:inline-flex;align-items:center}
+.message-retention-trigger{display:inline-flex;align-items:center;gap:4px;min-height:25px;padding:0 6px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:10px;white-space:nowrap;cursor:pointer;list-style:none;transition:background .14s ease,color .14s ease}
+.message-retention-trigger::-webkit-details-marker{display:none}
+.message-retention-trigger:hover,.message-retention-control[open]>.message-retention-trigger{background:#ffffff0b;color:var(--text)}
+.message-retention-chevron{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;transition:transform .14s ease}
+.message-retention-control[open] .message-retention-chevron{transform:rotate(180deg)}
+.message-retention-menu{position:absolute;z-index:80;right:0;bottom:calc(100% + 6px);display:none;width:min(216px,calc(100vw - 24px));padding:4px;border:1px solid #34343c;border-radius:10px;background:#151519;color:var(--text)}
+.message-retention-control[open]>.message-retention-menu{display:grid;gap:2px}
+.message-retention-option{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:7px 8px;border:0;border-radius:7px;background:transparent;color:var(--text);text-align:left;font:inherit;cursor:pointer}
+.message-retention-option:hover,.message-retention-option[aria-checked="true"]{background:#ffffff0a}
+.message-retention-option:disabled{opacity:.55;cursor:wait}
+.message-retention-option-copy{display:grid;gap:2px;min-width:0}
+.message-retention-option-title{font-size:11px;line-height:1.3}
+.message-retention-option-detail{color:var(--muted);font-size:9px;line-height:1.3}
+.message-retention-check{width:13px;height:13px;flex:none;fill:none;stroke:#b2a5ff;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.message-inline-action{padding:4px 8px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:inherit;font-size:11px;cursor:pointer}
+.message-inline-action:hover{background:#ffffff0b;color:var(--text)}
+.message-edit-input{display:block;width:min(68vw,720px);min-height:70px;max-height:360px;resize:vertical;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--composer-bg,var(--surface));color:var(--text);font:inherit;line-height:1.55;outline:none}
+.message-edit-input:focus{border-color:#8175dc}
 .message-metric{color:var(--muted);font-variant-numeric:tabular-nums}
 .context-menu{position:fixed;z-index:1000;min-width:176px;padding:5px;border:1px solid #35353d;border-radius:10px;background:#151519;box-shadow:0 14px 44px #000b;backdrop-filter:blur(18px)}
 .context-menu[hidden]{display:none}
@@ -151,6 +175,7 @@ body.sidebar-collapsed .sidebar:hover #collapse,body.sidebar-collapsed .sidebar:
 .engine-manager-card progress{display:block;width:100%;height:5px;margin:5px 0 9px;accent-color:#9a8dff}
 .engine-manager-card progress[hidden]{display:none}
 .engine-manager-card button{min-height:30px;padding:0 10px;font-size:10px}
+.engine-manager-actions{display:flex;flex-wrap:wrap;gap:7px}
 .settings-section{min-width:0}.settings-section h3{margin:3px 0 5px;font-size:16px;font-weight:580;letter-spacing:-.02em}.settings-section>p.muted:first-of-type{margin:0 0 14px}
 .settings-section>label:not(.job-check){min-width:0;margin:0 0 9px;padding:10px 11px;border:1px solid var(--border-soft);border-radius:9px;background:#0d0d10}
 .settings-section>label:not(.job-check)>input,.settings-section>label:not(.job-check)>select,.settings-section .workspace-picker{width:100%;min-width:0}

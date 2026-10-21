@@ -158,13 +158,21 @@ export class LlamaManager {
     else env.LD_LIBRARY_PATH = [...dirs, env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
     return env;
   }
-  async install() {
+  async install(force = false) {
     if (this.installPromise) return this.installPromise;
-    this.installPromise = this.doInstall().finally(() => { this.installPromise = null; }); return this.installPromise;
+    this.installPromise = this.doInstall(undefined, force).finally(() => { this.installPromise = null; }); return this.installPromise;
   }
-  private async doInstall(previousRelease?: string) {
+  async uninstall() {
+    await this.stop();
+    await fs.rm(this.root, { recursive: true, force: true });
+    this.state = null; this.modelRuntimes = null;
+  }
+  private async doInstall(previousRelease?: string, force = false) {
     const current = await this.loadState();
-    if (current && await fs.access(current.serverBinary).then(() => true, () => false) && await fs.access(current.cpuBinary).then(() => true, () => false)) return;
+    const currentHealthy = Boolean(current && await fs.access(current.serverBinary).then(() => true, () => false) && await fs.access(current.cpuBinary).then(() => true, () => false));
+    if (currentHealthy) {
+      if (!force) return;
+    }
     let gpu = await this.hardware(); const releaseResponse = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100', { headers: { 'user-agent': 'Orion-Local-AI/0.1', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30000) });
     if (!releaseResponse.ok) throw new Error(`Could not check llama.cpp releases (${releaseResponse.status}).`);
     const releases = await releaseResponse.json() as Release[];
@@ -191,7 +199,17 @@ export class LlamaManager {
       }
     }
     if (!selected) throw new Error(`No llama.cpp runtime is published for ${process.platform}/${process.arch}.`);
+    let currentVerified = false;
+    if (currentHealthy && current) {
+      const primaryEnv = await this.runtimeEnvironment(current.runtimeDirectory ?? path.dirname(current.serverBinary));
+      const primary = await run(current.serverBinary, ['--help'], 15_000, primaryEnv).catch(() => null);
+      const cpuEnv = await this.runtimeEnvironment(current.cpuRuntimeDirectory ?? path.dirname(current.cpuBinary));
+      const cpu = current.cpuBinary === current.serverBinary ? primary : await run(current.cpuBinary, ['--help'], 15_000, cpuEnv).catch(() => null);
+      currentVerified = primary?.code === 0 && cpu?.code === 0;
+    }
+    if (force && currentVerified && current?.release === selected.release.tag_name) return;
     if (previousRelease && (selected.release.tag_name === previousRelease || (/^b\d+$/.test(previousRelease) && /^b\d+$/.test(selected.release.tag_name) && Number(selected.release.tag_name.slice(1)) <= Number(previousRelease.slice(1))))) throw new Error('No newer compatible-platform llama.cpp release is available.');
+    if (currentHealthy) await this.stop();
     const installId = randomUUID(); await fs.mkdir(this.root, { recursive: true });
     const gpuRoot = path.join(this.root, 'runtime-gpu'), cpuRoot = path.join(this.root, 'runtime-cpu');
     await fs.rm(gpuRoot, { recursive: true, force: true }); await fs.rm(cpuRoot, { recursive: true, force: true });

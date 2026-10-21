@@ -1,3 +1,5 @@
+import type { Conversation } from './types';
+
 export interface MemoryLens {
   scope: "conversation" | "project" | "personal" | "all";
   project: string;
@@ -52,7 +54,14 @@ export interface MemoryEntry {
   createdAt: number;
   importance: number;
   entities: string[];
+  retention?: "temporary" | "conversation" | "durable";
+  sourceName?: string;
+  sourcePart?: number;
+  sourcePage?: number;
+  score?: number;
+  reason?: string;
 }
+export interface RecallPreview { items: MemoryEntry[]; query: string; }
 export interface MemorySource {
   conversationId: string;
   messageId: string;
@@ -128,6 +137,13 @@ export interface CleanupPreview {
   attachments: Array<{ id: string; name: string; bytes: number }>;
 }
 export interface MemoryHistoryAPI {
+  retrievalPreview(conversationId: string, query: string): Promise<RecallPreview>;
+  memoryEdit(conversationId: string, memoryId: string, content: string): Promise<void>;
+  memoryRetention(conversationId: string, memoryId: string, retention: "temporary" | "conversation" | "durable" | "never-save"): Promise<void>;
+  messageRetention(conversationId: string, messageId: string, retention: "temporary" | "conversation" | "durable" | "never-save"): Promise<void>;
+  checkpointMessage(conversationId: string, messageId: string): Promise<void>;
+  rollbackMessage(conversationId: string, messageId: string): Promise<Conversation>;
+  cleanupUndo(conversationId: string): Promise<boolean>;
   cleanupPreview(conversationId: string): Promise<CleanupPreview>;
   cleanup(conversationId: string, selection: ConversationCleanup): Promise<void>;
   context(conversationId: string): Promise<MemoryContext>;

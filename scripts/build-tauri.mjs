@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { cp, mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 const root = path.resolve(import.meta.dir, '..');
 process.chdir(root);
@@ -6,6 +6,18 @@ async function run(command, args) { const child = Bun.spawn([command, ...args], 
 await run('bun', ['scripts/generate-highlight-languages.mjs']);
 await run('bun', ['run', 'typecheck']);
 await mkdir('dist/main', { recursive: true });
+await mkdir('dist/ocr', { recursive: true });
+await mkdir('dist/native-canvas', { recursive: true });
+const canvasPackage = process.platform === 'win32' && process.arch === 'x64' ? 'canvas-win32-x64-msvc'
+  : process.platform === 'linux' && process.arch === 'x64' ? 'canvas-linux-x64-gnu'
+    : process.platform === 'linux' && process.arch === 'arm64' ? 'canvas-linux-arm64-gnu'
+      : process.platform === 'darwin' && process.arch === 'arm64' ? 'canvas-darwin-arm64'
+        : process.platform === 'darwin' && process.arch === 'x64' ? 'canvas-darwin-x64' : null;
+if (!canvasPackage) throw Error(`No managed @napi-rs/canvas binary is available for ${process.platform}-${process.arch}.`);
+const canvasPackageDir = `node_modules/@napi-rs/${canvasPackage}`;
+for (const file of await readdir(canvasPackageDir)) if (/\.node$/.test(file) || file === 'icudtl.dat') await cp(path.join(canvasPackageDir, file), path.join('dist/native-canvas', file));
+await cp('node_modules/tesseract.js/dist/worker.min.js', 'dist/ocr/worker.min.js');
+for (const file of await readdir('node_modules/tesseract.js-core')) if (/^tesseract-core.*\.wasm(?:\.js)?$/.test(file)) await cp(path.join('node_modules/tesseract.js-core', file), path.join('dist/ocr', file));
 const worker = await Bun.build({ entrypoints: ['src/main/ofsWorker.ts'], outdir: 'dist/main', target: 'bun', minify: false });
 if (!worker.success) throw Error(worker.logs.map(String).join('\n'));
 const target = process.env.TAURI_ENV_TARGET_TRIPLE ?? (process.platform === 'win32' ? 'x86_64-pc-windows-msvc' : process.arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu');

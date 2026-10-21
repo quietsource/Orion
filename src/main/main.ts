@@ -9,6 +9,8 @@ import spawn from 'cross-spawn';
 import si from 'systeminformation';
 import { Cron } from 'croner';
 import { OfficeParser } from 'officeparser';
+import { createWorker } from 'tesseract.js';
+import { createCanvas, DOMMatrix } from '@napi-rs/canvas';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -31,10 +33,19 @@ import { nativeWorkspaceTools, parseTextToolCalls, runNativeWorkspaceTool } from
 import { createFocusCadence } from './focusCadence';
 import { ORION_SUBAGENT_MODEL, SubagentCapacity, type OrionSubagentRole } from './subagents';
 import { runSubagentInference } from './subagentRuntime';
-import { initializeSecureStorage, readEncryptedText, writeEncryptedText, openEncryptedDatabase, sealEncryptedDatabase } from './secure-storage';
+import { initializeSecureStorage, readEncryptedText, writeEncryptedText, openEncryptedDatabase, sealEncryptedDatabase, openEncryptedOfsDatabase, sealEncryptedOfsDatabase } from './secure-storage';
+import { checkpointConversation as checkpointWithVelo, rollbackConversation as rollbackWithVelo, removeConversationRollback } from './veloRollback';
 import { downloadUpdateAsset, findLatestUpdate, isNewerVersion, type AppUpdate, type UpdateAsset } from './appUpdater';
 import { fetchWithLocalReconnect } from './localReconnect';
 import { openUpdatePackage } from './updateHandoff';
+
+// pdfjs-dist checks the DOM global before using its canvas renderer. The
+// native canvas package already provides the compatible implementation.
+if (!('DOMMatrix' in globalThis)) Reflect.set(globalThis, 'DOMMatrix', DOMMatrix);
+let pdfDocumentLoader: Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')['getDocument']> | undefined;
+function getPdfDocument() {
+  return pdfDocumentLoader ??= import('pdfjs-dist/legacy/build/pdf.mjs').then(module => module.getDocument);
+}
 
 // Desktop launchers can close the inherited output pipe while Orion is still running.
 // A later diagnostic write must not turn that closed pipe into an uncaught exception.
@@ -61,7 +72,10 @@ function getMemoryHistory() {
       if (index < 0) all.push(value); else all[index] = value;
       await writeConversations(all);
     }),
+    checkpointConversation: checkpointWithVelo,
+    rollbackConversation: rollbackWithVelo,
     baseEngine: async () => getOrionFS(await getSettings()),
+    reindexConversation: async conversation => indexOFSConversation(conversation, await getSettings()),
     createEngine: async id => {
       if (!/^[a-f0-9-]{36}$/.test(id)) throw Error('Invalid memory branch.');
       const directory = path.join(dataDir(), 'memory-history', 'branches');
@@ -70,7 +84,7 @@ function getMemoryHistory() {
       const fresh = !(await fs.stat(path.join(directory, `${id}.ready.enc`)).catch(() => null));
       const settings = await getSettings();
       const client = new OFSClient({ dbPath, maxContextTokens: Math.max(8192, settings.contextWindow), reservedOutputTokens: 1024, memoryBudgetRatio: .25 }, path.join(app.getAppPath(), 'dist', 'main', 'ofsWorker.js'), {
-        prepare: () => openEncryptedDatabase(`${dbPath}.enc`, dbPath), seal: () => sealEncryptedDatabase(`${dbPath}.enc`, dbPath), idleMs: 20_000
+        prepare: () => openEncryptedOfsDatabase(path.join(directory, `${id}.ofs`), `${dbPath}.enc`, dbPath), seal: () => sealEncryptedOfsDatabase(path.join(directory, `${id}.ofs`), dbPath, `${dbPath}.enc`), idleMs: 20_000
       });
       return { client, fresh };
     },
@@ -491,8 +505,8 @@ function getOrionFS(settings: AppSettings): OFSClient {
     reservedOutputTokens: 1024,
     memoryBudgetRatio: 0.25
   }, path.join(app.getAppPath(), 'dist', 'main', 'ofsWorker.js'), {
-    prepare: () => openEncryptedDatabase(`${dbPath}.enc`, dbPath),
-    seal: () => sealEncryptedDatabase(`${dbPath}.enc`, dbPath),
+    prepare: () => openEncryptedOfsDatabase(path.join(dataDir(), 'ofs-memory.ofs'), `${dbPath}.enc`, dbPath),
+    seal: () => sealEncryptedOfsDatabase(path.join(dataDir(), 'ofs-memory.ofs'), dbPath, `${dbPath}.enc`),
     idleMs: 20_000
   });
   }
@@ -500,11 +514,47 @@ function getOrionFS(settings: AppSettings): OFSClient {
 }
 async function indexOFSConversation(conversation: Conversation, settings: AppSettings): Promise<void> {
   const engine = await getMemoryHistory().engine(conversation.id);
+  let turnRetention: NonNullable<Message['memoryRetention']> = 'conversation';
+  let ocrWorker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  try {
   for (const message of conversation.messages) {
     if (appQuitting || ofsDeletedConversations.has(conversation.id)) break;
     if (message.role !== 'user' && message.role !== 'assistant') continue;
-    await engine.ingestTurn(message.role, message.content, { conversationId: conversation.id, messageId: message.id, createdAt: message.createdAt });
+    if (message.role === 'user') turnRetention = message.memoryRetention ?? 'conversation';
+    const retention = turnRetention;
+    if (message.role === 'user') {
+      let searchFrom = message.content.indexOf('\n\nAttached files:\n');
+      if (searchFrom >= 0) searchFrom += '\n\nAttached files:\n'.length;
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.kind !== 'document') continue;
+        const marker = `### ${attachment.name}`;
+        const start = message.content.indexOf(marker, Math.max(0, searchFrom));
+        if (start < 0) continue;
+        const contentStart = message.content.indexOf('\n\n', start + marker.length);
+        if (contentStart < 0) continue;
+        const nextFile = message.content.indexOf('\n\n### ', contentStart + 2);
+        const extracted = message.content.slice(contentStart + 2, nextFile < 0 ? undefined : nextFile).trim();
+        searchFrom = nextFile < 0 ? message.content.length : nextFile + 2;
+        if (extracted) await getMemoryHistory().ingestDocument(conversation.id, attachment.name, extracted, attachment.id, retention);
+      }
+    }
+    const attachmentMarker = '\n\nAttached files:\n', markerIndex = message.role === 'user' ? message.content.indexOf(attachmentMarker) : -1;
+    const indexedText = markerIndex >= 0 ? message.content.slice(0, markerIndex).trim() : message.content;
+    await engine.ingestTurn(message.role, indexedText, { conversationId: conversation.id, messageId: message.id, createdAt: message.createdAt, retention });
+    if (message.role === "user" && retention !== "never-save") for (const attachment of message.attachments ?? []) {
+      if (attachment.kind !== "image") continue;
+      if (await engine.hasIngestedTurn(`${message.id}:ocr:${attachment.id}`)) continue;
+      const extension = ({"image/jpeg":"jpg","image/png":"png","image/webp":"webp","image/gif":"gif","image/bmp":"bmp"} as Record<string,string>)[attachment.mimeType];
+      if (!extension) continue;
+      const imagePath = path.join(dataDir(), "attachments", `${attachment.id}.${extension}`);
+      try {
+        ocrWorker ??= await createWorker("eng", 1, { cachePath: path.join(dataDir(), "ocr"), langPath: "https://tessdata.projectnaptha.com/4.0.0", workerPath: path.join(app.getAppPath(), "dist", "ocr", "worker.min.js"), corePath: path.join(app.getAppPath(), "dist", "ocr", "tesseract-core.wasm.js"), gzip: true, logger: () => undefined });
+        const extracted = (await ocrWorker.recognize(imagePath)).data.text.trim();
+        if (extracted) await engine.ingestTurn("user", `Text extracted from attached image ${attachment.name}:\n${extracted}`, { conversationId: conversation.id, messageId: `${message.id}:ocr:${attachment.id}`, createdAt: message.createdAt, retention });
+      } catch (error) { console.warn(`OrionFS OCR indexing skipped ${attachment.name}:`, error); }
+    }
   }
+  } finally { await ocrWorker?.terminate().catch(() => undefined); }
 }
 
 let ofsSeedPromise: Promise<void> | null = null;
@@ -529,7 +579,12 @@ async function retrieveConversationMemory(query: string, settings: AppSettings, 
   const privateSources=allowPrivateVoice?[]:[...await getVoiceManager().privateSources(),...(await readConversations()).filter(c=>c.localOnly||c.privateVoice||c.messages.some(m=>m.voiceInput)).flatMap(c=>c.messages.map(m=>m.id))];
   const memories = await engine.recall(query, maxTokens, conversationId ? '__all__' : '__no_active_conversation__', [...excludedIds, ...privateSources, ...(context?.lens.excludedSources ?? [])], conversationId ? await history.policy(conversationId) : undefined);
   let remaining = maxTokens;
-  return memories.filter(memory => !excludedIds.has(memory.sourceMessageId ?? memory.id)).map(memory => ({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: tokenCount({ id: memory.id, conversationId: memory.conversationId, title: 'OrionFS memory', messageId: memory.sourceMessageId ?? memory.id, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: 0 }) })).filter(chunk => { if (chunk.tokens > remaining) return false; remaining -= chunk.tokens; return true; });
+  return (await Promise.all(memories.filter(memory => !excludedIds.has(memory.sourceMessageId ?? memory.id)).map(async memory => {
+    const details = memory.sourceMessageId ? await history.sourceDetails(memory.sourceMessageId) : null;
+    const chunk: MemoryChunk = { id: memory.id, conversationId: memory.conversationId, title: details?.name ?? 'OrionFS memory', messageId: details?.messageId ?? memory.sourceMessageId ?? memory.id, sourceName: details?.name, sourcePart: details?.part, sourcePage: details?.page, reason: memory.activationSource === 'direct' ? 'Matched this request directly' : 'Related through connected memory', score: memory.score, role: memory.type, text: memory.content, createdAt: memory.createdAt, tokens: 0 };
+    chunk.tokens = tokenCount(chunk);
+    return chunk;
+  }))).filter(chunk => { if (chunk.tokens > remaining) return false; remaining -= chunk.tokens; return true; });
 }
 
 function showMainWindow() {
@@ -1263,6 +1318,36 @@ ipcMain.handle('llama:install', async () => { await markLlamaIntroSeen(); return
 ipcMain.handle('llama:status', async () => llamaManager.isInstalled());
 ipcMain.handle('exl2:install', async () => { await markLlamaIntroSeen(); return exllamaManager.install(); });
 ipcMain.handle('exl2:status', async () => exllamaManager.isInstalled());
+ipcMain.handle('engine:update-repair', async (event, engine: string) => {
+  if (!win || event.sender !== win.webContents) throw Error('Engine management is only available in Orion.');
+  if (!['llama','exllama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
+  if (chatPreparing || activeAbort || modelCompatibilityBusy) throw Error('Wait for chat generation and model checks to finish before maintaining engines.');
+  if ((await diffusionManager.getState()).running) throw Error('Wait for image or video generation to finish before maintaining engines.');
+  if (engine === 'ollama') {
+    await shell.openExternal(process.platform === 'linux' ? 'https://ollama.com/download/linux' : 'https://ollama.com/download');
+    return 'Opened Ollama’s official installer page. Ollama is updated through its own installer.';
+  }
+  if (engine === 'llama') { await llamaManager.install(true); return 'Checked and updated or repaired the managed llama.cpp runtime.'; }
+  if (engine === 'exllama') { await exllamaManager.install(true); return 'Checked and updated or repaired ExLlamaV2. Its managed runtime was recreated and verified.'; }
+  const state = await diffusionManager.install(true);
+  return state.detail.includes('healthy and current') ? 'stable-diffusion.cpp is healthy and already up to date.' : state.detail;
+});
+ipcMain.handle('engine:uninstall', async (event, engine: string) => {
+  if (!win || event.sender !== win.webContents) throw Error('Engine management is only available in Orion.');
+  if (!['llama','exllama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
+  if (chatPreparing || activeAbort || modelCompatibilityBusy) throw Error('Wait for chat generation and model checks to finish before removing an engine.');
+  if ((await diffusionManager.getState()).running) throw Error('Wait for image or video generation to finish before removing an engine.');
+  if (engine === 'llama') { await llamaManager.uninstall(); return 'Removed Orion’s managed llama.cpp engine. Downloaded models were kept.'; }
+  if (engine === 'exllama') { await exllamaManager.uninstall(); return 'Removed Orion’s managed ExLlamaV2 runtime. Downloaded models and shared uv were kept.'; }
+  if (engine === 'diffusion') { await diffusionManager.uninstall(); return 'Removed Orion’s managed stable-diffusion.cpp engine. Downloaded models and creations were kept.'; }
+  if (engine === 'ollama') {
+    if (process.platform === 'win32') await shell.openExternal('ms-settings:appsfeatures-app');
+    else if (process.platform === 'linux') await shell.openExternal('https://ollama.com/download/linux');
+    else await shell.openExternal('https://ollama.com/download');
+    return 'Opened system app management. Remove Ollama there; it is installed and maintained by its official installer.';
+  }
+  throw Error('Unknown engine.');
+});
 let ollamaInstallerRunning = false;
 ipcMain.handle('ollama:install', async () => {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
@@ -1385,6 +1470,10 @@ ipcMain.handle('conversation:save', async (_, value: Conversation, indexMemory =
   }
   const all = await readConversations(); const idx = all.findIndex(c => c.id === value.id); if (idx < 0) all.push(value); else all[idx] = value; await writeConversations(all);
   if (indexMemory && !appQuitting) {
+    const user = [...value.messages].reverse().find(item => item.role === 'user');
+    if (user) await getMemoryHistory().checkpointMessage(value.id, user.id);
+  }
+  if (indexMemory && !appQuitting) {
     await indexOFSConversation(value, await getSettings());
   }
 });
@@ -1397,6 +1486,7 @@ ipcMain.handle('conversation:delete', async (_, id: string) => {
   await (await getMemoryHistory().engine(id)).removeConversation(id);
   await serializeMutation('conversations', async () => { await writeConversations((await readConversations()).filter(c => c.id !== id)); });
   await getMemoryHistory().remove(id);
+  await removeConversationRollback(id);
 });
 ipcMain.handle('memory:stats', async (_, conversationId?: string) => {
   const settings = await getSettings();
@@ -1408,7 +1498,81 @@ ipcMain.handle('memory:ofs-list', async (_, offset = 0, conversationId?: string)
   const settings = await getSettings();
   return (await getMemoryHistory().engine(conversationId)).listMemories(50, Number.isFinite(offset) ? offset : 0);
 });
-for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare','cleanupPreview','cleanup'] as const) {
+ipcMain.handle('memory:ingest-documents', async (event, conversationId: string) => {
+  if (!win || event.sender !== win.webContents) throw Error('Document ingestion is only available in Orion.');
+  if (typeof conversationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(conversationId)) throw Error('Open a conversation before importing documents.');
+  if (!(await readConversations()).some(conversation => conversation.id === conversationId)) throw Error('That conversation no longer exists. Open a conversation and try again.');
+  const result = await dialog.showOpenDialog(win, { properties: ['openFile', 'openDirectory', 'multiSelections'], filters: [{ name: 'Documents and images', extensions: ['txt','md','markdown','rst','csv','tsv','json','xml','html','htm','css','js','ts','py','rs','go','java','c','cpp','cs','sql','yaml','yml','toml','log','pdf','docx','pptx','xlsx','doc','xls','ppt','odt','ods','odp','rtf','epub','png','jpg','jpeg','webp','gif','bmp'] }] });
+  if (result.canceled || !result.filePaths.length) return { imported: [], skipped: [] };
+  const supported = new Set(['.txt','.md','.markdown','.rst','.csv','.tsv','.json','.xml','.html','.htm','.css','.js','.ts','.py','.rs','.go','.java','.c','.cpp','.cs','.sql','.yaml','.yml','.toml','.log','.pdf','.docx','.pptx','.xlsx','.doc','.xls','.ppt','.odt','.ods','.odp','.rtf','.epub','.png','.jpg','.jpeg','.webp','.gif','.bmp']);
+  const files: string[] = [], maxFiles = 160, maxFolderBytes = 100 * 1024 * 1024;
+  let totalBytes = 0;
+  const visit = async (item: string, depth: number): Promise<void> => {
+    if (depth > 8 || files.length >= maxFiles) return;
+    const stat = await fs.stat(item);
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(item, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+        await visit(path.join(item, entry.name), depth + 1);
+        if (files.length >= maxFiles) break;
+      }
+      return;
+    }
+    if (!stat.isFile() || !supported.has(path.extname(item).toLowerCase())) return;
+    totalBytes += stat.size;
+    if (totalBytes > maxFolderBytes) throw Error('This selection exceeds Orion’s 100 MB import limit. Choose a smaller folder or fewer files.');
+    files.push(item);
+  };
+  for (const item of result.filePaths) await visit(item, 0);
+  if (!files.length) throw Error('No supported documents or images were found in that selection.');
+  if (files.length >= maxFiles) throw Error(`The selection contains more than ${maxFiles} supported files. Import a smaller folder at a time.`);
+  const history = getMemoryHistory(), imported: Array<{ name: string; chunks: number; characters: number }> = [], errors: string[] = [];
+  const ocr: { worker?: Awaited<ReturnType<typeof createWorker>> } = {};
+  const getOcr = async () => ocr.worker ??= await createWorker('eng', 1, { cachePath: path.join(dataDir(), 'ocr'), langPath: 'https://tessdata.projectnaptha.com/4.0.0', workerPath: path.join(app.getAppPath(), 'dist', 'ocr', 'worker.min.js'), corePath: path.join(app.getAppPath(), 'dist', 'ocr', 'tesseract-core.wasm.js'), gzip: true, logger: () => undefined });
+  try {
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase(), name = path.basename(file);
+      try {
+        let text = '';
+        if (['.png','.jpg','.jpeg','.webp','.bmp','.gif'].includes(ext)) {
+          text = (await (await getOcr()).recognize(file)).data.text;
+        } else if (ext === '.pdf') {
+          const loading = (await getPdfDocument())({ data: new Uint8Array(await fs.readFile(file)), useSystemFonts: true });
+          const pdf = await loading.promise;
+          try {
+            if (pdf.numPages > 160) throw Error('This PDF has more than 160 pages. Split it into smaller files before import.');
+            const pages: string[] = [];
+            for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+              const page = await pdf.getPage(pageNumber), extracted = await page.getTextContent();
+              let pageText = extracted.items.map(item => 'str' in item ? item.str : '').join(' ').trim();
+              if (!pageText) {
+                if (pdf.numPages > 80) throw Error('This scanned PDF has more than 80 pages. Split it into smaller files before OCR import.');
+                const viewport = page.getViewport({ scale: 1.5 }), canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height)), context = canvas.getContext('2d');
+                await page.render({ canvas: canvas as never, canvasContext: context as never, viewport }).promise;
+                pageText = (await (await getOcr()).recognize(canvas.toBuffer('image/png'))).data.text;
+                canvas.width = 1; canvas.height = 1;
+              }
+              if (pageText.trim()) pages.push(`Page ${pageNumber}\n${pageText.trim()}`);
+            }
+            text = pages.join('\n\n');
+          } finally { await loading.destroy(); }
+        } else if (['.docx','.pptx','.xlsx','.doc','.xls','.ppt','.odt','.ods','.odp','.rtf','.epub'].includes(ext)) {
+          text = String((await (await OfficeParser.parseOffice(file)).to('text')).value ?? '');
+        } else {
+          text = await fs.readFile(file, 'utf8');
+          if (ext === '.html' || ext === '.htm') text = text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+        }
+        const normalized = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+        if (!normalized) throw Error('No readable text could be extracted, even after local OCR.');
+        imported.push(await history.ingestDocument(conversationId, name, normalized));
+      } catch (error) { errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+  } finally { await ocr.worker?.terminate().catch(() => undefined); }
+  if (!imported.length) throw Error(`No documents could be imported.\n${errors.slice(0, 8).join('\n')}`);
+  return { imported, skipped: errors.slice(0, 32) };
+});
+for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare','cleanupPreview','cleanup','cleanupUndo','retrievalPreview','memoryEdit','memoryRetention','messageRetention','checkpointMessage','rollbackMessage'] as const) {
   ipcMain.handle(`memory-history:${method}`, async (event, ...args: unknown[]) => {
     if (!win || event.sender !== win.webContents) throw Error('Conversation history is only available in the main Orion window.');
     if (args.some(value => typeof value === 'string' && value.length > 256)) throw Error('Invalid memory request.');
@@ -2121,7 +2285,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     if (retrievedIds.has(chunk.id) || retrieved.length >= 48 || retrievedTokens + promptTokens > memoryBudget) continue;
     retrieved.push(chunk); retrievedIds.add(chunk.id); retrievedTokens += promptTokens;
   }
-  event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'memory_context', sourceFiles: recent.flatMap(message => (message.attachments ?? []).filter(file=>file.kind === 'image'||message.content.includes(file.name)).map(file => ({id:file.id,name:file.name,conversationId:input.conversationId,messageId:message.id}))), memories: retrieved.map(chunk => ({ id: chunk.id, conversationId: chunk.conversationId, messageId: chunk.messageId, text: chunk.text })) });
+  event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'memory_context', sourceFiles: recent.flatMap(message => (message.attachments ?? []).filter(file=>file.kind === 'image'||message.content.includes(file.name)).map(file => ({id:file.id,name:file.name,conversationId:input.conversationId,messageId:message.id}))), memories: retrieved.map(chunk => ({ id: chunk.id, conversationId: chunk.conversationId, messageId: chunk.messageId, text: chunk.text, sourceName: chunk.sourceName, sourcePart: chunk.sourcePart, sourcePage: chunk.sourcePage, reason: chunk.reason, score: chunk.score })) });
   const memories = retrieved.map(chunk => memoryPromptText(chunk));
   let memory = compactSummary ? `Recent conversation summary:\n${compactSummary}\n` : '';
   memory += memories.join('\n\n');
@@ -2575,9 +2739,34 @@ ipcMain.handle('files:select', async () => {
     }
     if (stat.size > maxDocumentBytes) throw new Error(`${path.basename(file)} is larger than the 20 MB document limit.`);
     if (['docx','pptx','xlsx','doc','xls','ppt','pdf','odt','ods','odp','rtf','epub','odg'].includes(ext)) {
-      const ast = await OfficeParser.parseOffice(file);
-      const parsed = await ast.to('text');
-      const content = String(parsed.value ?? '').slice(0, 1_000_000);
+      let content = '';
+      if (ext === 'pdf') {
+        const loading = (await getPdfDocument())({ data: new Uint8Array(await fs.readFile(file)), useSystemFonts: true }), pdf = await loading.promise;
+        try {
+          if (pdf.numPages > 160) throw Error(`${path.basename(file)} has more than 160 pages and is too large to attach.`);
+          let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+          try {
+            const pages: string[] = [];
+            for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+              const page = await pdf.getPage(pageNumber), data = await page.getTextContent();
+              let pageText = data.items.map(item => 'str' in item ? item.str : '').join(' ').trim();
+              if (!pageText) {
+                if (pdf.numPages > 80) throw Error(`${path.basename(file)} is a scanned PDF over 80 pages. Split it into smaller files to OCR it.`);
+                worker ??= await createWorker('eng', 1, { cachePath: path.join(dataDir(), 'ocr'), langPath: 'https://tessdata.projectnaptha.com/4.0.0', workerPath: path.join(app.getAppPath(), 'dist', 'ocr', 'worker.min.js'), corePath: path.join(app.getAppPath(), 'dist', 'ocr', 'tesseract-core.wasm.js'), gzip: true, logger: () => undefined });
+                const viewport = page.getViewport({ scale: 1.5 }), canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height)), context = canvas.getContext('2d');
+                await page.render({ canvas: canvas as never, canvasContext: context as never, viewport }).promise;
+                pageText = (await worker.recognize(canvas.toBuffer('image/png'))).data.text;
+                canvas.width = 1; canvas.height = 1;
+              }
+              if (pageText) pages.push(`Page ${pageNumber}\n${pageText}`);
+            }
+            content = pages.join('\n\n').slice(0, 1_000_000);
+          } finally { await worker?.terminate().catch(() => undefined); }
+        } finally { await loading.destroy(); }
+      } else {
+        const ast = await OfficeParser.parseOffice(file);
+        content = String((await ast.to('text')).value ?? '').slice(0, 1_000_000);
+      }
       if (!content.trim()) throw new Error(`${path.basename(file)} did not contain extractable text. Scanned PDFs may need OCR before they can be read.`);
       return { name:path.basename(file), path:file, content, mimeType:'text/plain', kind:'document' as const };
     }

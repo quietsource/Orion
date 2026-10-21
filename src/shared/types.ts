@@ -8,7 +8,7 @@ export interface WebResearchStep { id: string; query: string; status: 'searching
 export interface WebResearchActivity { status: 'planning'|'searching'|'reading'|'complete'|'error'; steps: WebResearchStep[]; }
 export interface WebResearchEvent { stepId: string; phase: 'planning'|'searching'|'reading'|'source'|'complete'|'error'; query?: string; source?: WebResearchSource; error?: string; }
 export interface MessageAttachment { id: string; name: string; mimeType: string; kind: 'image'|'document'; }
-export interface Message { sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; voiceInput?: boolean; memoryUsed?: Array<{id:string;conversationId:string;messageId:string;text:string}>; assumptionIds?: string[]; id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
+export interface Message { memoryRetention?: 'temporary'|'conversation'|'durable'|'never-save'; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; voiceInput?: boolean; memoryUsed?: Array<{id:string;conversationId:string;messageId:string;text:string;sourceName?:string;sourcePart?:number;sourcePage?:number;reason?:string;score?:number}>; assumptionIds?: string[]; id: string; role: Role; content: string; createdAt: number; reasoning?: string; activityOrder?: Array<{kind:'tool'|'web';id:string}>; canvasDocuments?: CanvasDocument[]; toolCalls?: ToolCallRecord[]; webResearch?: WebResearchActivity; attachments?: MessageAttachment[]; generationMs?: number; tokensPerSecond?: number; }
 export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }
@@ -53,12 +53,13 @@ export interface OrionAPI {
   settings(): Promise<AppSettings>; saveSettings(settings: AppSettings): Promise<void>; getSystemPrompt(model?: string, mode?: ToolMode): Promise<string>;
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
   streamChat(input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
-  cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string}>; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
+  cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string;sourceName?:string;sourcePart?:number;sourcePage?:number;reason?:string;score?:number}>; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
   installMemoryEmbedding(): Promise<void>;
   onMemoryProgress(callback: (progress: { completed: number; total: number; status?: string; error?: string }) => void): () => void;
   searchWeb(query: string): Promise<{ title: string; url: string; snippet: string }[]>;
   selectFiles(): Promise<Array<{ name: string; path: string; content: string; mimeType: string; kind: 'image'|'document'; attachment?: MessageAttachment }>>;
   selectCanvasFile(): Promise<CanvasDocument|null>;
+  ingestDocuments(conversationId: string): Promise<{ imported: Array<{ name: string; chunks: number; characters: number }>; skipped: string[] }>;
   openCanvasPath(path: string): Promise<CanvasDocument>;
   getPathForFile(file: File): string;
   saveCanvasRevision(conversationId: string, path: string, content: string): Promise<void>;
@@ -82,7 +83,7 @@ export interface OrionAPI {
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;
   enterCreate(): Promise<{ state: BackendState; showInstallPrompt: boolean }>; getCreateEngineState(): Promise<BackendState>; installCreateEngine(): Promise<BackendState>;
-  installOllama(): Promise<{ launched: boolean; detail: string }>; onEngineInstallProgress(callback: (progress: EngineInstallProgress) => void): () => void;
+  installOllama(): Promise<{ launched: boolean; detail: string }>; updateRepairEngine(engine: 'llama'|'exllama'|'diffusion'|'ollama'): Promise<string>; uninstallEngine(engine: 'llama'|'exllama'|'diffusion'|'ollama'): Promise<string>; onEngineInstallProgress(callback: (progress: EngineInstallProgress) => void): () => void;
   shouldShowLlamaIntro(): Promise<boolean>; dismissLlamaIntro(): Promise<void>; installLlama(): Promise<void>;
   llamaStatus(): Promise<boolean>;
   exl2Status(): Promise<boolean>; installExl2(): Promise<void>;

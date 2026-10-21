@@ -133,6 +133,11 @@ export class OFSClient {
   exportSnapshot() { return this.call<Awaited<ReturnType<OrionFS['exportSnapshot']>>>('export'); }
   importSnapshot(...args: Parameters<OrionFS['importSnapshot']>) { this.statsCache.clear(); return this.call<void>('import', args); }
   forgetMemories(conversationId: string, ids: string[]) { this.statsCache.clear(); return this.call<void>('forget', [conversationId, ids]); }
+  updateMemory(...args: Parameters<OrionFS['updateMemory']>) { this.statsCache.clear(); return this.call<void>('update-memory', args); }
+  hasIngestedTurn(...args: Parameters<OrionFS['hasIngestedTurn']>) { return this.call<boolean>('has-ingested', args); }
+  setSourceRetention(...args: Parameters<OrionFS['setSourceRetention']>) { this.statsCache.clear(); return this.call<void>('source-retention', args); }
+  resetIngestedSource(...args: Parameters<OrionFS['resetIngestedSource']>) { this.statsCache.clear(); return this.call<void>('reset-source', args); }
+  restoreConversationSnapshot(...args: Parameters<OrionFS['restoreConversationSnapshot']>) { this.statsCache.clear(); return this.call<void>('restore-conversation', args); }
   removeConversation(id: string) { this.statsCache.clear(); return this.call<void>('remove', [id]); }
 
   async close() {

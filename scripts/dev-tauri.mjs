@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const renderer = path.join(root, 'dist', 'renderer');
+const port = Number(process.env.ORION_DEV_PORT ?? 4173);
 const mimeTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
@@ -16,7 +17,7 @@ const mimeTypes = new Map([
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
-  port: 4173,
+  port,
   async fetch(request) {
     const pathname = decodeURIComponent(new URL(request.url).pathname);
     const relative = path.normalize(pathname.replace(/^[/\\]+/, '') || 'index.html');
@@ -28,7 +29,7 @@ const server = Bun.serve({
   },
 });
 
-const cli = spawn(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'dev', '--no-watch'], {
+const cli = spawn(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'dev', '--no-watch', '--config', JSON.stringify({ build: { devUrl: `http://127.0.0.1:${port}` } })], {
   cwd: root,
   stdio: 'inherit',
   windowsHide: true,

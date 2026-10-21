@@ -19,6 +19,7 @@
     "icons": "bun node_modules/@tauri-apps/cli/tauri.js icon build/icons/orion-logo-source.png --output build/icons/tauri"
   },
   "dependencies": {
+    "@tauri-apps/api": "2.12.4",
     "croner": "^10.0.1",
     "cross-spawn": "^7.0.6",
     "dompurify": "^3.4.16",
@@ -27,7 +28,7 @@
     "marked": "^18.0.14",
     "officeparser": "^8.1.1",
     "systeminformation": "^5.33.13",
-    "@tauri-apps/api": "2.12.4"
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",

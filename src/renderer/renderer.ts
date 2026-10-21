@@ -33,6 +33,17 @@ const $ = <T extends HTMLElement>(id: string) => {
   if (!element) throw new Error(`Orion UI is missing the required #${id} element.`);
   return element as T;
 };
+document.addEventListener('pointerdown', event => {
+  const target = event.target;
+  if (target instanceof Element && target.closest('.message-retention-control')) return;
+  document.querySelectorAll<HTMLDetailsElement>('.message-retention-control[open]').forEach(menu => { menu.open = false; });
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  const open = document.querySelector<HTMLDetailsElement>('.message-retention-control[open]');
+  if (!open) return;
+  event.preventDefault(); open.open = false; open.querySelector('summary')?.focus();
+});
 for (const [file, language] of Object.entries(languageModules)) {
   const name = file.split('/').pop()?.replace(/\.js$/, '') ?? '';
   if (!name || name.endsWith('.js')) continue;
@@ -109,14 +120,16 @@ const memoryControls = installMemoryHistory({
     }
     if(current?.id===conversationId)for(const message of current.messages)message.canvasDocuments=message.canvasDocuments?.filter(doc=>!documentIds.includes(doc.id));
   },
+  openPassage: (name, passage, conversationId) => showCanvas({ id: crypto.randomUUID(), name: `${name} · source passage`, format: 'text', content: passage, conversationId, source: 'local' }),
   rerender: () => renderMessages()
 });
 let memoryControlsConversation: string | undefined;
 
-type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment; voiceInput?: boolean };
+type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment; voiceInput?: boolean; editMessageId?: string; replaceMessageId?: string };
 type SendOutcome = 'complete'|'cancelled'|'failed'|'unavailable';
 const messageQueue = new MessageQueue<QueuedMessage>();
 let activeChatTask: Promise<SendOutcome> | null = null, queueInterruptPending = false, queueAutoPaused = false;
+let editingMessageId: string | null = null, editingDraft = '', rollbackDraftMessageId: string | null = null;
 let generationIdle: Promise<void> = Promise.resolve(), resolveGenerationIdle: (() => void) | undefined;
 let canvasDocument: CanvasDocument|null=null, canvasNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], canvasPrevious:string|null=null, canvasPreviousNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], pendingCanvasReview:{document:CanvasDocument;notes:Array<{kind:'comment'|'remove';quote:string;text:string}>;edited:string}|null=null;
 type CanvasSession = { document: CanvasDocument; notes: Array<{kind:'comment'|'remove';quote:string;text:string}>; previous: string|null; previousNotes: Array<{kind:'comment'|'remove';quote:string;text:string}>; mode: 'source'|'preview'|'diff' };
@@ -270,7 +283,7 @@ function scheduleRender(structureChanged = false) {
   }, streaming ? Math.max(0, 100 - (performance.now() - lastStreamPaint)) : 0);
 }
 const now = () => Date.now(); const id = () => crypto.randomUUID();
-const versionLabel = document.querySelector<HTMLElement>('.version'); if (versionLabel) versionLabel.textContent = `Orion · ${__ORION_VERSION__}`;
+const versionLabel = document.querySelector<HTMLElement>('.version'); if (versionLabel) versionLabel.textContent = `Orion · ${__ORION_VERSION__}-nightly`;
 function setComposerStreaming(active: boolean) {
   if (active && !streaming) generationIdle = new Promise(resolve => { resolveGenerationIdle = resolve; });
   if (!active) { resolveGenerationIdle?.(); resolveGenerationIdle = undefined; }
@@ -381,6 +394,47 @@ document.addEventListener('pointerdown', event => { if (!contextMenu.contains(ev
 document.addEventListener('contextmenu', event => { const target = event.target as HTMLElement; const conversationButton = target.closest<HTMLButtonElement>('.conversation'); if (conversationButton) { event.preventDefault(); const conversation = conversations.find(item => item.id === conversationButton.dataset.id); if (conversation) showContextMenu(event.clientX, event.clientY, [{ label: 'Open conversation', run: () => conversationButton.click() }, { label: 'Delete conversation…', danger: true, run: async () => { if (await askConfirm(`Delete “${conversation.title}”?`, 'Delete conversation')) { await window.orion.deleteConversation(conversation.id); messageQueue.discardConversation(conversation.id); conversations = conversations.filter(item => item.id !== conversation.id); if (current?.id === conversation.id) { switchCanvasConversation(undefined); current = null; } renderHistory(); renderMessages(true); } } }]); return; } const selection = getSelection()?.toString() ?? ''; const editable = target.closest('textarea:not([readonly]),input:not([type=checkbox]):not([type=number]):not([readonly])'); const actions: Array<{ label: string; run: () => void | Promise<void> }> = []; if (selection) actions.push({ label: 'Copy', run: () => navigator.clipboard.writeText(selection) }); if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) { const input = editable; actions.push({ label: 'Cut', run: async () => { const a = input.selectionStart ?? 0, b = input.selectionEnd ?? a; await navigator.clipboard.writeText(input.value.slice(a, b)); input.setRangeText('', a, b, 'start'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Paste', run: async () => { const text = await navigator.clipboard.readText(); input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? input.selectionStart ?? 0, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); } }, { label: 'Select all', run: () => input.select() }); } if (actions.length) { event.preventDefault(); showContextMenu(event.clientX, event.clientY, actions); } });
 
 function createMessage(role: Message['role'], content: string): Message { return { id: id(), role, content, createdAt: now() }; }
+function iconButton(name: 'copy'|'edit'|'rollback'|'send', label: string) {
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'message-icon-button'; button.title = label; button.setAttribute('aria-label', label);
+  const paths: Record<typeof name, string> = {
+    copy: '<rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h2"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
+    rollback: '<path d="M3 7v6h6"/><path d="M4.5 13a8 8 0 1 0 2-5.5L3 10"/>',
+    send: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>'
+  };
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
+  return button;
+}
+async function stopGenerationForMessageEdit() {
+  const pending = activeChatTask, idle = generationIdle;
+  if (streaming) { queueAutoPaused = true; await window.orion.cancelStream(); }
+  if (pending) await pending.catch(() => undefined); else if (streaming) await idle;
+}
+async function rollbackUserMessage(messageId: string) {
+  if (!current) return;
+  const selected = current.messages.find(item => item.id === messageId && item.role === 'user');
+  if (!selected || !await askConfirm('Remove every message after this point and remove those turns from OrionFS memory? The selected message will stay available to edit in the composer.', 'Roll back conversation')) return;
+  try {
+    await stopGenerationForMessageEdit();
+    const rolled = await window.orion.memoryHistory.rollbackMessage(current.id, messageId);
+    Object.assign(current, rolled); conversations = conversations.map(item => item.id === rolled.id ? current! : item);
+    rollbackDraftMessageId = messageId; editingMessageId = null;
+    promptBox.value = selected.content; promptBox.dispatchEvent(new Event('input', { bubbles: true })); promptBox.focus();
+    await memoryControls.refresh(); renderHistory(); renderMessages(true); await save(current);
+    showNotice('The conversation and matching OrionFS entries now end at this message. Edit it in the composer and send to continue.', 'Conversation rolled back');
+  } catch (error) { showNotice(error instanceof Error ? error.message : String(error), 'Rollback failed'); }
+}
+function editUserMessage(messageId: string, content: string) {
+  editingMessageId = messageId; editingDraft = content; renderMessages();
+  const input = chatBox.querySelector<HTMLTextAreaElement>(`[data-message-id="${CSS.escape(messageId)}"] .message-edit-input`);
+  input?.focus(); input?.setSelectionRange(input.value.length, input.value.length);
+}
+function submitUserMessageEdit(messageId: string, content: string) {
+  if (!current || !content.trim()) return;
+  const target = current, model = ($('model') as HTMLSelectElement).value || target.model;
+  editingMessageId = null; editingDraft = ''; rollbackDraftMessageId = null;
+  void launchSubmission({ id: id(), conversationId: target.id, content: content.trim(), model, attachments: [], editMessageId: messageId });
+}
 function newConversation(reuseEmpty = false) { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); const reusable = reuseEmpty ? conversations.find(isReusableUntitledConversation) : undefined; current = reusable ?? { id: id(), title: 'Untitled', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; current.title='Untitled'; switchCanvasConversation(current.id); if(!reusable)conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
 let memoryRenderSequence = 0;
 let memoryFailureCount = 0;
@@ -916,17 +970,67 @@ function renderMessage(active: Conversation, message: Message) {
   }
   const body = document.createElement('div');
   body.className = 'message-body';
-  body.replaceChildren(safeMarkdownFragment(message.content, live));
+  if (message.role === 'user' && editingMessageId === message.id) {
+    const editor = document.createElement('textarea'); editor.className = 'message-edit-input'; editor.setAttribute('aria-label', 'Edit your message'); editor.value = editingDraft; editor.rows = Math.max(2, Math.min(10, editingDraft.split('\n').length)); editor.addEventListener('input', () => { editingDraft = editor.value; }); body.append(editor);
+  } else { body.replaceChildren(safeMarkdownFragment(message.content, live)); wireCodeButtons(body, active); }
   body.dataset.contentLength = String(message.content.length);
-  wireCodeButtons(body, active);
   article.append(body);
   for(const doc of message.canvasDocuments??[]){const open=document.createElement('button');open.type='button';open.className='canvas-reopen';open.textContent='▤  '+doc.name+' · Open in Canvas';open.onclick=()=>showCanvas(doc);article.append(open);}
   const footer = document.createElement('div'); footer.className = 'message-footer';
-  const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'message-copy'; copy.textContent = 'Copy'; copy.onclick = async () => { await navigator.clipboard.writeText(message.content); copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy', 1200); }; footer.append(copy); if(message.role==='assistant'){const html=message.content.match(/```(?:html|htm)\s*([\s\S]*?)```/i),md=message.content.match(/```(?:markdown|md)\s*([\s\S]*?)```/i),plainDoc=!html&&!md&&message.content.trim().startsWith('# ')&&message.content.length>250;if(html||md||plainDoc){const open=document.createElement('button');open.type='button';open.className='message-copy';open.textContent='Open in Canvas';open.onclick=()=>showCanvas({id:crypto.randomUUID(),name:html?'Generated page.html':'Generated document.md',format:html?'html':'markdown',content:html?html[1]!.trim():md?md[1]!.trim():message.content,conversationId:active.id,source:'response'});footer.append(open);}}
+  const copy = iconButton('copy', 'Copy message'); copy.onclick = async () => { await navigator.clipboard.writeText(message.content); copy.title = 'Copied'; copy.setAttribute('aria-label', 'Copied'); setTimeout(() => { copy.title = 'Copy message'; copy.setAttribute('aria-label', 'Copy message'); }, 1200); }; footer.append(copy);
+  if (message.role === 'user') {
+    if (editingMessageId === message.id) {
+      const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'message-inline-action'; cancel.textContent = 'Cancel'; cancel.onclick = () => { editingMessageId = null; editingDraft = ''; renderMessages(); };
+      const submit = iconButton('send', 'Save and send edited message'); submit.classList.add('message-edit-send'); submit.onclick = () => submitUserMessageEdit(message.id, editingDraft);
+      footer.append(cancel, submit);
+    } else {
+      const retentionValue = message.memoryRetention ?? 'conversation';
+      const retentionLabels = { temporary: 'Temporary', conversation: 'Conversation', durable: 'Durable', 'never-save': 'Never save' } as const;
+      const retention = document.createElement('details'); retention.className = 'message-retention-control';
+      const retentionTrigger = document.createElement('summary'); retentionTrigger.className = 'message-retention-trigger';
+      retentionTrigger.setAttribute('aria-label', `Memory retention: ${retentionLabels[retentionValue]}. Change retention`);
+      const retentionLabel = document.createElement('span'); retentionLabel.className = 'message-retention-value'; retentionLabel.textContent = retentionLabels[retentionValue];
+      const retentionChevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); retentionChevron.setAttribute('viewBox', '0 0 16 16'); retentionChevron.setAttribute('aria-hidden', 'true'); retentionChevron.classList.add('message-retention-chevron');
+      const retentionChevronPath = document.createElementNS('http://www.w3.org/2000/svg', 'path'); retentionChevronPath.setAttribute('d', 'm4 6 4 4 4-4'); retentionChevron.append(retentionChevronPath);
+      retentionTrigger.append(retentionLabel, retentionChevron); retention.append(retentionTrigger);
+      const retentionMenu = document.createElement('div'); retentionMenu.className = 'message-retention-menu'; retentionMenu.setAttribute('role', 'menu'); retentionMenu.setAttribute('aria-label', 'Memory retention');
+      const retentionOptions = [
+        ['temporary', 'Temporary', 'Expires after 30 days'],
+        ['conversation', 'Conversation only', 'Available only in this conversation'],
+        ['durable', 'Durable', 'Keep for future conversations'],
+        ['never-save', 'Never save', 'Remove from saved memory'],
+      ] as const;
+      for (const [value, label, description] of retentionOptions) {
+        const option = document.createElement('button'); option.type = 'button'; option.className = 'message-retention-option'; option.setAttribute('role', 'menuitemradio'); option.setAttribute('aria-checked', String(retentionValue === value));
+        const copy = document.createElement('span'); copy.className = 'message-retention-option-copy';
+        const title = document.createElement('span'); title.className = 'message-retention-option-title'; title.textContent = label;
+        const detail = document.createElement('span'); detail.className = 'message-retention-option-detail'; detail.textContent = description;
+        copy.append(title, detail); option.append(copy);
+        if (retentionValue === value) { const check = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); check.setAttribute('viewBox', '0 0 16 16'); check.setAttribute('aria-hidden', 'true'); check.classList.add('message-retention-check'); const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', 'm3 8 3 3 7-7'); check.append(path); option.append(check); }
+        option.onclick = async () => {
+          for (const item of retentionMenu.querySelectorAll<HTMLButtonElement>('button')) item.disabled = true;
+          try {
+            await window.orion.memoryHistory.messageRetention(active.id, message.id, value);
+            message.memoryRetention = value; await save(active); await memoryControls.refresh();
+            renderMessages();
+          } catch (error) {
+            showNotice(error instanceof Error ? error.message : String(error), 'Memory update failed');
+            for (const item of retentionMenu.querySelectorAll<HTMLButtonElement>('button')) item.disabled = false;
+          }
+        };
+        retentionMenu.append(option);
+      }
+      retention.append(retentionMenu);
+      const edit = iconButton('edit', 'Edit message'); edit.onclick = async () => { await stopGenerationForMessageEdit(); if (current?.id === active.id) editUserMessage(message.id, message.content); };
+      const rollback = iconButton('rollback', 'Roll back to this message'); rollback.onclick = () => { void rollbackUserMessage(message.id); };
+      footer.append(retention, edit, rollback);
+    }
+  }
+  if(message.role==='assistant'){const html=message.content.match(/```(?:html|htm)\s*([\s\S]*?)```/i),md=message.content.match(/```(?:markdown|md)\s*([\s\S]*?)```/i),plainDoc=!html&&!md&&message.content.trim().startsWith('# ')&&message.content.length>250;if(html||md||plainDoc){const open=document.createElement('button');open.type='button';open.className='message-copy';open.textContent='Open in Canvas';open.onclick=()=>showCanvas({id:crypto.randomUUID(),name:html?'Generated page.html':'Generated document.md',format:html?'html':'markdown',content:html?html[1]!.trim():md?md[1]!.trim():message.content,conversationId:active.id,source:'response'});footer.append(open);}}
   if (message.role === 'assistant' && message.generationMs !== undefined) { const elapsed = document.createElement('span'); elapsed.className = 'message-metric'; elapsed.textContent = `${(message.generationMs / 1000).toFixed(1)}s`; footer.append(elapsed); }
   if (message.role === 'assistant' && message.tokensPerSecond !== undefined) { const rate = document.createElement('span'); rate.className = 'message-metric'; rate.textContent = `${message.tokensPerSecond.toFixed(1)} tokens/s`; footer.append(rate); }
+  const receipt=memoryControls.receipt(message,active);if(receipt)footer.append(receipt);
   article.append(footer);
-  const receipt=memoryControls.receipt(message,active);if(receipt)article.append(receipt);
   return article;
 }
 function wireCodeButtons(body: HTMLElement, active: Conversation) {
@@ -1110,7 +1214,8 @@ async function sendMessage() {
   if(selectedVoiceModel.startsWith('api:') && (voiceInput || current?.privateVoice || current?.messages.some(message=>message.voiceInput))){showNotice('Voice conversations stay on this computer. Select a local Ollama or Orion-managed model before sending.', 'Local voice privacy'); return;}
   const content = promptBox.value.trim(); if (!content) return;
   if (!current) newConversation(); if (!current) return;
-  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment, voiceInput };
+  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment, voiceInput, replaceMessageId: rollbackDraftMessageId ?? undefined };
+  rollbackDraftMessageId = null;
   voiceControls.submitted(); attachments = []; canvasReviewAttachment = undefined; $('attachments').replaceChildren(); promptBox.value = ''; promptBox.dispatchEvent(new Event('input', { bubbles: true }));
   if (streaming || activeChatTask || queueInterruptPending) { messageQueue.push(entry); renderMessageQueue(); promptBox.focus(); return; }
   queueAutoPaused = false; await launchSubmission(entry);
@@ -1125,7 +1230,24 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   const imageRefs=[...entry.attachments.map(file=>file.attachment??{id:id(),name:file.name,mimeType:file.mimeType,kind:'document' as const}),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
   const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
   if(entry.voiceInput)target.privateVoice=true;
-  const userMessage=createMessage('user', userText);if(entry.voiceInput)userMessage.voiceInput=true;if(imageRefs.length)userMessage.attachments=imageRefs;target.messages.push(userMessage); target.model = entry.model;
+  let userMessage: Message;
+  if (entry.editMessageId) {
+    const rolled = await window.orion.memoryHistory.rollbackMessage(target.id, entry.editMessageId);
+    Object.assign(target, rolled);
+    const existing = target.messages.find(item => item.id === entry.editMessageId && item.role === 'user');
+    if (!existing) return 'failed';
+    userMessage = existing; userMessage.content = userText; userMessage.createdAt = now();
+    if (imageRefs.length) userMessage.attachments = imageRefs;
+  } else if (entry.replaceMessageId) {
+    const existing = target.messages.find(item => item.id === entry.replaceMessageId && item.role === 'user');
+    if (!existing) return 'failed';
+    userMessage = existing; userMessage.content = userText; userMessage.createdAt = now();
+    if (imageRefs.length) userMessage.attachments = imageRefs;
+    target.messages.splice(target.messages.indexOf(existing) + 1);
+  } else {
+    userMessage = createMessage('user', userText); if(entry.voiceInput)userMessage.voiceInput=true; if(imageRefs.length)userMessage.attachments=imageRefs; target.messages.push(userMessage);
+  }
+  target.model = entry.model;
   if (target.title === 'Untitled' || target.title === 'New conversation') target.title = content.slice(0, 48).replace(/\s+\S*$/, '') || content.slice(0, 48);
   const response = createMessage('assistant', ''); response.assumptionIds = memoryControls.assumptions(target.id).map(item => item.id); target.messages.push(response); setComposerStreaming(true); $('send').textContent = '■'; $('send').setAttribute('title','Stop generation');
   const generationStarted = performance.now();
@@ -1267,6 +1389,7 @@ document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => butt
   $('canvas-body').addEventListener('pointerup',()=>{const editor=$('canvas-editor') as HTMLTextAreaElement;const selection=window.getSelection();canvasSelectedQuote=!editor.hidden?editor.value.slice(editor.selectionStart,editor.selectionEnd):(selection?.anchorNode&&$('canvas-body').contains(selection.anchorNode)?selection.toString():'');});
   $('canvas-note').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('canvas-give').click();}});
   $('canvas-open').onclick=()=>toggleCanvas();
+  $('canvas-ingest').onclick=async()=>{const button=$('canvas-ingest') as HTMLButtonElement;if(!current){showNotice('Open a conversation first, then add documents to its memory.','Conversation required');return;}button.disabled=true;button.textContent='Importing…';try{const result=await window.orion.ingestDocuments(current.id);if(!result.imported.length){showNotice(result.skipped.length?result.skipped.join('\n'):'No files were selected.','Nothing imported');return;}const total=result.imported.reduce((sum,item)=>sum+item.chunks,0);void renderMemoryUsage();const detail=`Added ${result.imported.length} ${result.imported.length===1?'document':'documents'} (${total} searchable memory passages) to this conversation’s OrionFS memory.${result.skipped.length?`\n\nSkipped:\n${result.skipped.join('\n')}`:''}`;showNotice(detail,'Documents added to memory');}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not import documents');}finally{button.disabled=false;button.textContent='Add to memory';}};
     document.addEventListener('orion-native-file-drop', event => {
       const payload=(event as CustomEvent<{paths:string[];position:{x:number;y:number}}>).detail;
       const target=document.elementFromPoint(payload.position.x/devicePixelRatio,payload.position.y/devicePixelRatio);
@@ -1348,11 +1471,16 @@ function updateEngineCard(key: ManagedEngineKey, status: string, detail?: string
   const statusNode = card.querySelector<HTMLElement>('.engine-manager-status');
   const detailNode = card.querySelector<HTMLElement>('.engine-manager-detail');
   const bar = card.querySelector<HTMLProgressElement>('progress');
-  const button = card.querySelector<HTMLButtonElement>('button');
+  const button = card.querySelector<HTMLButtonElement>('.engine-install-action');
+  const repair = card.querySelector<HTMLButtonElement>('.engine-repair-action');
+  const remove = card.querySelector<HTMLButtonElement>('.engine-remove-action');
   if (statusNode) statusNode.textContent = status;
   if (detailNode && detail !== undefined) detailNode.textContent = detail;
   if (bar) { bar.hidden = progress === undefined; if (progress !== undefined) { bar.max = 100; bar.value = Math.min(100, Math.max(0, progress)); } }
-  if (button) button.disabled = engineInstallBusy.has(key) || status === 'Installed' || status === 'Running' || status === 'Installer running';
+  const installed = ['Installed','Running','Installer running','Downloading…','Checking and repairing…'].includes(status);
+  if (button) { button.hidden = installed; button.disabled = engineInstallBusy.has(key); }
+  if (repair) { repair.hidden = !['Installed','Running'].includes(status); repair.disabled = engineInstallBusy.has(key) || status === 'Running'; }
+  if (remove) { remove.hidden = !['Installed','Running'].includes(status); remove.disabled = engineInstallBusy.has(key) || status === 'Running'; }
 }
 async function refreshEngineManagement() {
   if (!engineManagementPanel) return;
@@ -1383,11 +1511,26 @@ function createEngineManagementPanel() {
     const description = document.createElement('p'); description.className = 'muted'; description.textContent = entry.description;
     const detail = document.createElement('p'); detail.className = 'engine-manager-detail'; detail.textContent = 'Reading local installation status.';
     const progress = document.createElement('progress'); progress.hidden = true; progress.max = 100;
-    const action = document.createElement('button'); action.type = 'button'; action.className = 'secondary'; action.textContent = entry.action;
+    const actions = document.createElement('div'); actions.className = 'engine-manager-actions';
+    const action = document.createElement('button'); action.type = 'button'; action.className = 'secondary engine-install-action'; action.textContent = entry.action;
     action.addEventListener('click', () => void installManagedEngine(entry.key));
-    card.append(head,description,detail,progress,action); panel.append(card);
+    const repair = document.createElement('button'); repair.type = 'button'; repair.className = 'secondary engine-repair-action'; repair.textContent = 'Update & repair'; repair.hidden = true;
+    repair.addEventListener('click', () => void manageEngine(entry.key, 'repair'));
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary danger-button engine-remove-action'; remove.textContent = 'Uninstall'; remove.hidden = true;
+    remove.addEventListener('click', () => void manageEngine(entry.key, 'uninstall'));
+    actions.append(action,repair,remove);card.append(head,description,detail,progress,actions);panel.append(card);
   }
   return panel;
+}
+async function manageEngine(key: ManagedEngineKey, action: 'repair'|'uninstall') {
+  if (engineInstallBusy.has(key)) return;
+  if (action === 'uninstall' && !await askConfirm(key === 'ollama' ? 'Open system app management to remove Ollama? Orion will not remove models installed by Ollama.' : `Remove the Orion-managed ${key === 'llama' ? 'llama.cpp' : key === 'exllama' ? 'ExLlamaV2' : 'stable-diffusion.cpp'} runtime? Downloaded models and generated media will be kept.`, 'Uninstall engine')) return;
+  engineInstallBusy.add(key);updateEngineCard(key,action==='repair'?'Checking and repairing…':'Uninstalling…',action==='repair'?'Checking the installed runtime and applying the latest supported repair or update.':'Removing engine files. Models and generated media are preserved.');
+  try {
+    const detail=action==='repair'?await window.orion.updateRepairEngine(key):await window.orion.uninstallEngine(key);
+    await refreshEngineManagement();showNotice(detail,action==='repair'?'Engine check complete':'Engine removed');
+  } catch(error) { const detail=error instanceof Error?error.message:String(error);updateEngineCard(key,action==='repair'?'Check failed':'Uninstall failed',detail);showNotice(detail,action==='repair'?'Engine repair failed':'Could not uninstall engine'); }
+  finally { engineInstallBusy.delete(key);void refreshEngineManagement(); }
 }
 async function installManagedEngine(key: ManagedEngineKey) {
   if (engineInstallBusy.has(key)) return;
@@ -1408,7 +1551,7 @@ async function installManagedEngine(key: ManagedEngineKey) {
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     updateEngineCard(key, 'Setup failed', detail); showNotice(detail, 'Engine setup failed');
-  } finally { engineInstallBusy.delete(key); const statusNode = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`); if (statusNode?.textContent === 'Installing…') updateEngineCard(key, 'Setup interrupted', 'Open Settings → Engines to retry.'); else { const button = statusNode?.closest<HTMLElement>('[data-engine]')?.querySelector<HTMLButtonElement>('button'); if (button) button.disabled = ['Installed','Running','Installer running'].includes(statusNode?.textContent ?? ''); } }
+  } finally { engineInstallBusy.delete(key); const statusNode = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`); if (statusNode?.textContent === 'Installing…') updateEngineCard(key, 'Setup interrupted', 'Open Settings → Engines to retry.'); else { const button = statusNode?.closest<HTMLElement>('[data-engine]')?.querySelector<HTMLButtonElement>('.engine-install-action'); if (button) button.disabled = ['Installed','Running','Installer running'].includes(statusNode?.textContent ?? ''); } void refreshEngineManagement(); }
 }
 window.orion.onEngineInstallProgress(progress => {
   if (progress.engine !== 'ollama') return;

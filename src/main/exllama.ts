@@ -438,23 +438,36 @@ export class ExllamaManager {
   private async selectWheel(release: Release, tier: typeof EXL2_TIERS[number]): Promise<Asset> {
     const pythonTag = 'cp311';
     const platformTag = process.platform === 'win32' ? 'win_amd64' : 'linux_x86_64';
-    const wanted = new RegExp(`^exllamav2-${EXL2_VERSION.replace(/\./g, '\\.')}\\+${tier.cuda}\\.torch${tier.torch.replace(/\./g, '\\.')}-${pythonTag}-${pythonTag}-${platformTag}\\.whl$`);
+    const version = release.tag_name.replace(/^v/, '');
+    const wanted = new RegExp(`^exllamav2-${version.replace(/\./g, '\\.')}\\+${tier.cuda}\\.torch${tier.torch.replace(/\./g, '\\.')}-${pythonTag}-${pythonTag}-${platformTag}\\.whl$`);
     const asset = release.assets.find(item => wanted.test(item.name));
-    if (!asset) throw new Error(`No prebuilt ExLlamaV2 ${EXL2_VERSION} wheel for ${tier.cuda}/torch ${tier.torch}/${pythonTag}/${platformTag}.`);
+    if (!asset) throw new Error(`No prebuilt ExLlamaV2 ${version} wheel for ${tier.cuda}/torch ${tier.torch}/${pythonTag}/${platformTag}.`);
     return asset;
   }
-  async install() {
+  async install(force = false) {
     if (this.installPromise) return this.installPromise;
-    this.installPromise = this.doInstall().finally(() => { this.installPromise = null; });
+    this.installPromise = this.doInstall(force).finally(() => { this.installPromise = null; });
     return this.installPromise;
   }
-  private async doInstall() {
-    if (await this.isInstalled()) return;
+  private async doInstall(force = false) {
+    const alreadyInstalled = await this.isInstalled();
+    if (alreadyInstalled && !force) return;
     if (process.arch !== 'x64') throw new Error('The Orion ExLlamaV2 engine requires a 64-bit Intel/AMD system.');
     const gpu = await this.gpuHardware();
     if (!gpu.driverMajor) throw new Error('The Orion ExLlamaV2 engine requires an NVIDIA GPU. Keep using the managed llama.cpp engine for this device, or install a CUDA-enabled driver.');
     const tier = EXL2_TIERS.find(item => gpu.driverMajor >= item.minimumDriver);
     if (!tier) throw new Error(`The NVIDIA driver on this device is too old for the ExLlamaV2 runtime. Update the GPU driver to 450 or newer, or keep using the managed llama.cpp engine.`);
+    const releaseResponse = await fetch('https://api.github.com/repos/turboderp/exllamav2/releases/latest', { headers: { 'user-agent': 'Orion-Local-AI/0.1', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30000) });
+    if (!releaseResponse.ok) throw new Error(`Could not check ExLlamaV2 releases (${releaseResponse.status}).`);
+    const release = await releaseResponse.json() as Release;
+    const wheel = await this.selectWheel(release, tier);
+    if (alreadyInstalled && force) {
+      const state = await this.loadState();
+      const verify = state ? await run(state.uvBinary, ['run', '--python', state.pythonBin, '--no-project', 'python', '-c', 'import setuptools; from torch.utils.cpp_extension import load; import exllamav2, jinja2; print(exllamav2.__version__)'], 120_000).catch(() => null) : null;
+      if (state && verify?.code === 0 && verify.stdout.trim() === release.tag_name.replace(/^v/, '') && state.cuda === tier.cuda && state.torch === tier.torch) return;
+      await this.stop();
+      await fs.rm(state?.envDirectory ?? path.join(this.root, 'env'), { recursive: true, force: true });
+    }
     const installId = randomUUID();
     await fs.mkdir(this.root, { recursive: true });
     this.report(installId, 'Preparing the managed ExLlamaV2 runtime', 0, 0, 'downloading');
@@ -491,11 +504,7 @@ export class ExllamaManager {
     if (torch.code !== 0) throw new Error(`Could not install PyTorch: ${(torch.stderr || torch.stdout).slice(-1600)}`);
     const runtimePackages = await run(uvBinary, ['pip', 'install', '--python', pythonBin, 'jinja2', 'tokenizers'], 15 * 60_000);
     if (runtimePackages.code !== 0) throw new Error(`Could not install the ExLlamaV2 runtime packages: ${(runtimePackages.stderr || runtimePackages.stdout).slice(-1200)}`);
-    const releaseResponse = await fetch('https://api.github.com/repos/turboderp/exllamav2/releases/latest', { headers: { 'user-agent': 'Orion-Local-AI/0.1', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30000) });
-    if (!releaseResponse.ok) throw new Error(`Could not check ExLlamaV2 releases (${releaseResponse.status}).`);
-    const release = await releaseResponse.json() as Release;
-    const wheel = await this.selectWheel(release, tier);
-    const wheelFile = await this.fetchToFile(wheel.browser_download_url, path.join(this.root, wheel.name), installId, `ExLlamaV2 ${EXL2_VERSION} (${tier.cuda})`);
+    const wheelFile = await this.fetchToFile(wheel.browser_download_url, path.join(this.root, wheel.name), installId, `ExLlamaV2 ${release.tag_name} (${tier.cuda})`);
     const wheelInstall = await run(uvBinary, ['pip', 'install', '--python', pythonBin, wheelFile], 30 * 60_000);
     await fs.rm(wheelFile, { force: true }).catch(() => undefined);
     if (wheelInstall.code !== 0) throw new Error(`Could not install ExLlamaV2: ${(wheelInstall.stderr || wheelInstall.stdout).slice(-1600)}`);
@@ -503,7 +512,7 @@ export class ExllamaManager {
     await fs.writeFile(serverScript, EXL2_SERVER_SCRIPT, { mode: 0o600 });
     const verify = await run(uvBinary, ['run', '--python', pythonBin, '--no-project', 'python', '-c', 'import setuptools; from torch.utils.cpp_extension import load; import exllamav2, jinja2; print(exllamav2.__version__)'], 120_000);
     if (verify.code !== 0) throw new Error(`The ExLlamaV2 runtime failed verification: ${(verify.stderr || verify.stdout).slice(-1200)}`);
-    this.state = { version: verify.stdout.trim() || EXL2_VERSION, cuda: tier.cuda, torch: tier.torch, python: EXL2_PYTHON, gpu: `${gpu.label} (driver ${gpu.driverMajor})`, backend: 'cuda', uvBinary, pythonBin, envDirectory, serverScript, runtimeDependencies: 2 };
+    this.state = { version: verify.stdout.trim() || release.tag_name.replace(/^v/, ''), cuda: tier.cuda, torch: tier.torch, python: EXL2_PYTHON, gpu: `${gpu.label} (driver ${gpu.driverMajor})`, backend: 'cuda', uvBinary, pythonBin, envDirectory, serverScript, runtimeDependencies: 2 };
     await fs.writeFile(this.stateFile, JSON.stringify(this.state, null, 2), { mode: 0o600 });
     await fs.writeFile(this.markerFile(), 'seen', { mode: 0o600 });
     this.report(installId, 'Managed ExLlamaV2 runtime', 1, 1, 'complete');
@@ -598,6 +607,7 @@ export class ExllamaManager {
     await this.lifecycle;
   }
   async dispose() { this.disposed = true; await this.stop(); }
+  async uninstall() { await this.stop(); await fs.rm(this.root, { recursive: true, force: true }); this.state = null; }
   private async stopChild() {
     const child = this.process;
     if (child && child.exitCode === null) {

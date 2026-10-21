@@ -8,7 +8,7 @@ export const MEMORY_LIMIT_TOKENS = 1_000_000;
 // code or non-Latin scripts, so applying the final cap before embedding would
 // discard useful history prematurely.
 const MEMORY_STAGING_LIMIT_TOKENS = MEMORY_LIMIT_TOKENS * 2;
-export type MemoryChunk = { id: string; conversationId: string; title: string; messageId: string; role: string; text: string; createdAt: number; tokens: number; embeddingModel?: string; embeddingFormat?: string; embedding?: number[] };
+export type MemoryChunk = { id: string; conversationId: string; title: string; messageId: string; role: string; text: string; createdAt: number; tokens: number; sourceName?: string; sourcePart?: number; sourcePage?: number; reason?: string; score?: number; embeddingModel?: string; embeddingFormat?: string; embedding?: number[] };
 type MemoryFile = { version: 1; chunks: MemoryChunk[] };
 type OllamaModel = { name: string; capabilities?: string[] };
 

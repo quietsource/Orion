@@ -50,7 +50,10 @@
     ],
     "resources": {
       "../dist/main/": "dist/main/",
-      "../build/icons/": "build/icons/"
+      "../dist/ocr/": "dist/ocr/",
+      "../dist/native-canvas/": "dist/native-canvas/",
+      "../build/icons/": "build/icons/",
+      "../build/velo/": "build/velo/"
     },
     "windows": {
       "nsis": {
