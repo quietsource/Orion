@@ -1000,14 +1000,34 @@ ipcMain.handle('models:search', async (_, query: string, category: ModelCategory
     url.searchParams.set('search', String(query ?? '').slice(0, 160));
     if(category==='conversational')url.searchParams.set('filter',engine==='exllamav2'?'exl2':'gguf');
     else url.searchParams.set('pipeline_tag',category==='image'?'text-to-image':'text-to-video');
-    url.searchParams.set('sort', 'downloads'); url.searchParams.set('direction', '-1'); url.searchParams.set('limit', '24');
+    url.searchParams.set('sort', 'downloads'); url.searchParams.set('direction', '-1'); url.searchParams.set('limit', category === 'conversational' && engine === 'exllamav2' ? '100' : '24');
   }
   const response = await fetch(url, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Hugging Face search failed (${response.status}).`);
-  const rows = await response.json() as Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; cardData?: { description?: string; license?: string } }>;
+  const rows = await response.json() as Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; config?: { architectures?: string[]; model_type?: string }; cardData?: { description?: string; license?: string } }>;
   const modelEngines = (row: typeof rows[number]) => { const tags = row.tags ?? []; const engines: string[] = []; if (tags.includes('gguf') || /[-_.]gguf$/i.test(row.id)) engines.push('llama.cpp'); if (tags.includes('exl2') || /[-_.]exl2/i.test(row.id)) engines.push('exllamav2'); return engines; };
+  const knownExl2Families = /(?:^|[^a-z0-9])(?:llama|qwen|gemma|mistral|mixtral|phi(?:-?\d)?|deepseek|yi(?:-?\d)?|granite|command-?r|starcoder|internlm|minicpm|solar|falcon|olmo|codestral|devstral|arctic|dbrx|jamba|nemotron|glm|smollm|openelm)(?:[^a-z0-9]|$)/i;
+  const isUsableExl2Candidate = (row: typeof rows[number]) => {
+    const tags = row.tags ?? [];
+    if (!tags.includes('exl2') && !/[-_.]exl2(?:[-_.]|$)/i.test(row.id)) return false;
+    // Exclude repositories that are clearly GGUF mirrors or unrelated pipelines,
+    // even when their metadata happens to carry an EXL2 tag.
+    if (/(?:^|[-_.])gguf(?:$|[-_.])/i.test(row.id)) return false;
+    if (row.pipeline_tag && !['text-generation','text2text-generation','conversational'].includes(row.pipeline_tag)) return false;
+    const familyText = `${row.id} ${(tags.filter(tag => tag.startsWith('base_model:')).join(' '))} ${(row.config?.architectures ?? []).join(' ')} ${row.config?.model_type ?? ''}`;
+    if (!knownExl2Families.test(familyText)) return false;
+    const hasChatMetadata = ['text-generation','conversational','text2text-generation','chat'].some(tag => tags.includes(tag)) || Boolean(row.pipeline_tag) || Boolean(row.config?.architectures?.some(name => /ForCausalLM|LMHeadModel|ForConditionalGeneration/.test(name)));
+    if (!hasChatMetadata && !/(?:instruct|chat|assistant|coder|base|causal)/i.test(row.id)) return false;
+    // The unfiltered popular page stays focused on established repositories;
+    // a deliberate search can still surface a newly published model family.
+    if (!String(query ?? '').trim()) {
+      if (/(?:^|[-_.])(?:rp|roleplay|merged?|stew|uncensored|abliterated|erotica|fiction|orthogonalized)(?:$|[-_.])/i.test(row.id)) return false;
+      if ((row.downloads ?? 0) < 50 && (row.likes ?? 0) < 5) return false;
+    }
+    return true;
+  };
   const supportsStableDiffusion=(row:typeof rows[number])=>{const tags=row.tags??[];return tags.some(tag=>/^stable-diffusion(?:$|-|\.)/i.test(tag)||/^diffusers:StableDiffusion(?:XL)?Pipeline$/i.test(tag)||/^diffusers:StableDiffusionXL/i.test(tag)||/^base_model:.*stable-diffusion/i.test(tag))||/(?:stable[-_ ]?diffusion|sdxl|sd[_-]?1[._]?5|sd[_-]?2[._]?1|dreamshaper|juggernaut.?xl|realvisxl|pony.?diffusion|animagine.?xl)/i.test(row.id);};
-  const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':true).map(row => ({ id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, engines: category==='conversational'?modelEngines(row):undefined }));
+  const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':engine==='exllamav2'?isUsableExl2Candidate(row):true).map(row => ({ id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, engines: category==='conversational'?modelEngines(row):undefined }));
   if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0',engines:undefined});}}
   const next = response.headers.get('link')?.match(/<([^>]+)>\s*;\s*rel="?next"?/i)?.[1] ?? null;
   return { models: found, nextUrl: next };
@@ -1020,7 +1040,7 @@ ipcMain.handle('models:hf-token', async (_, token: string) => {
   else await writeEncryptedText(huggingFaceTokenFile(), '');
   return normalized ? 'unknown' : 'invalid';
 });
-async function getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]> {
+async function getHubFiles(repo: string, category?: ModelCategory, engine?: string): Promise<HubFile[]> {
   validRepo(repo);
   const encoded = repo.split('/').map(encodeURIComponent).join('/');
   const response = await fetch(`https://huggingface.co/api/models/${encoded}?blobs=true`, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
@@ -1063,7 +1083,7 @@ async function getHubFiles(repo: string, category?: ModelCategory): Promise<HubF
     // EXL2 repositories keep each quantization on its own branch while the
     // default branch usually only carries the measurement file. Offer the
     // quantization branches alongside any GGUF files in the same listing.
-    const exl2 = model.tags?.includes('exl2') || /[-_.]exl2(?:[-_.]|$)/i.test(repo) ? await exl2BranchFiles(repo).catch(() => []) : [];
+    const exl2 = engine === 'exllamav2' || model.tags?.includes('exl2') || /[-_.]exl2(?:[-_.]|$)/i.test(repo) ? await exl2BranchFiles(repo) : [];
     return [...exl2, ...output].sort((a,b) => Number(Boolean(b.revision)) - Number(Boolean(a.revision)) || a.size - b.size);
   }
   return output.sort((a,b) => a.size - b.size);
@@ -1094,7 +1114,7 @@ async function exl2BranchFiles(repo: string): Promise<HubFile[]> {
   }
   return output.sort((a,b) => Number(exl2BranchPattern.exec(a.name)?.[1] ?? 0) - Number(exl2BranchPattern.exec(b.name)?.[1] ?? 0));
 }
-ipcMain.handle('models:files', async (_, repo: string, category?: ModelCategory) => getHubFiles(repo,category));
+ipcMain.handle('models:files', async (_, repo: string, category?: ModelCategory, engine?: string) => getHubFiles(repo,category,engine));
 ipcMain.handle('models:installed', readInstalledModels);
 // EXL2 quantizations are downloaded as complete branch bundles: every file at
 // the branch revision lands in one model folder that the ExLlamaV2 runtime can
@@ -1204,7 +1224,7 @@ ipcMain.handle('models:download', async (_, repo: string, file: string, category
   validRepo(repo);
   validHubFile(file);const extension=path.extname(file).toLowerCase();if(category==='conversational'&&extension!=='.gguf'&&!exl2BranchPattern.test(file))throw new Error('Conversational model downloads must be GGUF files or EXL2 quantizations.');if(category==='image'&&!['.safetensors','.ckpt','.gguf'].includes(extension))throw new Error('Stable Diffusion checkpoints must be safetensors, GGUF, or CKPT files.');if(category==='video'&&extension!=='.gguf')throw new Error('Wan video model downloads must be GGUF files.');
   const selectionId = `${category}|${repo}|${file}`;
-  const selected=(await getHubFiles(repo,category)).find(item=>item.name===file);if(!selected)throw new Error('That model file is not present in the selected Hugging Face repository.');
+  const selected=(await getHubFiles(repo,category,exl2BranchPattern.test(file)?'exllamav2':undefined)).find(item=>item.name===file);if(!selected)throw new Error('That model quantization or file is no longer available. Reload the model files and choose a quantization.');
   if (category==='conversational'&&selected.revision&&selected.bundle==='exl2') return downloadExl2Bundle(repo, selected);
   const related=selected.relatedFiles??[],names=[file,...related.map(part=>part.name)],sizes=new Map<string,number>([[file,selected.size],...related.map(part=>[part.name,part.size] as [string,number])]);
   const installedRows=await readInstalledModels(),existing=installedRows.find(item=>item.id===selectionId&&item.category===category);

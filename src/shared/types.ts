@@ -78,7 +78,7 @@ export interface OrionAPI {
   getSystemInfo(): Promise<{ platform: string; ollama: boolean; ollamaInstalled: boolean; cpuUsagePercent: number|null; usedRamMB: number; totalRamMB: number; gpuUsagePercent: number|null; usedVramMB: number | null; totalVramMB: number }>;
   listScheduledJobs(): Promise<ScheduledJob[]>; saveScheduledJob(job: Partial<ScheduledJob>): Promise<ScheduledJob>; deleteScheduledJob(id: string): Promise<void>;
   onScheduledJob(callback: (job: ScheduledJob) => void): () => void; onScheduledJobsChanged(callback: () => void): () => void; completeScheduledJob(id: string, status: 'completed'|'error', output: string, conversationId: string): Promise<void>;
-  searchHub(query: string, category: ModelCategory, nextUrl?: string|null, engine?: ModelEngine): Promise<HubSearchPage>; getHubFiles(repo: string, category?: ModelCategory): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
+  searchHub(query: string, category: ModelCategory, nextUrl?: string|null, engine?: ModelEngine): Promise<HubSearchPage>; getHubFiles(repo: string, category?: ModelCategory, engine?: ModelEngine): Promise<HubFile[]>;   setHuggingFaceToken(token: string): Promise<'valid'|'invalid'|'unknown'>;
   getHuggingFaceTokenConfigured(): Promise<boolean>;
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;
