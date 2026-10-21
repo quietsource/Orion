@@ -251,11 +251,35 @@ async fn native_operation(app: AppHandle, method: String, args: Value) -> Result
   }
 }
 
+fn contains_backend_resources(path: &PathBuf) -> bool {
+  let native_dir = path.join("dist/native-canvas");
+  let has_native_binding = std::fs::read_dir(native_dir).map(|entries| entries.flatten().any(|entry| entry.path().extension().is_some_and(|extension| extension == "node"))).unwrap_or(false);
+  path.join("dist/main/ofsWorker.js").is_file()
+    && has_native_binding
+    && path.join("build/velo").is_dir()
+}
+
 async fn start_backend(app: AppHandle) -> Result<(), String> {
   let project = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-  let resource = if cfg!(debug_assertions) { project.clone() } else { app.path().resource_dir().map_err(|error| error.to_string())? };
-  let executable = if cfg!(debug_assertions) { project.join("src-tauri/binaries").join(format!("orion-service-{}{}", env!("ORION_TARGET"), std::env::consts::EXE_SUFFIX)) }
-    else { std::env::current_exe().map_err(|error| error.to_string())?.parent().unwrap().join(format!("orion-service{}", std::env::consts::EXE_SUFFIX)) };
+  let executable_path = std::env::current_exe().map_err(|error| error.to_string())?;
+  let executable_dir = executable_path.parent().ok_or("Orion executable has no parent directory")?.to_path_buf();
+  let (resource, executable) = if cfg!(debug_assertions) {
+    (project.clone(), project.join("src-tauri/binaries").join(format!("orion-service-{}{}", env!("ORION_TARGET"), std::env::consts::EXE_SUFFIX)))
+  } else {
+    // Tauri resolves the resource directory differently between NSIS installs
+    // and portable bundles. The portable layout keeps resources beside the EXE;
+    // an installed bundle may put them in `resources/`. Select the directory
+    // that actually contains the files the Bun service needs.
+    let configured = app.path().resource_dir().map_err(|error| error.to_string())?;
+    let candidates = [configured.clone(), executable_dir.clone(), executable_dir.join("resources"), configured.join("resources")];
+    let resource = candidates.into_iter().find(contains_backend_resources)
+      .ok_or_else(|| format!("Orion could not find its bundled backend resources (checked {}, {}, and their resources subdirectories).", configured.display(), executable_dir.display()))?;
+    let sidecar_name = format!("orion-service{}", std::env::consts::EXE_SUFFIX);
+    let executable_candidates = [executable_dir.join(&sidecar_name), resource.join(&sidecar_name), executable_dir.join("resources").join(&sidecar_name)];
+    let executable = executable_candidates.into_iter().find(|candidate| candidate.is_file())
+      .ok_or_else(|| format!("Orion could not find its bundled local backend ({sidecar_name})."))?;
+    (resource, executable)
+  };
   let profile = std::env::var_os("ORION_TAURI_DATA_DIR").map(PathBuf::from).unwrap_or(app.path().config_dir().map_err(|error| error.to_string())?.join("orion-local-ai"));
   std::fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
   let paths = json!({"userData":profile,"downloads":app.path().download_dir().map_err(|error|error.to_string())?,"documents":app.path().document_dir().map_err(|error|error.to_string())?,"home":app.path().home_dir().map_err(|error|error.to_string())?,"temp":std::env::temp_dir(),"exe":std::env::current_exe().map_err(|error|error.to_string())?});

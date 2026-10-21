@@ -9,6 +9,7 @@
 - Preserve the visible model card when quantization files are opened or model results refresh.
 - Anchor populated chat messages to the bottom so new conversations flow upward from the latest exchange.
 - Recover OrionFS after an unexpected worker failure and allow its regular status refresh to reconnect.
+- Resolve Tauri's Windows extended resource paths before loading native Bun addons, fixing packaged backend startup in both installed and portable builds.
 - Add the Engines settings tab for installing, updating and repairing, or uninstalling managed llama.cpp, ExLlamaV2 and stable-diffusion.cpp runtimes, with a link to the official Ollama installer.
 - Import documents and folders into a conversation's OrionFS context from Canvas, extract supported document and PDF text, OCR supported scanned PDFs and images locally, and retain source details for citations. Index supported chat attachments into the active conversation automatically.
 - Compact encrypted OrionFS snapshots into a versioned `.ofs` container using Orion's existing encryption. Reclaim unused SQLite pages, prune obsolete chunks and versions, retain only the current snapshot, and keep warmed retrieval free of per-query console logging unless `ORION_OFS_PROFILE=1` is set.

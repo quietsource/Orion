@@ -31,6 +31,7 @@ This nightly is the Tauri v2 edition of Orion, developed alongside the stable El
 
 - Anchor populated conversations at the latest messages so new chats begin near the composer and flow upward naturally.
 - Recover the OrionFS worker after an unexpected failure and reconnect through the normal status refresh.
+- Normalize Windows resource paths in the bundled service so native Canvas modules load correctly in both installed and portable packages.
 - Route managed EXL2 chats through the right server, resolve older model indexes from each model's `config.json`, and keep model loads from starting automatically on app launch.
 
 All stable 0.2.0 conversation history, memory checkpoints, branching and comparison, source receipts, local handoff, voice, Canvas, chat tools, web search and image/video creation remain part of this nightly.
