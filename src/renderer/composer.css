@@ -8,3 +8,4 @@
 .composer-frame-fill{fill:var(--composer-dock)}.composer-frame-outline{fill:none;stroke:var(--composer-frame);stroke-width:1;vector-effect:non-scaling-stroke;stroke-linecap:butt;stroke-linejoin:round}
 .composer textarea{height:58px;padding:7px 5px;max-height:180px}.composer-bottom{gap:8px;padding:3px 1px 0}.composer .send{margin-left:auto}.composer .context-meter{margin-left:0}.chat-inner{padding-bottom:165px}
 @media(max-width:760px){.composer-wrap{padding:24px 44px 0;background:linear-gradient(to bottom,transparent,var(--bg) 24px)}:root[data-theme] .composer,:root[data-theme] .composer:focus-within{--composer-flare:28px;padding-bottom:12px}}
+.dream-status{min-height:15px;margin:0 18px 2px;color:var(--muted);font-size:11px;line-height:15px;opacity:.82;transition:opacity .16s ease}.dream-status[hidden]{display:none}

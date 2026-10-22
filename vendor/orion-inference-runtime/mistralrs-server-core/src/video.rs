@@ -1,0 +1,451 @@
+//! Video frame extraction: FFmpeg for general formats, `image` crate for GIFs.
+//!
+//! Both the HTTP server and the CLI use this module to decode video files
+//! into frames suitable for multimodal model input.
+//!
+//! ## FFmpeg requirement
+//!
+//! For non-GIF formats (mp4, avi, mov, mkv, webm, etc.) the `ffmpeg` binary
+//! must be installed and available on `$PATH`. If it is not found the module
+//! falls back to GIF-only support via the `image` crate.
+//!
+//! Install FFmpeg:
+//! - **Linux**: `apt install ffmpeg` / `dnf install ffmpeg`
+//! - **macOS**: `brew install ffmpeg`
+//! - **Windows**: <https://ffmpeg.org/download.html>
+//!
+//! See <https://docs.mistralrs.dev/guides/models/video-setup/> for full details.
+
+use anyhow::{bail, Context, Result};
+use image::codecs::gif::GifDecoder;
+use image::{AnimationDecoder, DynamicImage, ImageDecoder, Limits};
+use mistralrs_core::{sample_frame_indices, VideoFrameSampling, VideoInput};
+use std::io::Cursor;
+use std::path::Path;
+use tokio::fs;
+
+use crate::media_source::{
+    load_media_source, LoadedMedia, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
+};
+
+/// Default frames-per-second assumed when metadata is unavailable (e.g. GIF).
+const DEFAULT_FPS: f64 = 24.0;
+
+// every GIF frame is materialized as a full RGBA canvas before sampling
+const MAX_GIF_DIMENSION: u32 = 8192;
+const MAX_GIF_FRAMES: usize = 4096;
+const MAX_DECODED_GIF_BYTES: u64 = 1 << 30;
+const RGBA_BYTES_PER_PIXEL: u64 = 4;
+
+const FFMPEG_INSTALL_HELP: &str = "\
+FFmpeg is required for video input (non-GIF formats). Install it:
+  - Linux:   apt install ffmpeg  /  dnf install ffmpeg
+  - macOS:   brew install ffmpeg
+  - Windows: https://ffmpeg.org/download.html
+See https://docs.mistralrs.dev/guides/models/video-setup/ for details.";
+
+/// Fetch video bytes from a URL, file path, or data URL, then decode into
+/// a [`VideoInput`] (sampled frames + metadata).
+///
+/// Supports:
+/// - HTTP/HTTPS URLs
+/// - Local file paths (absolute or relative)
+/// - `file://` URLs
+/// - `data:video/...;base64,...` data URLs
+///
+/// GIF files are decoded with the `image` crate. All other formats require
+/// FFmpeg.
+pub async fn parse_video_url(
+    url_unparsed: &str,
+    sampling: Option<VideoFrameSampling>,
+) -> Result<VideoInput> {
+    parse_video_url_with_policy(url_unparsed, sampling, MediaSourcePolicy::Local).await
+}
+
+pub(crate) async fn parse_video_url_for_server(
+    url_unparsed: &str,
+    sampling: Option<VideoFrameSampling>,
+) -> Result<VideoInput> {
+    parse_video_url_with_policy(
+        url_unparsed,
+        Some(sampling.unwrap_or_default()),
+        MediaSourcePolicy::ServerRequest,
+    )
+    .await
+}
+
+async fn parse_video_url_with_policy(
+    url_unparsed: &str,
+    sampling: Option<VideoFrameSampling>,
+    policy: MediaSourcePolicy,
+) -> Result<VideoInput> {
+    let media = load_media_source(url_unparsed, policy, "video").await?;
+
+    if is_gif_source(url_unparsed, &media) {
+        decode_gif_frames(&media.bytes, sampling)
+    } else {
+        decode_video_ffmpeg(&media.bytes, sampling, url_unparsed).await
+    }
+}
+
+fn is_gif_source(source: &str, media: &LoadedMedia) -> bool {
+    let lower = source.to_lowercase();
+    lower.ends_with(".gif")
+        || media
+            .mime_type
+            .as_deref()
+            .is_some_and(|mime| mime.eq_ignore_ascii_case("image/gif"))
+        || media.bytes.starts_with(b"GIF89a")
+        || media.bytes.starts_with(b"GIF87a")
+}
+
+/// Decode a GIF into frames using the `image` crate.
+fn decode_gif_frames(bytes: &[u8], sampling: Option<VideoFrameSampling>) -> Result<VideoInput> {
+    let mut decoder = GifDecoder::new(Cursor::new(bytes)).context("Failed to decode GIF")?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_GIF_DIMENSION);
+    limits.max_image_height = Some(MAX_GIF_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODED_GIF_BYTES);
+    decoder
+        .set_limits(limits)
+        .context("GIF exceeds decode limits")?;
+
+    let (width, height) = decoder.dimensions();
+    let frame_bytes = u64::from(width) * u64::from(height) * RGBA_BYTES_PER_PIXEL;
+    let max_frames = usize::try_from(MAX_DECODED_GIF_BYTES / frame_bytes.max(1))
+        .unwrap_or(usize::MAX)
+        .min(MAX_GIF_FRAMES);
+    let mut raw_frames = Vec::new();
+    for frame in decoder.into_frames() {
+        if raw_frames.len() == max_frames {
+            bail!(
+                "GIF exceeds the {max_frames} frame decode limit for its {width}x{height} canvas"
+            );
+        }
+        raw_frames.push(frame?);
+    }
+    let total = raw_frames.len();
+    if total == 0 {
+        bail!("GIF contains no frames");
+    }
+
+    // Estimate FPS from average frame delay
+    let total_delay_ms: u32 = raw_frames
+        .iter()
+        .map(|f| {
+            let (num, den) = f.delay().numer_denom_ms();
+            (num * 1000).checked_div(den).unwrap_or(100)
+        })
+        .sum();
+    let fps = if total_delay_ms > 0 {
+        (total as f64 * 1000.0) / total_delay_ms as f64
+    } else {
+        DEFAULT_FPS
+    };
+
+    let indices = sampling
+        .map(|sampling| sample_frame_indices(total, sampling.target_frames(total, fps)))
+        .unwrap_or_else(|| (0..total).collect());
+    let frames: Vec<DynamicImage> = indices
+        .iter()
+        .map(|&i| DynamicImage::ImageRgba8(raw_frames[i].buffer().clone()))
+        .collect();
+
+    Ok(VideoInput {
+        frames,
+        fps,
+        total_num_frames: total,
+        sampled_indices: indices,
+    })
+}
+
+/// Decode a video file using FFmpeg subprocess.
+///
+/// 1. Probe with `ffprobe` for FPS and total frame count.
+/// 2. Extract frames with `ffmpeg`.
+/// 3. Load frames as images.
+async fn decode_video_ffmpeg(
+    bytes: &[u8],
+    sampling: Option<VideoFrameSampling>,
+    source_hint: &str,
+) -> Result<VideoInput> {
+    // Check ffmpeg availability
+    let ffmpeg_ok = tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok();
+
+    if !ffmpeg_ok {
+        bail!(
+            "Cannot decode video '{}': FFmpeg not found.\n{}",
+            source_hint,
+            FFMPEG_INSTALL_HELP
+        );
+    }
+
+    // Write to temp file
+    let tmp_dir = std::env::temp_dir().join("mistralrs_video");
+    fs::create_dir_all(&tmp_dir).await?;
+    let video_id = uuid::Uuid::new_v4();
+    let input_path = tmp_dir.join(format!("{video_id}.video"));
+    fs::write(&input_path, bytes).await?;
+
+    // Probe video metadata with ffprobe
+    let (fps, total_frames) = probe_video(&input_path).await.unwrap_or((DEFAULT_FPS, 0));
+
+    // Create output directory
+    let out_dir = tmp_dir.join(format!("{video_id}_frames"));
+    fs::create_dir_all(&out_dir).await?;
+    let output_pattern = format!("{}/frame_%010d.png", out_dir.display());
+
+    let mut requested_indices = None;
+    let effective_total = if let Some(sampling) = sampling {
+        // Without a probed frame count, fps-based sampling cannot size itself; fall back to a fixed cap.
+        let num_frames = if total_frames > 0 {
+            sampling.target_frames(total_frames, fps)
+        } else {
+            match sampling {
+                VideoFrameSampling::Uniform(count) => count,
+                VideoFrameSampling::Fps { .. } => SERVER_VIDEO_FRAME_LIMIT,
+            }
+        };
+        let effective_total = if total_frames > 0 {
+            total_frames
+        } else {
+            num_frames
+        };
+        let indices = sample_frame_indices(effective_total, num_frames);
+        let select_expr = indices
+            .iter()
+            .map(|i| format!("eq(n\\,{i})"))
+            .collect::<Vec<_>>()
+            .join("+");
+        let mut command = tokio::process::Command::new("ffmpeg");
+        command
+            .arg("-i")
+            .arg(input_path.to_str().unwrap())
+            .arg("-vf")
+            .arg(format!("select='{select_expr}'"))
+            .arg("-vsync")
+            .arg("vfr")
+            .arg("-frames:v")
+            .arg(indices.len().to_string())
+            .arg(&output_pattern);
+        requested_indices = Some(indices);
+        let status = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .context("Failed to run ffmpeg")?;
+        if !status.success() {
+            let _ = fs::remove_file(&input_path).await;
+            let _ = fs::remove_dir_all(&out_dir).await;
+            bail!(
+                "FFmpeg failed to extract frames from '{}' (exit code: {:?})",
+                source_hint,
+                status.code()
+            );
+        }
+        effective_total
+    } else {
+        let mut command = tokio::process::Command::new("ffmpeg");
+        command
+            .arg("-i")
+            .arg(input_path.to_str().unwrap())
+            .arg("-vsync")
+            .arg("vfr")
+            .arg(&output_pattern);
+        let status = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .context("Failed to run ffmpeg")?;
+        if !status.success() {
+            let _ = fs::remove_file(&input_path).await;
+            let _ = fs::remove_dir_all(&out_dir).await;
+            bail!(
+                "FFmpeg failed to extract frames from '{}' (exit code: {:?})",
+                source_hint,
+                status.code()
+            );
+        }
+        total_frames
+    };
+
+    let mut frame_paths = Vec::new();
+    let mut entries = fs::read_dir(&out_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("png"))
+        {
+            frame_paths.push(path);
+        }
+    }
+    frame_paths.sort();
+
+    // Load extracted frame images
+    let mut frames = Vec::with_capacity(frame_paths.len());
+    for frame_path in frame_paths {
+        let frame_bytes = fs::read(&frame_path).await?;
+        let img = image::load_from_memory(&frame_bytes).context(format!(
+            "Failed to load extracted frame {}",
+            frame_path.display()
+        ))?;
+        frames.push(img);
+    }
+
+    // Cleanup temp files
+    let _ = fs::remove_file(&input_path).await;
+    let _ = fs::remove_dir_all(&out_dir).await;
+
+    if frames.is_empty() {
+        bail!(
+            "FFmpeg extracted 0 frames from '{}'. The file may be corrupt or empty.",
+            source_hint
+        );
+    }
+
+    let total_num_frames = if effective_total > 0 {
+        effective_total
+    } else {
+        frames.len()
+    };
+    let actual_indices = match requested_indices {
+        Some(indices) if frames.len() < indices.len() => {
+            sample_frame_indices(total_num_frames, frames.len())
+        }
+        Some(indices) => indices,
+        None => (0..frames.len()).collect(),
+    };
+
+    Ok(VideoInput {
+        frames,
+        fps,
+        total_num_frames,
+        sampled_indices: actual_indices,
+    })
+}
+
+/// Use `ffprobe` to get FPS and total frame count for a video file.
+async fn probe_video(path: &Path) -> Result<(f64, usize)> {
+    // Get FPS
+    let fps_output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .context("Failed to run ffprobe for FPS")?;
+
+    let fps_str = String::from_utf8_lossy(&fps_output.stdout);
+    let fps = parse_fps_fraction(fps_str.trim()).unwrap_or(DEFAULT_FPS);
+
+    // Get total frame count
+    let count_output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .context("Failed to run ffprobe for frame count")?;
+
+    let count_str = String::from_utf8_lossy(&count_output.stdout);
+    let total_frames: usize = count_str.trim().parse().unwrap_or(0);
+
+    Ok((fps, total_frames))
+}
+
+/// Parse a fractional FPS string like "30000/1001" or "30" into f64.
+fn parse_fps_fraction(s: &str) -> Option<f64> {
+    if let Some((num, den)) = s.split_once('/') {
+        let n: f64 = num.parse().ok()?;
+        let d: f64 = den.parse().ok()?;
+        if d > 0.0 {
+            Some(n / d)
+        } else {
+            None
+        }
+    } else {
+        s.parse().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIF_HEADER: &[u8] = b"GIF89a";
+    const GIF_SCREEN_TAIL: &[u8] = &[0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff];
+    const GIF_1X1_FRAME: &[u8] = &[0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0];
+    const GIF_TRAILER: u8 = 0x3b;
+
+    fn gif(width: u16, height: u16, frames: usize) -> Vec<u8> {
+        let mut bytes = GIF_HEADER.to_vec();
+        bytes.extend(width.to_le_bytes());
+        bytes.extend(height.to_le_bytes());
+        bytes.extend(GIF_SCREEN_TAIL);
+        for _ in 0..frames {
+            bytes.extend(GIF_1X1_FRAME);
+        }
+        bytes.push(GIF_TRAILER);
+        bytes
+    }
+
+    #[test]
+    fn gif_decodes_within_limits() {
+        let video = decode_gif_frames(&gif(1, 1, 3), None).unwrap();
+        assert_eq!(video.total_num_frames, 3);
+    }
+
+    #[test]
+    fn gif_rejects_oversized_canvas() {
+        assert!(decode_gif_frames(&gif(u16::MAX, u16::MAX, 1), None).is_err());
+    }
+
+    #[test]
+    fn gif_rejects_too_many_frames() {
+        assert!(decode_gif_frames(&gif(1, 1, MAX_GIF_FRAMES + 1), None).is_err());
+    }
+
+    #[test]
+    fn test_parse_fps_fraction() {
+        assert!((parse_fps_fraction("30000/1001").unwrap() - 29.97).abs() < 0.01);
+        assert!((parse_fps_fraction("30").unwrap() - 30.0).abs() < 0.01);
+        assert!((parse_fps_fraction("24/1").unwrap() - 24.0).abs() < 0.01);
+        assert!(parse_fps_fraction("").is_none());
+        assert!(parse_fps_fraction("abc").is_none());
+    }
+
+    #[tokio::test]
+    async fn server_video_rejects_local_sources() {
+        assert!(
+            parse_video_url_for_server("resources/rust-logo-32x32.png", None)
+                .await
+                .is_err()
+        );
+    }
+}

@@ -1,0 +1,246 @@
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tokio::sync::RwLock;
+
+use mistralrs::{ModelGenerationDefaults, SearchEmbeddingModel};
+
+#[derive(Clone, Serialize)]
+pub struct UiModelInfo {
+    pub name: String,
+    pub kind: String,
+    /// Lowercased modality names: e.g. ["text", "vision"].
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    pub generation_defaults: GenerationParams,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ChatMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub videos: Option<Vec<String>>,
+    /// Rich display blocks (reasoning, tool calls with results/images) for UI rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<serde_json::Value>,
+    /// Finish reason from the model (stop, length, tool_calls, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ChatFile {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub model: String,
+    pub kind: String,
+    pub created_at: String,
+    pub messages: Vec<ChatMessage>,
+    /// Server-side agentic session ID. Full session lives in `chat_<id>.session.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Active leaf id. Walking `parent_id` from here yields the current conversation path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
+}
+
+/// Default generation parameters
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GenerationParams {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<usize>,
+    pub max_tokens: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+    pub system_prompt: Option<String>,
+}
+
+impl Default for GenerationParams {
+    fn default() -> Self {
+        Self {
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(40),
+            max_tokens: Some(8192),
+            repetition_penalty: Some(1.1),
+            system_prompt: None,
+        }
+    }
+}
+
+impl GenerationParams {
+    pub fn empty() -> Self {
+        Self {
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
+            repetition_penalty: None,
+            system_prompt: None,
+        }
+    }
+
+    pub fn from_model_defaults(defaults: Option<&ModelGenerationDefaults>) -> Self {
+        let Some(defaults) = defaults else {
+            return Self::default();
+        };
+
+        let mut params = Self::empty();
+
+        if defaults.do_sample == Some(false) {
+            params.temperature = Some(0.0);
+            params.top_k = Some(1);
+            params.top_p = Some(1.0);
+        } else {
+            if let Some(temperature) = defaults.temperature {
+                params.temperature = Some(temperature);
+            }
+            if let Some(top_p) = defaults.top_p {
+                params.top_p = Some(top_p);
+            }
+            if let Some(top_k) = defaults.top_k.filter(|top_k| *top_k > 0) {
+                params.top_k = Some(top_k);
+            }
+        }
+        if let Some(max_tokens) = defaults.max_new_tokens {
+            params.max_tokens = Some(max_tokens);
+        }
+        if let Some(repetition_penalty) = defaults.repetition_penalty {
+            params.repetition_penalty = Some(repetition_penalty);
+        }
+
+        params
+    }
+}
+
+pub struct AppState {
+    pub model: mistralrs::Model,
+    pub models: IndexMap<String, UiModelInfo>,
+    pub current: RwLock<Option<String>>,
+    pub chats_dir: String,
+    /// Directory for storing generated speech wav files
+    pub speech_dir: String,
+    pub current_chat: RwLock<Option<String>>,
+    pub next_chat_id: RwLock<u32>,
+    /// Default generation parameters
+    pub default_params: GenerationParams,
+    /// Whether web search is enabled
+    pub search_enabled: bool,
+    /// Search embedding model to use (if enabled)
+    pub search_embedding_model: Option<SearchEmbeddingModel>,
+    /// Whether code execution is enabled
+    pub code_execution_enabled: bool,
+    /// Whether shell execution is enabled
+    pub shell_enabled: bool,
+    /// Tool dispatch URL (if configured)
+    pub tool_dispatch_url: Option<String>,
+}
+
+const CHAT_FILE_EXT: &str = "json";
+const CHAT_SESSION_FILE_EXT: &str = "session.json";
+
+impl AppState {
+    pub fn chat_path(&self, chat_id: &str) -> Option<PathBuf> {
+        chat_file_path(&self.chats_dir, chat_id, CHAT_FILE_EXT)
+    }
+
+    pub fn chat_session_path(&self, chat_id: &str) -> Option<PathBuf> {
+        chat_file_path(&self.chats_dir, chat_id, CHAT_SESSION_FILE_EXT)
+    }
+}
+
+// ids are server-generated (`chat_<n>`), so anything else is a client trying to leave chats_dir
+fn chat_file_path(chats_dir: &str, chat_id: &str, ext: &str) -> Option<PathBuf> {
+    let valid = !chat_id.is_empty()
+        && chat_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    valid.then(|| Path::new(chats_dir).join(format!("{chat_id}.{ext}")))
+}
+
+// Request/Response types
+#[derive(Deserialize)]
+pub struct SelectRequest {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct NewChatRequest {
+    pub model: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteChatRequest {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub struct LoadChatRequest {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenameChatRequest {
+    pub id: String,
+    pub title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chat_file_path, GenerationParams, ModelGenerationDefaults};
+
+    #[test]
+    fn chat_paths_stay_inside_chats_dir() {
+        assert_eq!(
+            chat_file_path("/c", "chat_12", "json"),
+            Some(std::path::Path::new("/c").join("chat_12.json"))
+        );
+        for id in [
+            "",
+            "..",
+            "../x",
+            "../../home/u/.config/app",
+            "/etc/passwd",
+            "a/b",
+            "a\\b",
+            "chat_1.session",
+            "chat 1",
+        ] {
+            assert_eq!(chat_file_path("/c", id, "json"), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn do_sample_false_overrides_sampling_defaults() {
+        let params = GenerationParams::from_model_defaults(Some(&ModelGenerationDefaults {
+            do_sample: Some(false),
+            temperature: Some(0.6),
+            top_k: Some(20),
+            top_p: Some(0.9),
+            ..Default::default()
+        }));
+
+        assert_eq!(params.temperature, Some(0.0));
+        assert_eq!(params.top_k, Some(1));
+        assert_eq!(params.top_p, Some(1.0));
+    }
+}

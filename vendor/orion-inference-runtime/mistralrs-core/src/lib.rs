@@ -1,0 +1,3040 @@
+#![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+use candle_core::Device;
+use engine::Engine;
+pub use engine::{
+    agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
+    get_engine_terminate_flag, reset_engine_terminate_flag, should_terminate_engine_sequences,
+    EngineInstruction, IntervalLogger, SearchEmbeddingModel, DEFAULT_MAX_TOOL_ROUNDS,
+    ENGINE_INSTRUCTIONS, TERMINATE_ALL_NEXT_STEP,
+};
+use hf_hub::Cache;
+pub use lora::Ordering;
+pub use pipeline::CalibrationStatus;
+pub use pipeline::ModelCategory;
+pub use pipeline::Pipeline;
+#[cfg(feature = "pyo3_macros")]
+use pyo3::exceptions::PyValueError;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    error::Error,
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    thread::{self, JoinHandle},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::mpsc::{channel, Sender};
+use tracing::{debug, info, warn};
+
+fn build_engine_runtime() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(candle_core::utils::get_num_threads())
+        .on_thread_start(candle_core::utils::set_thread_affinity)
+        .build()
+        .unwrap()
+}
+
+pub const MISTRALRS_GIT_REVISION: &str = match option_env!("MISTRALRS_GIT_REVISION") {
+    Some(value) => value,
+    None => "unknown",
+};
+pub const MISTRALRS_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY: usize = 10_000;
+pub const REQUEST_QUEUE_DURATION_METRIC: &str = "mistralrs_request_queue_duration_seconds";
+
+mod adapter;
+mod agent_approval;
+mod cuda;
+mod device_map;
+mod engine;
+mod lora;
+mod metal;
+pub use metal::warmup_metal_kernels;
+mod model_loader;
+mod moe;
+mod ops;
+mod video_input;
+pub use model_loader::{
+    get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
+};
+pub use video_input::{
+    sample_frame_indices, VideoFrameSampling, VideoInput, DEFAULT_VIDEO_FRAME_LIMIT,
+};
+mod embedding_models;
+mod flashinfer;
+mod kv_cache;
+mod search;
+
+mod model_selected;
+pub use model_selected::ModelSelected;
+pub use toml_selector::{get_toml_selected_model_device_map_params, get_toml_selected_model_dtype};
+
+mod amoe;
+mod attention;
+mod block_diffusion;
+mod diagnostics;
+mod diffusion_models;
+pub mod distributed;
+pub mod files;
+mod gdn;
+mod gguf;
+pub mod layers;
+mod layers_masker;
+mod layers_utils;
+pub mod matformer;
+pub mod memory_plan;
+mod mla;
+pub mod model_metadata;
+mod models;
+mod paged_attention;
+mod perf_flags;
+mod pipeline;
+mod prefix_cacher;
+pub mod reasoning_parsers;
+pub mod remote_fetch;
+mod request;
+pub mod resource_plan;
+mod response;
+mod sampler;
+mod scheduler;
+mod sequence;
+mod special_text;
+pub mod speculative;
+mod speech_models;
+mod toml_selector;
+mod tools;
+mod topology;
+mod utils;
+mod vision_models;
+mod xlora_models;
+
+pub use diagnostics::{
+    check_hf_gated_access, collect_system_info, run_doctor, BuildInfo, CpuInfo, DeviceInfo,
+    DoctorCheck, DoctorReport, DoctorStatus, HfConnectivityInfo, MemoryInfo, SystemInfo,
+};
+mod tuning;
+pub use tuning::{
+    auto_tune, AutoTuneRequest, AutoTuneResult, FitStatus, QualityTier, TuneCandidate, TuneProfile,
+};
+
+pub(crate) use adapter::AdapterLease;
+#[doc(hidden)]
+pub use adapter::DynamicLoraRuntime;
+pub use adapter::{
+    AdapterGenerationId, AdapterGenerationParseError, AdapterSelection, LoraAdapterError,
+    LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, LoraAdapterRoute, LoraAdapterSpec,
+    LoraAdapterSpecParseError, LoraResidentGenerationInfo, LoraRuntimeConfig, LoraRuntimeStatus,
+    DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK, MAX_LORA_ALIAS_BYTES,
+};
+pub use agent_approval::{
+    AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
+    AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler,
+};
+pub use amoe::{AnyMoeConfig, AnyMoeExpertType};
+pub use device_map::{
+    DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, LayerDeviceMapper,
+};
+pub use files::{
+    format_from_name, is_text_mime, mime_for_format, File, FileContent, FileSource, FileStore,
+    RequestedFile, FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_USER_DATA, MODEL_INLINE_BYTES,
+    WIRE_EMBED_LIMIT_BYTES,
+};
+pub use gguf::{GGUFArchitecture, GGUF_MULTI_FILE_DELIMITER};
+pub use memory_plan::{ExecutionMemoryLimits, MemoryGoal};
+pub use mistralrs_audio::AudioInput;
+pub use mistralrs_code_exec::{
+    CodeExecutionApproval, CodeExecutionApprovalCallback, CodeExecutionConfig, ShellConfig,
+    DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
+};
+pub use mistralrs_mcp::{
+    AgentPermission, AgentToolApprovalNotifier, AgentToolApprovalRequest, AgentToolKind,
+    AgentToolMetadata, AgentToolSource, CalledFunction, CodeExecutionApprovalNotifier,
+    CodeExecutionApprovalRequest, CodeExecutionPermission, Function, MultimodalToolCallback,
+    ShellOptions, ShellSkillMount, Tool, ToolCallContext, ToolCallback, ToolCallbackKind,
+    ToolCallbackWithTool, ToolOutput, ToolType,
+};
+pub use mistralrs_mcp::{
+    McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
+};
+pub use mistralrs_quant::{IsqBits, IsqType};
+pub use mistralrs_sandbox::{NetworkMode, SandboxPolicy};
+pub use paged_attention::{PagedAttentionConfig, PagedCacheType};
+pub use pipeline::hf::{
+    get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline,
+    list_model_files, probe_hf_repo_files, read_model_file_range, try_get_model_file,
+    HF_HUB_OFFLINE_ENV,
+};
+pub use pipeline::{
+    chat_template::{is_chat_template_request_error, ChatTemplate},
+    expand_isq_value, expand_uqff_shards, parse_isq_value, parse_uqff_shard,
+    resolve_uqff_report_output, resolve_uqff_shorthand, ActivationMemoryContext,
+    ActivationMemoryEstimate, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
+    AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
+    DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
+    EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
+    GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
+    GemmaLoader, HfConfigOverrides, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader,
+    LlamaLoader, Loader, LocalModelPaths, MistralLoader, MixtralLoader, Modalities, ModelKind,
+    ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
+    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
+    NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader, Phi3VLoader, Qwen2Loader,
+    ResolvedLoraAdapter, SpeechLoader, SpeechPipeline, Starcoder2Loader, SupportedModality,
+    TokenSource, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
+};
+pub use request::{
+    resolve_reasoning_controls, ApproximateUserLocation, CalibrationAction, CalibrationRequest,
+    Constraint, DetokenizationRequest, ImageGenerationResponseFormat, LlguidanceGrammar,
+    MessageContent, NormalRequest, ReasoningControlError, ReasoningEffort,
+    ReasoningEffortParseError, Request, RequestMessage, ResolvedReasoningControls,
+    SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
+    WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
+    DEFAULT_ENABLE_THINKING,
+};
+pub use resource_plan::{
+    plan_paged_kv, PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions,
+};
+pub use response::*;
+pub use sampler::{
+    CustomLogitsProcessor, DrySamplingParams, ModelGenerationDefaults, SamplingParams, StopTokens,
+    TopLogprob,
+};
+pub use scheduler::{
+    DefaultSchedulerMethod, SchedulerConfig, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
+    DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+};
+pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
+use serde::Serialize;
+pub use speculative::{
+    reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime, MtpConfig,
+    MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
+};
+pub use speech_models::{utils as speech_utils, SpeechGenerationConfig, SpeechLoaderType};
+use tokio::runtime::Runtime;
+use toml_selector::{TomlLoaderArgs, TomlSelector};
+pub use tools::{
+    AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
+    BuiltinToolChoice, BuiltinToolChoiceType, NamedFunctionToolChoice, ToolCallResponse,
+    ToolCallType, ToolCallbacks, ToolChoice,
+};
+pub use topology::{LayerTopology, Topology};
+pub use utils::debug::{
+    default_mistralrs_filter, initialize_logging, initialize_logging_with_filter,
+    initialize_mistralrs_logging, LogVerbosity,
+};
+pub use utils::memory_usage::MemoryUsage;
+pub use utils::normal::{ModelDType, TryIntoDType};
+pub use utils::{paged_attn_supported, using_flash_attn};
+
+// re-export llguidance for easier LlguidanceGrammar construction
+pub use llguidance;
+
+/// `true` if `MISTRALRS_DEBUG=1`
+pub(crate) static DEBUG: AtomicBool = AtomicBool::new(false);
+pub static GLOBAL_HF_CACHE: OnceLock<Cache> = OnceLock::new();
+
+/// Set the process-wide Hugging Face cache path before model discovery.
+pub fn set_hf_cache_path(path: impl Into<PathBuf>) {
+    GLOBAL_HF_CACHE.get_or_init(|| Cache::new(path.into()));
+}
+
+/// Configuration for creating an engine instance
+#[derive(Clone)]
+pub struct EngineConfig {
+    pub no_kv_cache: bool,
+    pub no_prefix_cache: bool,
+    pub prefix_cache_n: usize,
+    pub disable_eos_stop: bool,
+    pub throughput_logging_enabled: bool,
+    pub search_embedding_model: Option<SearchEmbeddingModel>,
+    pub search_callback: Option<Arc<SearchCallback>>,
+    pub tool_callbacks: tools::ToolCallbacksWithTools,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            no_kv_cache: false,
+            no_prefix_cache: false,
+            prefix_cache_n: 16,
+            disable_eos_stop: false,
+            throughput_logging_enabled: true,
+            search_embedding_model: None,
+            search_callback: None,
+            tool_callbacks: HashMap::new(),
+        }
+    }
+}
+
+/// Configuration for adding a model to MistralRs
+#[derive(Clone)]
+pub struct AddModelConfig {
+    pub engine_config: EngineConfig,
+    pub mcp_client_config: Option<McpClientConfig>,
+    /// Optional loader config for enabling model unload/reload support.
+    /// Without this, models cannot be unloaded and reloaded.
+    pub loader_config: Option<ModelLoaderConfig>,
+    pub code_exec_config: Option<CodeExecutionConfig>,
+    pub shell_config: Option<ShellConfig>,
+}
+
+impl AddModelConfig {
+    pub fn new(engine_config: EngineConfig) -> Self {
+        Self {
+            engine_config,
+            mcp_client_config: None,
+            loader_config: None,
+            code_exec_config: None,
+            shell_config: None,
+        }
+    }
+
+    pub fn with_mcp_config(mut self, mcp_config: McpClientConfig) -> Self {
+        self.mcp_client_config = Some(mcp_config);
+        self
+    }
+
+    pub fn with_code_execution(mut self, config: CodeExecutionConfig) -> Self {
+        self.code_exec_config = Some(config);
+        self
+    }
+
+    pub fn with_shell_execution(mut self, config: ShellConfig) -> Self {
+        self.shell_config = Some(config);
+        self
+    }
+
+    /// Set the loader config for enabling model unload/reload support.
+    /// Without this, models cannot be unloaded and reloaded.
+    pub fn with_loader_config(mut self, loader_config: ModelLoaderConfig) -> Self {
+        self.loader_config = Some(loader_config);
+        self
+    }
+}
+
+#[derive(Clone)]
+pub struct MistralRsConfig {
+    pub kind: ModelKind,
+    pub device: Device,
+    pub category: ModelCategory,
+    pub modalities: Modalities,
+    pub max_seq_len: Option<usize>,
+    pub generation_defaults: Option<ModelGenerationDefaults>,
+}
+
+/// Configuration for recreating a model loader when reloading an unloaded model.
+/// This captures the essential parameters needed to reconstruct a loader.
+#[derive(Clone)]
+pub struct ModelLoaderConfig {
+    /// The model selection configuration (Plain, GGUF, Multimodal, etc.)
+    pub model_selected: ModelSelected,
+    /// Source of the HF token
+    pub token_source: TokenSource,
+    /// Optional HF revision
+    pub hf_revision: Option<String>,
+    /// Model data type
+    pub dtype: ModelDType,
+    /// Device to load the model on
+    pub device: Device,
+    /// Device mapping setting
+    pub device_map_setting: DeviceMapSetting,
+    /// In-situ quantization type
+    pub isq: Option<IsqType>,
+    /// Paged attention configuration
+    pub paged_attn_config: Option<PagedAttentionConfig>,
+    /// Whether to suppress logging during loading
+    pub silent: bool,
+    /// Chat template override
+    pub chat_template: Option<String>,
+    /// Explicit Jinja template path
+    pub jinja_explicit: Option<String>,
+    /// Optional runtime context cap applied by loaders that support it.
+    pub max_model_len: Option<usize>,
+    /// Optional recursively merged Hugging Face config.json overrides.
+    pub hf_config_overrides: Option<HfConfigOverrides>,
+    /// Optional speculative decoding attachment to recreate after reload.
+    pub mtp_config: Option<MtpConfig>,
+    /// Optional logical tensor byte budget for multimodal encoder outputs.
+    pub encoder_cache_memory_bytes: Option<usize>,
+}
+
+/// State preserved when a model is unloaded.
+/// This contains all the information needed to reload the model on demand.
+#[derive(Clone)]
+pub struct UnloadedModelState {
+    /// Configuration to recreate the loader
+    pub loader_config: ModelLoaderConfig,
+    /// Scheduler configuration
+    pub scheduler_config: SchedulerConfig,
+    /// Engine configuration
+    pub engine_config: EngineConfig,
+    /// MCP client configuration
+    pub mcp_client_config: Option<McpClientConfig>,
+    /// Model category (Text, Multimodal, etc.)
+    pub category: ModelCategory,
+    /// Model metadata configuration
+    pub mistralrs_config: MistralRsConfig,
+}
+
+/// Internal structure to hold per-engine state
+struct EngineInstance {
+    sender: Sender<Request>,
+    engine_handler: Option<JoinHandle<()>>,
+    reboot_state: RebootState,
+    adapter_runtime: Option<Arc<DynamicLoraRuntime>>,
+    config: MistralRsConfig,
+    category: ModelCategory,
+    logger: Arc<IntervalLogger>,
+    /// Shared with the engine so the SDK/HTTP layer can read/write sessions out of band.
+    session_store: Arc<std::sync::Mutex<engine::agentic_session::AgenticSessionStore>>,
+    /// Shared with the engine for fetch-by-id from the SDK/HTTP layer.
+    pub(crate) file_store: files::FileStore,
+}
+
+impl Drop for EngineInstance {
+    fn drop(&mut self) {
+        // Free decode graphs (they capture the engine thread's cuTile modules) before it exits when `sender` drops.
+        if let Ok(pipeline) = self.reboot_state.pipeline.try_lock() {
+            pipeline.cleanup_cuda_graphs();
+        }
+    }
+}
+
+impl EngineInstance {
+    fn is_finished(&self) -> bool {
+        self.engine_handler
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+    }
+
+    fn terminate(&self) {
+        let _ = self.sender.try_send(Request::Terminate);
+    }
+
+    fn join(&mut self) {
+        if let Some(handle) = self.engine_handler.take() {
+            if handle.join().is_err() {
+                warn!("Engine thread panicked during shutdown.");
+            }
+        }
+    }
+}
+
+/// The MistralRs struct handles sending requests to multiple engines.
+/// It is the core multi-threaded component of mistral.rs, and uses `mpsc`
+/// `Sender` and `Receiver` primitives to send and receive requests to the
+/// appropriate engine based on model ID.
+///
+/// ## Lock Ordering Convention
+///
+/// This struct uses multiple `RwLock`s. To prevent deadlocks, locks must be
+/// acquired in this order:
+/// 1. `reloading_models`
+/// 2. `engines`
+/// 3. `unloaded_models`
+/// 4. `default_engine_id`
+/// 5. `model_aliases`
+///
+/// Use scope-based lock management and explicit `drop()` calls.
+pub struct MistralRs {
+    engines: RwLock<HashMap<String, EngineInstance>>,
+    /// Models that have been unloaded but can be reloaded on demand
+    unloaded_models: RwLock<HashMap<String, UnloadedModelState>>,
+    /// Models currently being reloaded (to prevent concurrent reloads)
+    reloading_models: RwLock<HashSet<String>>,
+    default_engine_id: RwLock<Option<String>>,
+    /// Alternate IDs that resolve to primary model IDs.
+    model_aliases: RwLock<HashMap<String, String>>,
+    log: Option<String>,
+    id: String,
+    creation_time: u64,
+    next_request_id: Mutex<RefCell<usize>>,
+}
+
+#[derive(Clone)]
+struct RebootState {
+    pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+    method: SchedulerConfig,
+    no_kv_cache: bool,
+    no_prefix_cache: bool,
+    prefix_cache_n: usize,
+    disable_eos_stop: bool,
+    throughput_logging_enabled: bool,
+    search_embedding_model: Option<SearchEmbeddingModel>,
+    search_callback: Option<Arc<search::SearchCallback>>,
+    tool_callbacks: tools::ToolCallbacksWithTools,
+    mcp_client_config: Option<McpClientConfig>,
+    /// Optional loader config for reloading after unload
+    loader_config: Option<ModelLoaderConfig>,
+}
+
+/// Model status for loaded/unloaded state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelStatus {
+    Loaded,
+    Unloaded,
+    Reloading,
+}
+
+impl std::fmt::Display for ModelStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelStatus::Loaded => write!(f, "loaded"),
+            ModelStatus::Unloaded => write!(f, "unloaded"),
+            ModelStatus::Reloading => write!(f, "reloading"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MistralRsError {
+    #[error("engine state lock is poisoned")]
+    EnginePoisoned,
+    #[error("request engine is unavailable")]
+    SenderPoisoned,
+    /// The requested model was not found (neither loaded nor unloaded)
+    #[error("model `{0}` was not found")]
+    ModelNotFound(String),
+    /// The model is currently being reloaded
+    #[error("model `{0}` is being reloaded")]
+    ModelReloading(String),
+    /// Failed to reload the model
+    #[error("failed to reload model: {0}")]
+    ReloadFailed(String),
+    /// Model does not have loader config for reloading
+    #[error("model `{0}` has no loader configuration")]
+    NoLoaderConfig(String),
+    /// Model is already loaded
+    #[error("model `{0}` is already loaded")]
+    ModelAlreadyLoaded(String),
+    /// Model is already unloaded
+    #[error("model `{0}` is already unloaded")]
+    ModelAlreadyUnloaded(String),
+    #[error(transparent)]
+    LoraAdapter(#[from] LoraAdapterError),
+    /// Other error with a message.
+    #[error("{0}")]
+    Other(String),
+}
+
+#[cfg(feature = "pyo3_macros")]
+impl From<MistralRsError> for pyo3::PyErr {
+    fn from(value: MistralRsError) -> Self {
+        PyValueError::new_err(value.to_string())
+    }
+}
+
+/// The MistralRsBuilder takes the pipeline and a scheduler method and constructs
+/// an Engine and a MistralRs instance. The Engine runs on a separate thread, and the MistralRs
+/// instance stays on the calling thread.
+pub struct MistralRsBuilder {
+    pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+    method: SchedulerConfig,
+    model_id_override: Option<String>,
+    log: Option<String>,
+    no_kv_cache: Option<bool>,
+    no_prefix_cache: Option<bool>,
+    prefix_cache_n: Option<usize>,
+    disable_eos_stop: Option<bool>,
+    throughput_logging_enabled: bool,
+    search_embedding_model: Option<SearchEmbeddingModel>,
+    search_callback: Option<Arc<SearchCallback>>,
+    tool_callbacks: tools::ToolCallbacksWithTools,
+    mcp_client_config: Option<McpClientConfig>,
+    loader_config: Option<ModelLoaderConfig>,
+    code_exec_config: Option<CodeExecutionConfig>,
+    shell_config: Option<ShellConfig>,
+    defer_daemon_start: bool,
+}
+
+impl MistralRsBuilder {
+    /// Creates a new builder with the given pipeline, scheduler method, logging flag,
+    /// and optional embedding model for web search. To override the search callback,
+    /// use `.with_search_callback(...)` on the builder.
+    pub fn new(
+        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        method: SchedulerConfig,
+        throughput_logging: bool,
+        search_embedding_model: Option<SearchEmbeddingModel>,
+    ) -> Self {
+        Self {
+            pipeline,
+            method,
+            model_id_override: None,
+            log: None,
+            no_kv_cache: None,
+            no_prefix_cache: None,
+            prefix_cache_n: None,
+            disable_eos_stop: None,
+            throughput_logging_enabled: throughput_logging,
+            search_embedding_model,
+            search_callback: None,
+            tool_callbacks: HashMap::new(),
+            mcp_client_config: None,
+            loader_config: None,
+            code_exec_config: None,
+            shell_config: None,
+            defer_daemon_start: false,
+        }
+    }
+
+    /// Override the model ID used by MistralRs. Defaults to the pipeline name.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id_override = Some(model_id.into());
+        self
+    }
+
+    /// Set the loader config for enabling model unload/reload support.
+    /// Without this, models cannot be unloaded and reloaded.
+    pub fn with_loader_config(mut self, loader_config: ModelLoaderConfig) -> Self {
+        self.loader_config = Some(loader_config);
+        self
+    }
+    pub fn with_log(mut self, log: String) -> Self {
+        self.log = Some(log);
+        self
+    }
+    pub fn with_opt_log(mut self, log: Option<String>) -> Self {
+        self.log = log;
+        self
+    }
+    pub fn with_no_kv_cache(mut self, no_kv_cache: bool) -> Self {
+        self.no_kv_cache = Some(no_kv_cache);
+        self
+    }
+    pub fn with_no_prefix_cache(mut self, no_prefix_cache: bool) -> Self {
+        self.no_prefix_cache = Some(no_prefix_cache);
+        self
+    }
+    pub fn with_prefix_cache_n(mut self, prefix_cache_n: usize) -> Self {
+        self.prefix_cache_n = Some(prefix_cache_n);
+        self
+    }
+    pub fn with_disable_eos_stop(mut self, disable_eos_stop: bool) -> Self {
+        self.disable_eos_stop = Some(disable_eos_stop);
+        self
+    }
+
+    /// Use a custom callback to gather search results.
+    pub fn with_search_callback(mut self, search_callback: Arc<SearchCallback>) -> Self {
+        self.search_callback = Some(search_callback);
+        self
+    }
+
+    /// Register a custom callback for the specified tool name.
+    pub fn with_tool_callback(
+        mut self,
+        name: impl Into<String>,
+        tool_callback: Arc<ToolCallback>,
+    ) -> Self {
+        let name = name.into();
+        // Wrap bare callback with a minimal tool definition.
+        self.tool_callbacks.insert(
+            name.clone(),
+            ToolCallbackWithTool {
+                callback: ToolCallbackKind::Text(tool_callback),
+                tool: Tool {
+                    tp: ToolType::Function,
+                    function: Function {
+                        description: None,
+                        name,
+                        parameters: None,
+                        strict: None,
+                    },
+                },
+            },
+        );
+        self
+    }
+
+    /// Register a custom callback with its associated Tool definition. The Tool will be
+    /// automatically added to requests when tool callbacks are active.
+    pub fn with_tool_callback_and_tool(
+        mut self,
+        name: impl Into<String>,
+        tool_callback: Arc<ToolCallback>,
+        tool: Tool,
+    ) -> Self {
+        let name = name.into();
+        self.tool_callbacks.insert(
+            name,
+            ToolCallbackWithTool {
+                callback: ToolCallbackKind::Text(tool_callback),
+                tool,
+            },
+        );
+        self
+    }
+
+    /// Register a pre-built tool callback with its Tool definition.
+    pub fn with_tool_callback_with_tool(
+        mut self,
+        name: impl Into<String>,
+        callback_with_tool: ToolCallbackWithTool,
+    ) -> Self {
+        self.tool_callbacks.insert(name.into(), callback_with_tool);
+        self
+    }
+
+    /// Configure MCP client to connect to external MCP servers.
+    pub fn with_mcp_client(mut self, config: McpClientConfig) -> Self {
+        self.mcp_client_config = Some(config);
+        self
+    }
+
+    /// Enable Python code execution. **Security**: lets the model run arbitrary code on the host with full network and filesystem access.
+    pub fn with_code_execution(mut self, config: CodeExecutionConfig) -> Self {
+        self.code_exec_config = Some(config);
+        self
+    }
+
+    pub fn with_shell_execution(mut self, config: ShellConfig) -> Self {
+        self.shell_config = Some(config);
+        self
+    }
+
+    pub fn with_deferred_daemon_start(mut self, defer_daemon_start: bool) -> Self {
+        self.defer_daemon_start = defer_daemon_start;
+        self
+    }
+
+    pub async fn build(self) -> Arc<MistralRs> {
+        MistralRs::new(self).await
+    }
+}
+
+impl Drop for MistralRs {
+    fn drop(&mut self) {
+        // Terminate all engines
+        if let Ok(engines) = self.engines.read() {
+            for engine in engines.values() {
+                // Use try_send instead of blocking_send to avoid runtime panics
+                engine.terminate();
+            }
+        }
+    }
+}
+
+impl MistralRs {
+    fn lora_runtime_now(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<(String, Arc<DynamicLoraRuntime>), MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        let engine = engines
+            .get(&resolved_model_id)
+            .ok_or_else(|| MistralRsError::ModelNotFound(resolved_model_id.clone()))?;
+        let runtime =
+            engine
+                .adapter_runtime
+                .clone()
+                .ok_or_else(|| LoraAdapterError::RuntimeUnavailable {
+                    model_id: resolved_model_id.clone(),
+                })?;
+        Ok((resolved_model_id, runtime))
+    }
+
+    async fn lora_runtime(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<(String, Arc<DynamicLoraRuntime>), MistralRsError> {
+        self.lora_runtime_now(model_id)
+    }
+
+    fn lora_runtime_blocking(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<(String, Arc<DynamicLoraRuntime>), MistralRsError> {
+        self.lora_runtime_now(model_id)
+    }
+
+    async fn ensure_lora_runtime_current(
+        &self,
+        model_id: &str,
+        expected: &Arc<DynamicLoraRuntime>,
+    ) -> Result<(), MistralRsError> {
+        let (_, current) = self.lora_runtime(Some(model_id)).await?;
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(LoraAdapterError::RuntimeChanged {
+                model_id: model_id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn ensure_lora_runtime_current_blocking(
+        &self,
+        model_id: &str,
+        expected: &Arc<DynamicLoraRuntime>,
+    ) -> Result<(), MistralRsError> {
+        let (_, current) = self.lora_runtime_blocking(Some(model_id))?;
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(LoraAdapterError::RuntimeChanged {
+                model_id: model_id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn log_lora_load(model_id: &str, info: &LoraAdapterInfo, policy: LoraAdapterLoadPolicy) {
+        info!(
+            model_id,
+            alias = %info.alias,
+            generation = %info.generation,
+            rank = info.rank,
+            bytes = info.bytes,
+            ?policy,
+            "LoRA adapter published"
+        );
+    }
+
+    fn log_lora_unload(model_id: &str, info: &LoraAdapterInfo) {
+        info!(
+            model_id,
+            alias = %info.alias,
+            generation = %info.generation,
+            rank = info.rank,
+            bytes = info.bytes,
+            "LoRA adapter alias removed"
+        );
+    }
+
+    /// Load a local LoRA adapter directory when its alias is not already registered.
+    /// Once admitted to the blocking loader, the operation completes even if this future is dropped.
+    pub async fn load_lora_adapter(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        adapter_dir: impl Into<PathBuf>,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.load_lora_adapter_with_policy(
+            model_id,
+            alias,
+            adapter_dir,
+            LoraAdapterLoadPolicy::Create,
+        )
+        .await
+    }
+
+    /// Load a local LoRA adapter directory using an atomic publication policy.
+    pub async fn load_lora_adapter_with_policy(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        adapter_dir: impl Into<PathBuf>,
+        policy: LoraAdapterLoadPolicy,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime(model_id).await?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let alias = alias.into();
+        let adapter_dir = adapter_dir.into();
+        let expected = runtime.clone();
+        let permit = DynamicLoraRuntime::try_acquire_load_permit()?;
+        let info = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            runtime.load_from_directory_with_policy(alias, adapter_dir, policy)
+        })
+        .await
+        .map_err(LoraAdapterError::Task)?
+        .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current(&resolved_model_id, &expected)
+            .await?;
+        Self::log_lora_load(&resolved_model_id, &info, policy);
+        Ok(info)
+    }
+
+    /// Load already-open LoRA files when their alias is not already registered.
+    /// Once admitted to the blocking loader, the operation completes even if this future is dropped.
+    pub async fn load_lora_adapter_files(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        files: LoraAdapterFiles,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.load_lora_adapter_files_with_policy(
+            model_id,
+            alias,
+            files,
+            LoraAdapterLoadPolicy::Create,
+        )
+        .await
+    }
+
+    /// Load already-open LoRA files using an atomic publication policy.
+    pub async fn load_lora_adapter_files_with_policy(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        files: LoraAdapterFiles,
+        policy: LoraAdapterLoadPolicy,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime(model_id).await?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let alias = alias.into();
+        let expected = runtime.clone();
+        let permit = DynamicLoraRuntime::try_acquire_load_permit()?;
+        let info = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            runtime.load_from_files_with_policy(alias, files, policy)
+        })
+        .await
+        .map_err(LoraAdapterError::Task)?
+        .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current(&resolved_model_id, &expected)
+            .await?;
+        Self::log_lora_load(&resolved_model_id, &info, policy);
+        Ok(info)
+    }
+
+    /// Blocking variant of [`Self::load_lora_adapter`].
+    pub fn load_lora_adapter_blocking(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        adapter_dir: impl Into<PathBuf>,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.load_lora_adapter_blocking_with_policy(
+            model_id,
+            alias,
+            adapter_dir,
+            LoraAdapterLoadPolicy::Create,
+        )
+    }
+
+    /// Blocking variant of [`Self::load_lora_adapter_with_policy`].
+    pub fn load_lora_adapter_blocking_with_policy(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        adapter_dir: impl Into<PathBuf>,
+        policy: LoraAdapterLoadPolicy,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime_blocking(model_id)?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let _permit = DynamicLoraRuntime::try_acquire_load_permit()?;
+        let info = runtime
+            .load_from_directory_with_policy(alias, adapter_dir.into(), policy)
+            .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current_blocking(&resolved_model_id, &runtime)?;
+        Self::log_lora_load(&resolved_model_id, &info, policy);
+        Ok(info)
+    }
+
+    /// Blocking variant of [`Self::load_lora_adapter_files`].
+    pub fn load_lora_adapter_files_blocking(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        files: LoraAdapterFiles,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.load_lora_adapter_files_blocking_with_policy(
+            model_id,
+            alias,
+            files,
+            LoraAdapterLoadPolicy::Create,
+        )
+    }
+
+    /// Blocking variant of [`Self::load_lora_adapter_files_with_policy`].
+    pub fn load_lora_adapter_files_blocking_with_policy(
+        &self,
+        model_id: Option<&str>,
+        alias: impl Into<String>,
+        files: LoraAdapterFiles,
+        policy: LoraAdapterLoadPolicy,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime_blocking(model_id)?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let _permit = DynamicLoraRuntime::try_acquire_load_permit()?;
+        let info = runtime
+            .load_from_files_with_policy(alias, files, policy)
+            .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current_blocking(&resolved_model_id, &runtime)?;
+        Self::log_lora_load(&resolved_model_id, &info, policy);
+        Ok(info)
+    }
+
+    /// Unregister an adapter alias while allowing admitted requests to finish.
+    pub async fn unload_lora_adapter(
+        &self,
+        model_id: Option<&str>,
+        alias: &str,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.unload_lora_adapter_if_generation(model_id, alias, None)
+            .await
+    }
+
+    /// Unregister an alias only if it still points at the expected generation.
+    pub async fn unload_lora_adapter_if_generation(
+        &self,
+        model_id: Option<&str>,
+        alias: &str,
+        expected_generation: Option<AdapterGenerationId>,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime(model_id).await?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let alias = alias.to_string();
+        let expected = runtime.clone();
+        let info = tokio::task::spawn_blocking(move || {
+            runtime.unload_if_generation(&alias, expected_generation)
+        })
+        .await
+        .map_err(LoraAdapterError::Task)?
+        .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current(&resolved_model_id, &expected)
+            .await?;
+        Self::log_lora_unload(&resolved_model_id, &info);
+        Ok(info)
+    }
+
+    /// Blocking variant of [`Self::unload_lora_adapter`].
+    pub fn unload_lora_adapter_blocking(
+        &self,
+        model_id: Option<&str>,
+        alias: &str,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        self.unload_lora_adapter_blocking_if_generation(model_id, alias, None)
+    }
+
+    /// Blocking variant of [`Self::unload_lora_adapter_if_generation`].
+    pub fn unload_lora_adapter_blocking_if_generation(
+        &self,
+        model_id: Option<&str>,
+        alias: &str,
+        expected_generation: Option<AdapterGenerationId>,
+    ) -> Result<LoraAdapterInfo, MistralRsError> {
+        let (resolved_model_id, runtime) = self.lora_runtime_blocking(model_id)?;
+        if !runtime.supports_live_updates() {
+            return Err(LoraAdapterError::TensorParallelUnsupported {
+                model_id: resolved_model_id,
+            }
+            .into());
+        }
+        let info = runtime
+            .unload_if_generation(alias, expected_generation)
+            .map_err(MistralRsError::from)?;
+        self.ensure_lora_runtime_current_blocking(&resolved_model_id, &runtime)?;
+        Self::log_lora_unload(&resolved_model_id, &info);
+        Ok(info)
+    }
+
+    /// List loaded adapter aliases for a model.
+    pub async fn list_lora_adapters(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Vec<LoraAdapterInfo>, MistralRsError> {
+        let (_, runtime) = self.lora_runtime(model_id).await?;
+        Ok(runtime.list())
+    }
+
+    /// Blocking variant of [`Self::list_lora_adapters`].
+    pub fn list_lora_adapters_blocking(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Vec<LoraAdapterInfo>, MistralRsError> {
+        let (_, runtime) = self.lora_runtime_blocking(model_id)?;
+        Ok(runtime.list())
+    }
+
+    /// Return loaded aliases and complete resident-generation capacity usage.
+    pub async fn lora_adapter_status(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<LoraRuntimeStatus, MistralRsError> {
+        let (_, runtime) = self.lora_runtime(model_id).await?;
+        Ok(runtime.status())
+    }
+
+    /// Blocking variant of [`Self::lora_adapter_status`].
+    pub fn lora_adapter_status_blocking(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<LoraRuntimeStatus, MistralRsError> {
+        let (_, runtime) = self.lora_runtime_blocking(model_id)?;
+        Ok(runtime.status())
+    }
+
+    /// List every loaded adapter together with its owning base model.
+    pub fn list_lora_adapter_routes(&self) -> Result<Vec<LoraAdapterRoute>, MistralRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        let mut routes = Vec::new();
+        for (model_id, engine) in engines.iter() {
+            if let Some(runtime) = &engine.adapter_runtime {
+                routes.extend(runtime.list().into_iter().map(|adapter| LoraAdapterRoute {
+                    model_id: model_id.clone(),
+                    adapter,
+                }));
+            }
+        }
+        routes.sort_by(|left, right| {
+            (&left.model_id, &left.adapter.alias).cmp(&(&right.model_id, &right.adapter.alias))
+        });
+        Ok(routes)
+    }
+
+    fn prepare_request_dispatch(
+        &self,
+        request: &mut Request,
+    ) -> Result<Sender<Request>, MistralRsError> {
+        if let Request::Normal(request) = &mut *request {
+            request.mark_enqueued();
+        }
+        let requested_model = match &*request {
+            Request::Normal(request) => request.model_id.clone(),
+            _ => None,
+        };
+        self.get_sender(requested_model.as_deref())?;
+
+        let model_id = self.resolve_alias_or_default(requested_model.as_deref())?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        let engine = engines
+            .get(&model_id)
+            .ok_or_else(|| MistralRsError::ModelNotFound(model_id.clone()))?;
+        if let Request::Normal(request) = request {
+            if let Some(selection) = request.adapter.as_mut() {
+                let runtime = engine.adapter_runtime.as_ref().ok_or_else(|| {
+                    LoraAdapterError::RuntimeUnavailable {
+                        model_id: model_id.clone(),
+                    }
+                })?;
+                selection.pin(runtime)?;
+                if let Some(generation) = selection.resolved_generation() {
+                    debug!(model_id, %generation, "admitted LoRA adapter request");
+                }
+            }
+        }
+        Ok(engine.sender.clone())
+    }
+
+    pub async fn shutdown(self: Arc<Self>) -> Result<(), String> {
+        let mut this =
+            Arc::try_unwrap(self).map_err(|_| "Cannot shutdown while MistralRs is shared")?;
+        let engines = this
+            .engines
+            .get_mut()
+            .map_err(|_| "Failed to get mutable access to engines during shutdown")?;
+        let mut engines = std::mem::take(engines);
+
+        let senders = engines
+            .values()
+            .map(|engine| engine.sender.clone())
+            .collect::<Vec<_>>();
+        for sender in senders {
+            let _ = sender.send(Request::Terminate).await;
+        }
+
+        for engine in engines.values_mut() {
+            engine.join();
+        }
+
+        Ok(())
+    }
+
+    /// Create an engine instance with the given configuration
+    fn create_engine_instance(
+        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        method: SchedulerConfig,
+        config: EngineConfig,
+        reboot_state: RebootState,
+    ) -> Result<EngineInstance, String> {
+        let (tx, rx) = channel(DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY);
+
+        let pipeline_guard = pipeline.try_lock().unwrap();
+        let category = pipeline_guard.category();
+        let metadata = pipeline_guard.get_metadata();
+        let kind = metadata.kind.clone();
+        let device = pipeline_guard.device();
+        let modalities = metadata.modalities.clone();
+        let max_seq_len = match &category {
+            ModelCategory::Diffusion | ModelCategory::Speech => None,
+            _ => Some(metadata.max_seq_len),
+        };
+        let generation_defaults = pipeline_guard.generation_defaults();
+        let encoder_cache_counters = pipeline_guard.encoder_cache_counters();
+        let adapter_runtime = pipeline_guard.adapter_runtime();
+        drop(pipeline_guard);
+
+        // Warm cuTile before the engine starts capturing and serving CUDA work.
+        #[cfg(feature = "cutile")]
+        let warmup_device = device.clone();
+
+        let logger = Arc::new(IntervalLogger::new(
+            Duration::from_secs(5),
+            encoder_cache_counters,
+        ));
+        let logger_for_engine = logger.clone();
+
+        info!("Pipeline input modalities are {:?}", &modalities.input);
+        info!("Pipeline output modalities are {:?}", &modalities.output);
+
+        let mistralrs_config = MistralRsConfig {
+            kind,
+            device,
+            category: category.clone(),
+            modalities,
+            max_seq_len,
+            generation_defaults,
+        };
+
+        // Shared between engine and EngineInstance so the SDK/HTTP API
+        // can access sessions without going through the request channel.
+        let session_store = Arc::new(std::sync::Mutex::new(
+            engine::agentic_session::AgenticSessionStore::new(),
+        ));
+        let session_store_for_engine = Arc::clone(&session_store);
+        let file_store = files::FileStore::new();
+        let file_store_for_engine = file_store.clone();
+
+        let tx_for_engine = tx.clone();
+        // Propagate Engine::new's outcome so a creation failure is a clean load error, not a zombie-engine panic.
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let engine_handler = thread::spawn(move || {
+            candle_core::utils::init_global_threadpool();
+            #[cfg(feature = "metal")]
+            objc::rc::autoreleasepool(move || {
+                let rt = build_engine_runtime();
+                rt.block_on(async move {
+                    file_store_for_engine.spawn_cleanup_task();
+                    // cuTile warmup precedes graph capture.
+                    #[cfg(feature = "cutile")]
+                    if let Err(err) = mistralrs_quant::cutile::warmup_moe_kernels(&warmup_device) {
+                        warn!("Failed to warm up cuTile MoE kernels: {err}");
+                    }
+                    let engine = match Engine::new(
+                        tx_for_engine,
+                        rx,
+                        pipeline,
+                        method,
+                        config.no_kv_cache,
+                        config.no_prefix_cache,
+                        config.prefix_cache_n,
+                        config.disable_eos_stop,
+                        config.throughput_logging_enabled,
+                        config.search_embedding_model,
+                        config.search_callback.clone(),
+                        config.tool_callbacks.clone(),
+                        logger_for_engine,
+                        session_store_for_engine,
+                        file_store_for_engine,
+                    ) {
+                        Ok(engine) => {
+                            let _ = ready_tx.send(Ok(()));
+                            engine
+                        }
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(format!("{e:#}")));
+                            return;
+                        }
+                    };
+                    Arc::new(engine).run().await;
+                })
+            });
+
+            #[cfg(not(feature = "metal"))]
+            {
+                let rt = build_engine_runtime();
+                rt.block_on(async move {
+                    file_store_for_engine.spawn_cleanup_task();
+                    // cuTile warmup precedes graph capture.
+                    #[cfg(feature = "cutile")]
+                    if let Err(err) = mistralrs_quant::cutile::warmup_moe_kernels(&warmup_device) {
+                        warn!("Failed to warm up cuTile MoE kernels: {err}");
+                    }
+                    let engine = match Engine::new(
+                        tx_for_engine,
+                        rx,
+                        pipeline,
+                        method,
+                        config.no_kv_cache,
+                        config.no_prefix_cache,
+                        config.prefix_cache_n,
+                        config.disable_eos_stop,
+                        config.throughput_logging_enabled,
+                        config.search_embedding_model,
+                        config.search_callback.clone(),
+                        config.tool_callbacks.clone(),
+                        logger_for_engine,
+                        session_store_for_engine,
+                        file_store_for_engine,
+                    ) {
+                        Ok(engine) => {
+                            let _ = ready_tx.send(Ok(()));
+                            engine
+                        }
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(format!("{e:#}")));
+                            return;
+                        }
+                    };
+                    Arc::new(engine).run().await;
+                })
+            }
+        });
+
+        // Wait for the engine thread to report whether Engine::new succeeded
+        // Propagate failures here instead of leaving a dead engine that looks loaded and then panics on the first request.
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("Engine creation failed: {e}")),
+            Err(_) => return Err("Engine thread exited before reporting readiness".to_string()),
+        }
+
+        Ok(EngineInstance {
+            sender: tx,
+            engine_handler: Some(engine_handler),
+            reboot_state,
+            adapter_runtime,
+            config: mistralrs_config,
+            category,
+            logger,
+            session_store,
+            file_store,
+        })
+    }
+
+    /// Initialize MCP and code-execution tool callbacks and merge them into `tool_callbacks`.
+    /// Used by both `MistralRsBuilder::new` and `add_model` so dynamically added models pick up
+    /// the same external tools as the boot-time model.
+    async fn init_external_tool_callbacks(
+        #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))] pipeline: &Arc<
+            tokio::sync::Mutex<dyn Pipeline>,
+        >,
+        tool_callbacks: &mut tools::ToolCallbacksWithTools,
+        mcp_client_config: Option<&McpClientConfig>,
+        #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
+        code_exec_config: Option<&CodeExecutionConfig>,
+        #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))] shell_config: Option<
+            &ShellConfig,
+        >,
+    ) {
+        if let Some(config) = mcp_client_config {
+            let mut mcp_client = McpClient::new(config.clone());
+            let total_servers = config.servers.len();
+
+            match mcp_client.initialize().await {
+                Ok(()) => {
+                    let mcp_callbacks_with_tools = mcp_client.get_tool_callbacks_with_tools();
+                    let tools_count = mcp_callbacks_with_tools.len();
+
+                    for (name, callback_with_tool) in mcp_callbacks_with_tools {
+                        tool_callbacks.insert(name.clone(), callback_with_tool.clone());
+                    }
+
+                    if tools_count == 0 {
+                        warn!(
+                            "MCP client initialized but no tools were registered from {} servers",
+                            total_servers
+                        );
+                    } else {
+                        info!(
+                            "MCP client initialized successfully with {} tools from {} servers",
+                            tools_count, total_servers
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to initialize MCP client with {} configured servers: {}",
+                        total_servers, e
+                    );
+                    warn!("Continuing without MCP functionality. Check your MCP configuration and server availability.");
+                }
+            }
+        }
+
+        #[cfg(feature = "code-execution")]
+        if let Some(code_exec_cfg) = code_exec_config {
+            let exec_config = code_exec_cfg.clone();
+            match mistralrs_code_exec::CodeExecutionManager::new(exec_config).await {
+                Ok(manager) => {
+                    let input_modalities: Vec<mistralrs_code_exec::InputModality> = {
+                        let pipe = get_mut_arcmutex!(pipeline);
+                        pipe.get_metadata()
+                            .modalities
+                            .input
+                            .iter()
+                            .filter_map(|m| match m {
+                                pipeline::SupportedModality::Text => {
+                                    Some(mistralrs_code_exec::InputModality::Text)
+                                }
+                                pipeline::SupportedModality::Vision => {
+                                    Some(mistralrs_code_exec::InputModality::Vision)
+                                }
+                                pipeline::SupportedModality::Audio => {
+                                    Some(mistralrs_code_exec::InputModality::Audio)
+                                }
+                                pipeline::SupportedModality::Video => {
+                                    Some(mistralrs_code_exec::InputModality::Video)
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    };
+                    let effective = manager.effective_protection();
+                    let network = manager.network_mode();
+                    let callbacks = manager.get_tool_callbacks(&input_modalities);
+                    let count = callbacks.len();
+                    for (name, cb) in callbacks {
+                        tool_callbacks.insert(name, cb);
+                    }
+                    warn!("============================================================");
+                    warn!("  CODE EXECUTION IS ENABLED");
+                    warn!("  The model can execute arbitrary Python code on this machine.");
+                    if effective.any() {
+                        let fs = if effective.fs_isolated {
+                            "workdir + system libs only"
+                        } else {
+                            "NOT restricted"
+                        };
+                        let net = if effective.network_isolated {
+                            match network {
+                                Some(mistralrs_sandbox::NetworkMode::None) => "denied",
+                                Some(mistralrs_sandbox::NetworkMode::Loopback) => "loopback only",
+                                _ => "NOT restricted",
+                            }
+                        } else {
+                            "NOT restricted"
+                        };
+                        warn!(
+                            "  Sandbox: on. Filesystem: {fs}. Network: {net}. rlimits: {}.",
+                            if effective.rlimits_applied {
+                                "applied"
+                            } else {
+                                "not applied"
+                            }
+                        );
+                        if !effective.fs_isolated || !effective.network_isolated {
+                            warn!("  Some layers are inactive on this host. Use --sandbox on to make missing layers a hard error.");
+                        }
+                    } else {
+                        warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
+                        warn!("  Pass a sandbox_policy (or --sandbox on at the CLI) to enable isolation.");
+                    }
+                    warn!("  See: https://docs.mistralrs.dev/reference/sandbox/");
+                    warn!("============================================================");
+                    info!("Code execution initialized with {count} tools");
+                }
+                Err(e) => {
+                    warn!("Failed to initialize code execution: {e}");
+                    warn!("Continuing without code execution functionality.");
+                }
+            }
+        }
+
+        #[cfg(feature = "code-execution")]
+        if let Some(shell_cfg) = shell_config {
+            let shell_config = shell_cfg.clone();
+            match mistralrs_code_exec::ShellManager::new(shell_config).await {
+                Ok(manager) => {
+                    let effective = manager.effective_protection();
+                    let network = manager.network_mode();
+                    let callbacks = manager.get_tool_callbacks();
+                    let count = callbacks.len();
+                    for (name, cb) in callbacks {
+                        tool_callbacks.insert(name, cb);
+                    }
+                    warn!("============================================================");
+                    warn!("  SHELL EXECUTION IS ENABLED");
+                    warn!("  The model can execute arbitrary shell commands on this machine.");
+                    if effective.any() {
+                        let fs = if effective.fs_isolated {
+                            "workdir + system libs only"
+                        } else {
+                            "NOT restricted"
+                        };
+                        let net = if effective.network_isolated {
+                            match network {
+                                Some(mistralrs_sandbox::NetworkMode::None) => "denied",
+                                Some(mistralrs_sandbox::NetworkMode::Loopback) => "loopback only",
+                                _ => "NOT restricted",
+                            }
+                        } else {
+                            "NOT restricted"
+                        };
+                        warn!(
+                            "  Sandbox: on. Filesystem: {fs}. Network: {net}. rlimits: {}.",
+                            if effective.rlimits_applied {
+                                "applied"
+                            } else {
+                                "not applied"
+                            }
+                        );
+                    } else {
+                        warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
+                    }
+                    warn!("  See: https://docs.mistralrs.dev/reference/sandbox/");
+                    warn!("============================================================");
+                    info!("Shell execution initialized with {count} tool");
+                }
+                Err(e) => {
+                    warn!("Failed to initialize shell execution: {e}");
+                    warn!("Continuing without shell execution functionality.");
+                }
+            }
+        }
+    }
+
+    async fn new(config: MistralRsBuilder) -> Arc<Self> {
+        info!("mistral.rs version: {MISTRALRS_VERSION}");
+        info!("git revision: {MISTRALRS_GIT_REVISION}");
+        let MistralRsBuilder {
+            pipeline,
+            method,
+            model_id_override,
+            log,
+            no_kv_cache,
+            no_prefix_cache,
+            prefix_cache_n,
+            disable_eos_stop,
+            throughput_logging_enabled,
+            search_embedding_model,
+            search_callback,
+            mut tool_callbacks,
+            mcp_client_config,
+            loader_config,
+            #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
+            code_exec_config,
+            #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
+            shell_config,
+            defer_daemon_start,
+        } = config;
+
+        let device = get_mut_arcmutex!(pipeline).device();
+        mistralrs_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
+        #[cfg(feature = "cuda")]
+        match cuda::preload::preload_candle_ptx(&device) {
+            Ok(count) if count > 0 => info!("Preloaded {count} Candle CUDA PTX functions."),
+            Ok(_) => {}
+            Err(err) => warn!("Failed to preload Candle CUDA PTX functions: {err}"),
+        }
+
+        let no_kv_cache = no_kv_cache.unwrap_or(false);
+        let no_prefix_cache = no_prefix_cache.unwrap_or(false);
+        let prefix_cache_n = prefix_cache_n.unwrap_or(16);
+        let disable_eos_stop = disable_eos_stop.unwrap_or(false);
+
+        Self::init_external_tool_callbacks(
+            &pipeline,
+            &mut tool_callbacks,
+            mcp_client_config.as_ref(),
+            code_exec_config.as_ref(),
+            shell_config.as_ref(),
+        )
+        .await;
+
+        let reboot_state = RebootState {
+            pipeline: pipeline.clone(),
+            method: method.clone(),
+            no_kv_cache,
+            no_prefix_cache,
+            prefix_cache_n,
+            disable_eos_stop,
+            throughput_logging_enabled,
+            search_embedding_model,
+            search_callback: search_callback.clone(),
+            tool_callbacks: tool_callbacks.clone(),
+            mcp_client_config: mcp_client_config.clone(),
+            loader_config,
+        };
+
+        let engine_config = EngineConfig {
+            no_kv_cache,
+            no_prefix_cache,
+            prefix_cache_n,
+            disable_eos_stop,
+            throughput_logging_enabled,
+            search_embedding_model,
+            search_callback,
+            tool_callbacks,
+        };
+
+        let pipeline_name = pipeline.lock().await.name();
+        let engine_instance =
+            Self::create_engine_instance(pipeline.clone(), method, engine_config, reboot_state)
+                .expect("Failed to create engine instance");
+
+        let (id, alias_map) = match model_id_override {
+            Some(override_id) => {
+                let mut alias_map = HashMap::new();
+                if override_id != pipeline_name {
+                    alias_map.insert(pipeline_name.clone(), override_id.clone());
+                }
+                (override_id, alias_map)
+            }
+            None => (pipeline_name.clone(), HashMap::new()),
+        };
+
+        if distributed::is_daemon() && !defer_daemon_start {
+            let request_sender = engine_instance.sender.clone();
+
+            if cfg!(feature = "ring") {
+                // Ring daemon replicator
+                distributed::ring_daemon_replicator(request_sender);
+            } else {
+                // NCCL daemon replicator
+                distributed::nccl_daemon_replicator(request_sender);
+            }
+
+            #[allow(clippy::empty_loop)]
+            loop {}
+        }
+
+        // Determine if the current runtime is multi-threaded, as blocking operations are not allowed in single-threaded mode
+        let is_multi_threaded = tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread);
+
+        // Do a dummy run; skip UQFF writes, whose CPU-resident model cannot serve requests.
+        let loaded_for_uqff_write = get_mut_arcmutex!(pipeline)
+            .get_metadata()
+            .loaded_for_uqff_write;
+        if !distributed::is_daemon()
+            && is_multi_threaded
+            && !loaded_for_uqff_write
+            && matches!(
+                engine_instance.category,
+                ModelCategory::Text | ModelCategory::Multimodal { .. }
+            )
+        {
+            let clone_sender = engine_instance.sender.clone();
+            tokio::task::block_in_place(|| {
+                let (tx, mut rx) = channel(1);
+                let req = Request::Normal(Box::new(NormalRequest {
+                    id: 0,
+                    queued_at: None,
+                    messages: RequestMessage::Completion {
+                        text: "hello".to_string(),
+                        echo_prompt: false,
+                        best_of: None,
+                    },
+                    sampling_params: SamplingParams {
+                        max_len: Some(1),
+                        ..SamplingParams::deterministic()
+                    },
+                    seed: None,
+                    response: tx,
+                    return_logprobs: false,
+                    is_streaming: false,
+                    constraint: Constraint::None,
+                    suffix: None,
+                    tool_choice: None,
+                    tools: None,
+                    logits_processors: None,
+                    return_raw_logits: false,
+                    web_search_options: None,
+                    enable_code_execution: false,
+                    enable_shell: false,
+                    shell_options: None,
+                    code_execution_permission: None,
+                    code_execution_approval_notifier: None,
+                    agent_permission: None,
+                    agent_approval_handler: None,
+                    agent_approval_notifier: None,
+                    max_tool_rounds: None,
+                    tool_dispatch_url: None,
+                    model_id: None,
+                    adapter: None,
+                    truncate_sequence: false,
+                    session_id: None,
+                    files: None,
+                    input_files: Vec::new(),
+                }));
+                debug!("Beginning dummy run.");
+                let start = Instant::now();
+                clone_sender.blocking_send(req).unwrap();
+
+                // Drain all responses from the channel until it's closed
+                let mut received_any = false;
+                while let Some(_resp) = rx.blocking_recv() {
+                    received_any = true;
+                }
+
+                if received_any {
+                    let end = Instant::now();
+                    debug!(
+                        "Dummy run completed in {}s.",
+                        end.duration_since(start).as_secs_f64()
+                    );
+                } else {
+                    warn!("Dummy run failed!");
+                }
+            });
+
+            // Reset logger counters so the dummy run doesn't pollute stats
+            engine_instance.logger.reset();
+        }
+
+        // Create engines map with the first engine
+        let mut engines = HashMap::new();
+        engines.insert(id.clone(), engine_instance);
+
+        Arc::new(Self {
+            engines: RwLock::new(engines),
+            unloaded_models: RwLock::new(HashMap::new()),
+            reloading_models: RwLock::new(HashSet::new()),
+            default_engine_id: RwLock::new(Some(id.clone())),
+            model_aliases: RwLock::new(alias_map),
+            log,
+            id,
+            creation_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time travel has occurred!")
+                .as_secs(),
+            next_request_id: Mutex::new(RefCell::new(1)),
+        })
+    }
+
+    /// Attempts to reboot a specific engine by model_id
+    fn reboot_engine(&self, model_id: &str) -> Result<(), MistralRsError> {
+        let mut engines = self.engines.write().map_err(|_| {
+            tracing::warn!("Couldn't get write lock on engines during reboot attempt");
+            MistralRsError::EnginePoisoned
+        })?;
+
+        if let Some(engine_instance) = engines.get(model_id) {
+            if !engine_instance.is_finished() {
+                tracing::info!("Engine {} already running, returning ok", model_id);
+                return Ok(());
+            }
+
+            let reboot_state = engine_instance.reboot_state.clone();
+            let engine_config = EngineConfig {
+                no_kv_cache: reboot_state.no_kv_cache,
+                no_prefix_cache: reboot_state.no_prefix_cache,
+                prefix_cache_n: reboot_state.prefix_cache_n,
+                disable_eos_stop: reboot_state.disable_eos_stop,
+                throughput_logging_enabled: reboot_state.throughput_logging_enabled,
+                search_embedding_model: reboot_state.search_embedding_model,
+                search_callback: reboot_state.search_callback.clone(),
+                tool_callbacks: reboot_state.tool_callbacks.clone(),
+            };
+            let new_engine_instance = Self::create_engine_instance(
+                reboot_state.pipeline.clone(),
+                reboot_state.method.clone(),
+                engine_config,
+                reboot_state,
+            )
+            .map_err(|e| {
+                tracing::error!("Failed to create new engine instance: {}", e);
+                MistralRsError::EnginePoisoned
+            })?;
+
+            engines.insert(model_id.to_string(), new_engine_instance);
+            tracing::info!("Successfully rebooted engine {}", model_id);
+            Ok(())
+        } else {
+            Err(MistralRsError::EnginePoisoned)
+        }
+    }
+
+    fn engine_dead(&self, model_id: &str) -> Result<bool, MistralRsError> {
+        let engines = self.engines.read().map_err(|_| {
+            tracing::warn!("Couldn't get read lock on engines!");
+            MistralRsError::EnginePoisoned
+        })?;
+
+        if let Some(engine_instance) = engines.get(model_id) {
+            Ok(engine_instance.is_finished())
+        } else {
+            Err(MistralRsError::EnginePoisoned)
+        }
+    }
+
+    /// Get sender for a specific model. If model_id is None, uses default engine.
+    /// If the model is unloaded, it will be automatically reloaded before returning the sender.
+    pub fn get_sender(&self, model_id: Option<&str>) -> Result<Sender<Request>, MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+
+        // Check if model is loaded
+        let is_loaded = {
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            engines.contains_key(&resolved_model_id)
+        };
+
+        if is_loaded {
+            // Check if engine is dead and needs reboot
+            if self.engine_dead(&resolved_model_id)? {
+                tracing::warn!("Engine {} is dead, rebooting", resolved_model_id);
+                self.reboot_engine(&resolved_model_id)?
+            }
+
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if let Some(engine_instance) = engines.get(&resolved_model_id) {
+                return Ok(engine_instance.sender.clone());
+            }
+        }
+
+        // Check if model is unloaded - trigger auto-reload
+        let is_unloaded = {
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            unloaded.contains_key(&resolved_model_id)
+        };
+
+        if is_unloaded {
+            tracing::info!(
+                "Model {} is unloaded, triggering auto-reload",
+                resolved_model_id
+            );
+            self.reload_model_blocking(&resolved_model_id)?;
+
+            // After reload, get the sender
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if let Some(engine_instance) = engines.get(&resolved_model_id) {
+                return Ok(engine_instance.sender.clone());
+            }
+        }
+
+        let is_reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?
+            .contains(&resolved_model_id);
+        if is_reloading {
+            return Err(MistralRsError::ModelReloading(resolved_model_id));
+        }
+
+        Err(MistralRsError::ModelNotFound(resolved_model_id))
+    }
+
+    /// Look up a file across all loaded engines. `None` if missing or expired.
+    pub fn find_file(&self, id: &str) -> Option<Arc<files::File>> {
+        self.try_find_file(id).ok().flatten()
+    }
+
+    /// Fallible variant of [`Self::find_file`].
+    pub fn try_find_file(&self, id: &str) -> Result<Option<Arc<files::File>>, MistralRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for instance in engines.values() {
+            if let Some(f) = instance.file_store.get(id) {
+                return Ok(Some(f));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every non-expired file across all loaded engines, including session-less runs. Order unspecified.
+    pub fn list_files(&self) -> Vec<Arc<files::File>> {
+        self.try_list_files().unwrap_or_default()
+    }
+
+    /// Fallible variant of [`Self::list_files`].
+    pub fn try_list_files(&self) -> Result<Vec<Arc<files::File>>, MistralRsError> {
+        let mut out = Vec::new();
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for instance in engines.values() {
+            out.extend(instance.file_store.list_all());
+        }
+        Ok(out)
+    }
+
+    /// Returns whether the file existed.
+    pub fn remove_file(&self, id: &str) -> bool {
+        self.try_remove_file(id).unwrap_or(false)
+    }
+
+    /// Fallible variant of [`Self::remove_file`].
+    pub fn try_remove_file(&self, id: &str) -> Result<bool, MistralRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for instance in engines.values() {
+            if instance.file_store.remove(id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn insert_file(
+        &self,
+        model_id: Option<&str>,
+        file: files::File,
+        session_id: Option<String>,
+    ) -> Result<(), MistralRsError> {
+        self.get_file_store(model_id)?.insert(file, session_id);
+        Ok(())
+    }
+
+    pub fn attach_file_to_session(
+        &self,
+        model_id: Option<&str>,
+        id: &str,
+        session_id: &str,
+    ) -> Result<bool, MistralRsError> {
+        Ok(self
+            .get_file_store(model_id)?
+            .attach_to_session(id, session_id))
+    }
+
+    /// Agentic session store for `model_id` (or the default model). Returns an `Arc` to lock for inspect/mutate.
+    pub fn get_session_store(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Arc<std::sync::Mutex<engine::agentic_session::AgenticSessionStore>>, MistralRsError>
+    {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        engines
+            .get(&resolved_model_id)
+            .map(|e| Arc::clone(&e.session_store))
+            .ok_or(MistralRsError::ModelNotFound(resolved_model_id))
+    }
+
+    fn get_file_store(&self, model_id: Option<&str>) -> Result<files::FileStore, MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        engines
+            .get(&resolved_model_id)
+            .map(|e| e.file_store.clone())
+            .ok_or(MistralRsError::ModelNotFound(resolved_model_id))
+    }
+
+    /// Export an agentic session by ID. Bundles the session's files (full bodies). `None` if missing.
+    pub fn export_session(
+        &self,
+        model_id: Option<&str>,
+        session_id: &str,
+    ) -> Result<Option<engine::agentic_session::SerializedSession>, MistralRsError> {
+        let store = self.get_session_store(model_id)?;
+        let exported = {
+            let mut guard = store.lock().map_err(|_| MistralRsError::EnginePoisoned)?;
+            guard
+                .export(session_id)
+                .map_err(|e| MistralRsError::Other(e.to_string()))?
+        };
+        let Some(mut session) = exported else {
+            return Ok(None);
+        };
+        let file_store = self.get_file_store(model_id)?;
+        session.files = file_store
+            .list_for_session(session_id)
+            .into_iter()
+            .map(|arc| (*arc).clone())
+            .collect();
+        Ok(Some(session))
+    }
+
+    /// Replaces any existing session with the same ID. Restores its files into the file store.
+    pub fn import_session(
+        &self,
+        model_id: Option<&str>,
+        session_id: String,
+        session: engine::agentic_session::SerializedSession,
+    ) -> Result<(), MistralRsError> {
+        let files = session.files.clone();
+        let store = self.get_session_store(model_id)?;
+        {
+            let mut guard = store.lock().map_err(|_| MistralRsError::EnginePoisoned)?;
+            guard
+                .import(session_id.clone(), session)
+                .map_err(|e| MistralRsError::Other(e.to_string()))?;
+        }
+        let file_store = self.get_file_store(model_id)?;
+        for f in files {
+            file_store.insert(f, Some(session_id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Clone the first `num_turns` complete turns from `src` into `dest`. A turn ends at the
+    /// first assistant message without `tool_calls`. Used for branching: the new session diverges
+    /// cleanly from the truncated prefix, so the branch's later edits don't bleed back.
+    pub fn fork_session(
+        &self,
+        model_id: Option<&str>,
+        src_session_id: &str,
+        dest_session_id: String,
+        num_turns: usize,
+    ) -> Result<(), MistralRsError> {
+        let store = self.get_session_store(model_id)?;
+        let mut guard = store.lock().map_err(|_| MistralRsError::EnginePoisoned)?;
+        guard
+            .fork(src_session_id, dest_session_id, num_turns)
+            .map_err(|e| MistralRsError::Other(e.to_string()))
+    }
+
+    /// Delete an agentic session. Returns whether the session existed.
+    pub fn delete_session(
+        &self,
+        model_id: Option<&str>,
+        session_id: &str,
+    ) -> Result<bool, MistralRsError> {
+        let store = self.get_session_store(model_id)?;
+        let mut guard = store.lock().map_err(|_| MistralRsError::EnginePoisoned)?;
+        Ok(guard.delete(session_id))
+    }
+
+    /// All stored session IDs. SDK-only, not exposed via HTTP.
+    pub fn list_session_ids(&self, model_id: Option<&str>) -> Result<Vec<String>, MistralRsError> {
+        let store = self.get_session_store(model_id)?;
+        let guard = store.lock().map_err(|_| MistralRsError::EnginePoisoned)?;
+        Ok(guard.list_ids())
+    }
+
+    pub fn get_id(&self) -> String {
+        self.id.clone()
+    }
+
+    pub fn get_creation_time(&self) -> u64 {
+        self.creation_time
+    }
+
+    fn resolve_alias(&self, model_id: &str) -> Result<String, MistralRsError> {
+        let aliases = self
+            .model_aliases
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if let Some(primary_id) = aliases.get(model_id) {
+            Ok(primary_id.clone())
+        } else {
+            Ok(model_id.to_string())
+        }
+    }
+
+    fn resolve_alias_or_default(&self, model_id: Option<&str>) -> Result<String, MistralRsError> {
+        match model_id {
+            Some(id) => self.resolve_alias(id),
+            None => {
+                let default_lock = self
+                    .default_engine_id
+                    .read()
+                    .map_err(|_| MistralRsError::EnginePoisoned)?;
+                Ok(default_lock
+                    .as_ref()
+                    .ok_or_else(|| MistralRsError::ModelNotFound("default".to_string()))?
+                    .clone())
+            }
+        }
+    }
+
+    /// Register an alternate model ID that resolves to an existing model.
+    pub fn register_model_alias(
+        &self,
+        alias: impl Into<String>,
+        model_id: &str,
+    ) -> Result<(), String> {
+        let alias = alias.into();
+        let resolved_model_id = self.resolve_alias(model_id).map_err(|e| e.to_string())?;
+
+        if alias == resolved_model_id {
+            return Ok(());
+        }
+
+        let reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| "Failed to acquire read lock on reloading_models")?;
+        let model_reloading = reloading.contains(&resolved_model_id);
+        let alias_conflict = reloading.contains(&alias);
+        drop(reloading);
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        let model_loaded = engines.contains_key(&resolved_model_id);
+        let alias_conflict = alias_conflict || engines.contains_key(&alias);
+        drop(engines);
+
+        let unloaded = self
+            .unloaded_models
+            .read()
+            .map_err(|_| "Failed to acquire read lock on unloaded_models")?;
+        let model_unloaded = unloaded.contains_key(&resolved_model_id);
+        let alias_conflict = alias_conflict || unloaded.contains_key(&alias);
+        drop(unloaded);
+
+        if !(model_loaded || model_unloaded || model_reloading) {
+            return Err(format!("Model {resolved_model_id} not found"));
+        }
+
+        if alias_conflict {
+            return Err(format!(
+                "Alias '{}' conflicts with an existing model ID",
+                alias
+            ));
+        }
+
+        let mut aliases = self
+            .model_aliases
+            .write()
+            .map_err(|_| "Failed to acquire write lock on model_aliases")?;
+        if let Some(existing) = aliases.get(&alias) {
+            if existing == &resolved_model_id {
+                return Ok(());
+            }
+            return Err(format!(
+                "Alias '{}' is already assigned to model '{}'",
+                alias, existing
+            ));
+        }
+        aliases.insert(alias, resolved_model_id);
+        Ok(())
+    }
+
+    /// Check if a model is known (loaded, unloaded, or reloading), resolving aliases if needed.
+    pub fn model_exists(&self, model_id: &str) -> Result<bool, MistralRsError> {
+        let resolved_model_id = self.resolve_alias(model_id)?;
+
+        let reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if reloading.contains(&resolved_model_id) {
+            return Ok(true);
+        }
+        drop(reloading);
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if engines.contains_key(&resolved_model_id) {
+            return Ok(true);
+        }
+        drop(engines);
+
+        let unloaded = self
+            .unloaded_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if unloaded.contains_key(&resolved_model_id) {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Get the interval logger for a specific model. If model_id is None, uses default engine.
+    pub fn get_logger(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Arc<IntervalLogger>, MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.logger.clone())
+        } else {
+            Err(MistralRsError::EnginePoisoned)
+        }
+    }
+
+    /// Get model category for a specific model. If model_id is None, uses default engine.
+    pub fn get_model_category(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<ModelCategory, MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.category.clone())
+        } else {
+            Err(MistralRsError::EnginePoisoned)
+        }
+    }
+
+    /// Get the maximum supported sequence length for a model, if applicable.
+    pub fn max_sequence_length(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Option<usize>, MistralRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.config.max_seq_len)
+        } else {
+            Err(MistralRsError::EnginePoisoned)
+        }
+    }
+
+    pub fn next_request_id(&self) -> usize {
+        let l = self.next_request_id.lock().unwrap();
+        let last = &mut *l.borrow_mut();
+        let last_v = *last;
+        *last += 1;
+        last_v
+    }
+
+    /// Add a new model engine to the MistralRs instance
+    pub async fn add_model(
+        &self,
+        model_id: String,
+        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        method: SchedulerConfig,
+        config: AddModelConfig,
+    ) -> Result<(), String> {
+        {
+            let reloading = self
+                .reloading_models
+                .read()
+                .map_err(|_| "Failed to acquire read lock on reloading_models")?;
+            if reloading.contains(&model_id) {
+                return Err(format!("Model {model_id} is currently reloading"));
+            }
+        }
+        {
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| "Failed to acquire read lock on engines")?;
+            if engines.contains_key(&model_id) {
+                return Err(format!("Model {model_id} already exists"));
+            }
+        }
+        {
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| "Failed to acquire read lock on unloaded_models")?;
+            if unloaded.contains_key(&model_id) {
+                return Err(format!("Model {model_id} already exists (unloaded)"));
+            }
+        }
+        {
+            let aliases = self
+                .model_aliases
+                .read()
+                .map_err(|_| "Failed to acquire read lock on model_aliases")?;
+            if aliases.contains_key(&model_id) {
+                return Err(format!(
+                    "Model ID '{}' conflicts with an existing alias",
+                    model_id
+                ));
+            }
+        }
+
+        let mut engine_config = config.engine_config;
+        Self::init_external_tool_callbacks(
+            &pipeline,
+            &mut engine_config.tool_callbacks,
+            config.mcp_client_config.as_ref(),
+            config.code_exec_config.as_ref(),
+            config.shell_config.as_ref(),
+        )
+        .await;
+
+        let reboot_state = RebootState {
+            pipeline: pipeline.clone(),
+            method: method.clone(),
+            no_kv_cache: engine_config.no_kv_cache,
+            no_prefix_cache: engine_config.no_prefix_cache,
+            prefix_cache_n: engine_config.prefix_cache_n,
+            disable_eos_stop: engine_config.disable_eos_stop,
+            throughput_logging_enabled: engine_config.throughput_logging_enabled,
+            search_embedding_model: engine_config.search_embedding_model,
+            search_callback: engine_config.search_callback.clone(),
+            tool_callbacks: engine_config.tool_callbacks.clone(),
+            mcp_client_config: config.mcp_client_config.clone(),
+            loader_config: config.loader_config.clone(),
+        };
+
+        let engine_instance =
+            Self::create_engine_instance(pipeline, method, engine_config, reboot_state)?;
+
+        let mut engines = self
+            .engines
+            .write()
+            .map_err(|_| "Failed to acquire write lock on engines")?;
+        engines.insert(model_id.clone(), engine_instance);
+
+        // If this is the first model, set it as default
+        if engines.len() == 1 {
+            let mut default_lock = self
+                .default_engine_id
+                .write()
+                .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
+            *default_lock = Some(model_id.clone());
+            info!("First model added, setting '{}' as default", model_id);
+        }
+
+        Ok(())
+    }
+
+    /// Remove a model engine from the MistralRs instance
+    pub fn remove_model(&self, model_id: &str) -> Result<(), String> {
+        let resolved_model_id = self.resolve_alias(model_id).map_err(|e| e.to_string())?;
+        let mut engines = self
+            .engines
+            .write()
+            .map_err(|_| "Failed to acquire write lock on engines")?;
+
+        if engines.len() <= 1 {
+            return Err("Cannot remove the last model from MistralRs".to_string());
+        }
+
+        if let Some(engine_instance) = engines.remove(&resolved_model_id) {
+            // Send terminate signal to the engine
+            let _ = engine_instance.sender.blocking_send(Request::Terminate);
+
+            // If this was the default engine, set a new default
+            let mut default_lock = self
+                .default_engine_id
+                .write()
+                .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
+            if let Some(ref default_id) = *default_lock {
+                if default_id == &resolved_model_id {
+                    // Set the first available engine as the new default
+                    *default_lock = engines.keys().next().cloned();
+                }
+            }
+            drop(default_lock);
+            drop(engines);
+
+            // Remove any aliases pointing to the removed model
+            let mut aliases = self
+                .model_aliases
+                .write()
+                .map_err(|_| "Failed to acquire write lock on model_aliases")?;
+            aliases.retain(|_, target| target != &resolved_model_id);
+
+            Ok(())
+        } else {
+            Err(format!("Model {resolved_model_id} not found"))
+        }
+    }
+
+    /// List all available model IDs
+    pub fn list_models(&self) -> Result<Vec<String>, String> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        Ok(engines.keys().cloned().collect())
+    }
+
+    /// Get the current default model ID
+    pub fn get_default_model_id(&self) -> Result<Option<String>, String> {
+        let default_lock = self
+            .default_engine_id
+            .read()
+            .map_err(|_| "Failed to acquire read lock on default_engine_id")?;
+        Ok(default_lock.clone())
+    }
+
+    /// Set the default model ID
+    pub fn set_default_model_id(&self, model_id: &str) -> Result<(), String> {
+        let resolved_model_id = self.resolve_alias(model_id).map_err(|e| e.to_string())?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        if !engines.contains_key(&resolved_model_id) {
+            return Err(format!("Model {resolved_model_id} not found"));
+        }
+        drop(engines);
+
+        let mut default_lock = self
+            .default_engine_id
+            .write()
+            .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
+        let old_default = default_lock.clone();
+        *default_lock = Some(resolved_model_id.clone());
+
+        // Log the change
+        info!(
+            "Default model changed: {:?} -> {:?}",
+            old_default, resolved_model_id
+        );
+
+        Ok(())
+    }
+
+    /// Dispatch a request to the appropriate engine based on the model_id in the request
+    pub fn send_request(&self, mut request: Request) -> Result<(), MistralRsError> {
+        let sender = self.prepare_request_dispatch(&mut request)?;
+        sender
+            .blocking_send(request)
+            .map_err(|_| MistralRsError::SenderPoisoned)
+    }
+
+    pub async fn send_request_async(&self, mut request: Request) -> Result<(), MistralRsError> {
+        let sender = self.prepare_request_dispatch(&mut request)?;
+        sender
+            .send(request)
+            .await
+            .map_err(|_| MistralRsError::SenderPoisoned)
+    }
+
+    pub fn run_daemon_replicator_forever(self: Arc<Self>) -> ! {
+        if cfg!(feature = "ring") {
+            distributed::ring_daemon_replicator_mistralrs(self);
+        } else {
+            distributed::nccl_daemon_replicator_mistralrs(self);
+        }
+
+        #[allow(clippy::empty_loop)]
+        loop {}
+    }
+
+    pub fn maybe_log_request(this: Arc<Self>, repr: String) {
+        if let Some(file) = &this.log {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .create(true) // Optionally create the file if it doesn't already exist
+                .open(file)
+                .expect("Unable to open file");
+            let time = chrono::offset::Local::now();
+            f.write_all(format!("Request at {time}: {repr}\n\n").as_bytes())
+                .expect("Unable to write data");
+        }
+    }
+
+    pub fn maybe_log_response<T: Serialize>(this: Arc<Self>, resp: &T) {
+        if let Some(file) = &this.log {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .create(true) // Optionally create the file if it doesn't already exist
+                .open(file)
+                .expect("Unable to open file");
+            let time = chrono::offset::Local::now();
+            let repr = serde_json::to_string(resp).expect("Serialization of response failed.");
+            f.write_all(format!("Response at {time}: {repr}\n\n").as_bytes())
+                .expect("Unable to write data");
+        }
+    }
+
+    pub fn maybe_log_error(this: Arc<Self>, err: &dyn Error) {
+        if let Some(file) = &this.log {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .create(true) // Optionally create the file if it doesn't already exist
+                .open(file)
+                .expect("Unable to open file");
+            let time = chrono::offset::Local::now();
+            f.write_all(format!("Error response at {time}: {err}\n\n").as_bytes())
+                .expect("Unable to write data");
+        }
+    }
+
+    /// Get the number of tools available for a specific model (including MCP tools)
+    pub fn get_tools_count(&self, model_id: Option<&str>) -> Result<usize, String> {
+        let resolved_model_id = self
+            .resolve_alias_or_default(model_id)
+            .map_err(|e| e.to_string())?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.reboot_state.tool_callbacks.len())
+        } else {
+            Err(format!("Model {resolved_model_id} not found"))
+        }
+    }
+
+    /// MCP-provided tools registered for `model_id`. Excludes built-ins (web search, code exec). Returns `(name, description)` per tool.
+    pub fn list_mcp_tools(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Vec<(String, Option<String>)>, String> {
+        let resolved_model_id = self
+            .resolve_alias_or_default(model_id)
+            .map_err(|e| e.to_string())?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        let engine_instance = engines
+            .get(&resolved_model_id)
+            .ok_or_else(|| format!("Model {resolved_model_id} not found"))?;
+
+        let mut tools: Vec<(String, Option<String>)> = engine_instance
+            .reboot_state
+            .tool_callbacks
+            .values()
+            .filter(|cb| {
+                let name = &cb.tool.function.name;
+                // Exclude built-in tools; everything else came from MCP.
+                !search::search_tool_called(name) && {
+                    #[cfg(feature = "code-execution")]
+                    {
+                        !mistralrs_code_exec::code_exec_tool_called(name)
+                    }
+                    #[cfg(not(feature = "code-execution"))]
+                    {
+                        true
+                    }
+                }
+            })
+            .map(|cb| {
+                (
+                    cb.tool.function.name.clone(),
+                    cb.tool.function.description.clone(),
+                )
+            })
+            .collect();
+        tools.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(tools)
+    }
+
+    /// Check if MCP client is configured for a specific model
+    pub fn has_mcp_client(&self, model_id: Option<&str>) -> Result<bool, String> {
+        let resolved_model_id = self
+            .resolve_alias_or_default(model_id)
+            .map_err(|e| e.to_string())?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.reboot_state.mcp_client_config.is_some())
+        } else {
+            Err(format!("Model {resolved_model_id} not found"))
+        }
+    }
+
+    /// Get config for a specific model
+    pub fn config(&self, model_id: Option<&str>) -> Result<MistralRsConfig, String> {
+        let resolved_model_id = self
+            .resolve_alias_or_default(model_id)
+            .map_err(|e| e.to_string())?;
+
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        if let Some(engine_instance) = engines.get(&resolved_model_id) {
+            Ok(engine_instance.config.clone())
+        } else {
+            Err(format!("Model {resolved_model_id} not found"))
+        }
+    }
+
+    /// Unload a model from memory while preserving its configuration for later reload.
+    /// The model can be reloaded automatically when a request is sent to it, or manually
+    /// using `reload_model()`.
+    ///
+    /// Note: The model must have been added with a `ModelLoaderConfig` for auto-reload to work.
+    /// Models added via `MistralRsBuilder` without explicit loader config cannot be reloaded.
+    pub fn unload_model(&self, model_id: &str) -> Result<(), MistralRsError> {
+        let resolved_model_id = self.resolve_alias(model_id)?;
+        // Check if already unloaded
+        {
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if unloaded.contains_key(&resolved_model_id) {
+                return Err(MistralRsError::ModelAlreadyUnloaded(
+                    resolved_model_id.clone(),
+                ));
+            }
+        }
+
+        // Get the engine instance and create UnloadedModelState
+        let mut engines = self
+            .engines
+            .write()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+
+        let engine_instance = engines
+            .get(&resolved_model_id)
+            .ok_or_else(|| MistralRsError::ModelNotFound(resolved_model_id.clone()))?;
+
+        let loader_config = engine_instance
+            .reboot_state
+            .loader_config
+            .clone()
+            .ok_or_else(|| MistralRsError::NoLoaderConfig(resolved_model_id.clone()))?;
+        let engine_instance = engines
+            .remove(&resolved_model_id)
+            .expect("engine was present while holding the write lock");
+
+        // Create the unloaded state
+        let unloaded_state = UnloadedModelState {
+            loader_config,
+            scheduler_config: engine_instance.reboot_state.method.clone(),
+            engine_config: EngineConfig {
+                no_kv_cache: engine_instance.reboot_state.no_kv_cache,
+                no_prefix_cache: engine_instance.reboot_state.no_prefix_cache,
+                prefix_cache_n: engine_instance.reboot_state.prefix_cache_n,
+                disable_eos_stop: engine_instance.reboot_state.disable_eos_stop,
+                throughput_logging_enabled: engine_instance.reboot_state.throughput_logging_enabled,
+                search_embedding_model: engine_instance.reboot_state.search_embedding_model,
+                search_callback: engine_instance.reboot_state.search_callback.clone(),
+                tool_callbacks: engine_instance.reboot_state.tool_callbacks.clone(),
+            },
+            mcp_client_config: engine_instance.reboot_state.mcp_client_config.clone(),
+            category: engine_instance.category.clone(),
+            mistralrs_config: engine_instance.config.clone(),
+        };
+
+        // Send terminate signal to the engine
+        let _ = engine_instance.sender.try_send(Request::Terminate);
+
+        drop(engines);
+
+        // Store the unloaded state
+        let mut unloaded = self
+            .unloaded_models
+            .write()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        unloaded.insert(resolved_model_id.to_string(), unloaded_state);
+
+        // Update default if needed
+        let mut default_lock = self
+            .default_engine_id
+            .write()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        if let Some(ref default_id) = *default_lock {
+            if default_id == &resolved_model_id {
+                // Set the first available engine as the new default
+                let engines = self
+                    .engines
+                    .read()
+                    .map_err(|_| MistralRsError::EnginePoisoned)?;
+                *default_lock = engines.keys().next().cloned();
+            }
+        }
+
+        info!("Model {} unloaded successfully", resolved_model_id);
+        Ok(())
+    }
+
+    /// Manually reload a previously unloaded model.
+    /// This is also called automatically by `get_sender()` when a request targets an unloaded model.
+    pub async fn reload_model(&self, model_id: &str) -> Result<(), MistralRsError> {
+        let resolved_model_id = self.resolve_alias(model_id)?;
+        // Check if already reloading
+        {
+            let reloading = self
+                .reloading_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if reloading.contains(&resolved_model_id) {
+                return Err(MistralRsError::ModelReloading(resolved_model_id.clone()));
+            }
+        }
+
+        // Mark as reloading
+        {
+            let mut reloading = self
+                .reloading_models
+                .write()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            reloading.insert(resolved_model_id.clone());
+        }
+
+        // Get the unloaded state
+        let unloaded_state = {
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            unloaded
+                .get(&resolved_model_id)
+                .cloned()
+                .ok_or_else(|| MistralRsError::ModelNotFound(resolved_model_id.clone()))?
+        };
+
+        // Attempt to reload
+        let result = self
+            .do_reload_model(&resolved_model_id, unloaded_state)
+            .await;
+
+        // Remove from reloading set
+        {
+            let mut reloading = self
+                .reloading_models
+                .write()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            reloading.remove(&resolved_model_id);
+        }
+
+        result
+    }
+
+    /// Internal method to perform the actual model reload
+    async fn do_reload_model(
+        &self,
+        model_id: &str,
+        unloaded_state: UnloadedModelState,
+    ) -> Result<(), MistralRsError> {
+        use crate::model_loader::LoaderBuilder;
+
+        info!("Reloading model: {}", model_id);
+
+        let loader_config = &unloaded_state.loader_config;
+
+        // Build the loader from the stored config
+        let loader = LoaderBuilder::new(loader_config.model_selected.clone())
+            .with_chat_template(loader_config.chat_template.clone())
+            .with_jinja_explicit(loader_config.jinja_explicit.clone())
+            .with_max_model_len(loader_config.max_model_len)
+            .with_hf_config_overrides(loader_config.hf_config_overrides.clone())
+            .with_no_kv_cache(unloaded_state.engine_config.no_kv_cache)
+            .with_mtp(
+                loader_config
+                    .mtp_config
+                    .as_ref()
+                    .is_some_and(MtpConfig::is_builtin),
+            )
+            .with_encoder_cache_memory_bytes(loader_config.encoder_cache_memory_bytes)
+            .build()
+            .map_err(|e| MistralRsError::ReloadFailed(format!("Failed to build loader: {e}")))?;
+
+        // Load the model
+        let pipeline = loader
+            .load_model_from_hf(
+                loader_config.hf_revision.clone(),
+                loader_config.token_source.clone(),
+                &loader_config.dtype,
+                &loader_config.device,
+                loader_config.silent,
+                loader_config.device_map_setting.clone(),
+                loader_config.isq,
+                loader_config.paged_attn_config.clone(),
+            )
+            .map_err(|e| MistralRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
+
+        let realized_cache_config = {
+            let mut pipeline = pipeline.lock().await;
+            if let Some(mtp_config) = loader_config.mtp_config.clone() {
+                let prefix_cache_capacity = if unloaded_state.engine_config.no_prefix_cache {
+                    0
+                } else {
+                    unloaded_state.engine_config.prefix_cache_n
+                };
+                pipeline
+                    .attach_speculative_with_runtime(
+                        SpeculativeConfig::Mtp(
+                            mtp_config.with_draft_lm_head_isq(loader_config.isq),
+                        ),
+                        MtpRuntimeConfig::new(prefix_cache_capacity),
+                    )
+                    .map_err(|e| {
+                        MistralRsError::ReloadFailed(format!(
+                            "Failed to attach MTP speculative decoding: {e}"
+                        ))
+                    })?;
+            }
+            pipeline.get_metadata().cache_config.clone()
+        };
+        let mut scheduler_config = unloaded_state.scheduler_config;
+        scheduler_config
+            .refresh_paged_cache_config(realized_cache_config)
+            .map_err(|e| {
+                MistralRsError::ReloadFailed(format!(
+                    "Failed to refresh scheduler cache configuration: {e}"
+                ))
+            })?;
+
+        // Create the reboot state
+        let reboot_state = RebootState {
+            pipeline: pipeline.clone(),
+            method: scheduler_config.clone(),
+            no_kv_cache: unloaded_state.engine_config.no_kv_cache,
+            no_prefix_cache: unloaded_state.engine_config.no_prefix_cache,
+            prefix_cache_n: unloaded_state.engine_config.prefix_cache_n,
+            disable_eos_stop: unloaded_state.engine_config.disable_eos_stop,
+            throughput_logging_enabled: unloaded_state.engine_config.throughput_logging_enabled,
+            search_embedding_model: unloaded_state.engine_config.search_embedding_model,
+            search_callback: unloaded_state.engine_config.search_callback.clone(),
+            tool_callbacks: unloaded_state.engine_config.tool_callbacks.clone(),
+            mcp_client_config: unloaded_state.mcp_client_config.clone(),
+            loader_config: Some(unloaded_state.loader_config.clone()),
+        };
+
+        let engine_instance = Self::create_engine_instance(
+            pipeline,
+            scheduler_config,
+            unloaded_state.engine_config,
+            reboot_state,
+        )
+        .map_err(|e| MistralRsError::ReloadFailed(format!("Failed to create engine: {e}")))?;
+
+        // Add to engines map
+        {
+            let mut engines = self
+                .engines
+                .write()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            engines.insert(model_id.to_string(), engine_instance);
+        }
+
+        // Remove from unloaded map
+        {
+            let mut unloaded = self
+                .unloaded_models
+                .write()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            unloaded.remove(model_id);
+        }
+
+        info!("Model {} reloaded successfully", model_id);
+        Ok(())
+    }
+
+    /// Synchronous version of reload_model for use in non-async contexts.
+    ///
+    /// This method handles different runtime contexts appropriately:
+    /// - If called from a multi-threaded tokio runtime, uses `block_in_place`
+    /// - If called from a single-threaded runtime, returns an error (use `reload_model()` instead)
+    /// - If called outside any runtime, creates a temporary runtime
+    pub fn reload_model_blocking(&self, model_id: &str) -> Result<(), MistralRsError> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+                    Err(MistralRsError::ReloadFailed(
+                        "Cannot reload model blocking from single-threaded runtime. Use reload_model() instead.".to_string()
+                    ))
+                } else {
+                    tokio::task::block_in_place(|| handle.block_on(self.reload_model(model_id)))
+                }
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    MistralRsError::ReloadFailed(format!("Failed to create runtime: {e}"))
+                })?;
+                rt.block_on(self.reload_model(model_id))
+            }
+        }
+    }
+
+    /// List all unloaded model IDs
+    pub fn list_unloaded_models(&self) -> Result<Vec<String>, MistralRsError> {
+        let unloaded = self
+            .unloaded_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        Ok(unloaded.keys().cloned().collect())
+    }
+
+    /// Check if a model is currently loaded (as opposed to unloaded)
+    pub fn is_model_loaded(&self, model_id: &str) -> Result<bool, MistralRsError> {
+        let resolved_model_id = self.resolve_alias(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        Ok(engines.contains_key(&resolved_model_id))
+    }
+
+    /// Get the status of a model, or None if not found
+    pub fn get_model_status(&self, model_id: &str) -> Result<Option<ModelStatus>, MistralRsError> {
+        let resolved_model_id = self.resolve_alias(model_id)?;
+        // Check if reloading
+        {
+            let reloading = self
+                .reloading_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if reloading.contains(&resolved_model_id) {
+                return Ok(Some(ModelStatus::Reloading));
+            }
+        }
+
+        // Check if loaded
+        {
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if engines.contains_key(&resolved_model_id) {
+                return Ok(Some(ModelStatus::Loaded));
+            }
+        }
+
+        // Check if unloaded
+        {
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| MistralRsError::EnginePoisoned)?;
+            if unloaded.contains_key(&resolved_model_id) {
+                return Ok(Some(ModelStatus::Unloaded));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// List all models with their status
+    pub fn list_models_with_status(&self) -> Result<Vec<(String, ModelStatus)>, MistralRsError> {
+        let mut result = Vec::new();
+
+        // Get reloading models
+        let reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for model_id in reloading.iter() {
+            result.push((model_id.clone(), ModelStatus::Reloading));
+        }
+        drop(reloading);
+
+        // Get loaded models
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for model_id in engines.keys() {
+            result.push((model_id.clone(), ModelStatus::Loaded));
+        }
+        drop(engines);
+
+        // Get unloaded models
+        let unloaded = self
+            .unloaded_models
+            .read()
+            .map_err(|_| MistralRsError::EnginePoisoned)?;
+        for model_id in unloaded.keys() {
+            // Skip if already in reloading
+            if !result.iter().any(|(id, _)| id == model_id) {
+                result.push((model_id.clone(), ModelStatus::Unloaded));
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn empty_state() -> MistralRs {
+        MistralRs {
+            engines: RwLock::new(HashMap::new()),
+            unloaded_models: RwLock::new(HashMap::new()),
+            reloading_models: RwLock::new(HashSet::new()),
+            default_engine_id: RwLock::new(None),
+            model_aliases: RwLock::new(HashMap::new()),
+            log: None,
+            id: "test".to_string(),
+            creation_time: 0,
+            next_request_id: Mutex::new(RefCell::new(1)),
+        }
+    }
+
+    #[test]
+    fn missing_default_sender_is_model_not_found() {
+        assert!(matches!(
+            empty_state().get_sender(None),
+            Err(MistralRsError::ModelNotFound(model)) if model == "default"
+        ));
+        assert!(matches!(
+            empty_state().get_sender(Some("wrong-model")),
+            Err(MistralRsError::ModelNotFound(model)) if model == "wrong-model"
+        ));
+    }
+
+    #[test]
+    fn reloading_sender_preserves_model_state_error() {
+        let state = empty_state();
+        state
+            .reloading_models
+            .write()
+            .unwrap()
+            .insert("model".to_string());
+        assert!(matches!(
+            state.get_sender(Some("model")),
+            Err(MistralRsError::ModelReloading(model)) if model == "model"
+        ));
+    }
+
+    #[test]
+    fn fallible_file_helpers_preserve_poisoned_engine_error() {
+        let state = empty_state();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.engines.write().unwrap();
+            panic!("poison engines lock");
+        }));
+        assert!(result.is_err());
+
+        assert!(matches!(
+            state.try_find_file("file-id"),
+            Err(MistralRsError::EnginePoisoned)
+        ));
+        assert!(matches!(
+            state.try_list_files(),
+            Err(MistralRsError::EnginePoisoned)
+        ));
+        assert!(matches!(
+            state.try_remove_file("file-id"),
+            Err(MistralRsError::EnginePoisoned)
+        ));
+    }
+}

@@ -2,15 +2,12 @@
 
 ## Fixes and improvements
 
-- Route managed EXL2 model chat requests through the ExLlamaV2 server and find each installed model root from its `config.json`, including models indexed by earlier nightly builds.
-- Install ExLlamaV2's required `setuptools` and tokenizer packages through Orion's shared uv runtime, migrate existing private uv installs, repair older runtime environments, and verify dependencies before marking the engine ready.
 - Remove the engine installation card from the model browser's Manage page.
 - Add RAM and VRAM fit estimates for conversational model variants, filters for models that fit this PC, GPU fits, CPU or partial GPU fits, and models that may exceed available memory, plus best-fit sorting.
 - Preserve the visible model card when quantization files are opened or model results refresh.
 - Anchor populated chat messages to the bottom so new conversations flow upward from the latest exchange.
 - Recover OrionFS after an unexpected worker failure and allow its regular status refresh to reconnect.
 - Resolve Tauri's Windows extended resource paths before loading native Bun addons, fixing packaged backend startup in both installed and portable builds.
-- Add the Engines settings tab for installing, updating and repairing, or uninstalling managed llama.cpp, ExLlamaV2 and stable-diffusion.cpp runtimes, with a link to the official Ollama installer.
 - Import documents and folders into a conversation's OrionFS context from Canvas, extract supported document and PDF text, OCR supported scanned PDFs and images locally, and retain source details for citations. Index supported chat attachments into the active conversation automatically.
 - Compact encrypted OrionFS snapshots into a versioned `.ofs` container using Orion's existing encryption. Reclaim unused SQLite pages, prune obsolete chunks and versions, retain only the current snapshot, and keep warmed retrieval free of per-query console logging unless `ORION_OFS_PROFILE=1` is set.
 - Improve the Create page layout and make the creations panel independently scrollable.
@@ -20,8 +17,6 @@
 - Reuse the existing Orion data directory, installed engines, models and encrypted data. Unlock the original Windows encryption key without replacing it.
 - Embed the full browser UI and native browser tabs in the right Canvas sidebar, with document/browser switching, resizing, navigation, page extraction and keyboard shortcuts.
 - Use native tray, file dialogs and process supervision; preserve local voice and OFS workers under Bun.
-- Add Orion-managed ExLlamaV2 as a second local engine alongside llama.cpp. Engine setup verifies the NVIDIA driver and installs the exact prebuilt ExLlamaV2 wheel, PyTorch build and CUDA tier for the detected hardware.
-- Extend the model browser with engine tags (#llama.cpp, #exllamav2, or both), engine-filtered conversational browsing, and full EXL2 support: quantization branches are listed as complete bundles, downloaded with SHA-256 verification, managed in Manage, and routed to the ExLlamaV2 server in chat exactly like GGUF models.
 - Build Tauri-specific Windows installers and portable ZIPs. Keep update packages separate from Electron assets.
 
 # Orion 0.2.0 — Conversation memory, alternate paths and local voice

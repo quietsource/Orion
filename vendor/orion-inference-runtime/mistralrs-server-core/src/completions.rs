@@ -1,0 +1,464 @@
+//! ## Completions functionality and route handler.
+
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use crate::{
+    completion_core::{
+        convert_stop_tokens, get_dry_sampling_params, handle_completion_error,
+        handle_completion_validation_error, BaseCompletionResponder,
+    },
+    handler_core::{
+        apply_model_override, base_process_non_streaming_response, create_response_channel,
+        openai_error_from_error, openai_error_response, request_model_override,
+        send_request_with_model, ApiError, ApiErrorKind, ModelErrorMessage,
+    },
+    lora_adapters::resolve_lora_adapter_model,
+    openai::{CompletionChunkResponseBody, CompletionRequest, CompletionResponseBody, Grammar},
+    streaming::{
+        base_create_streamer, get_keep_alive_interval, observe_response, openai_error_event,
+        BaseStreamer, DoneState, StreamOutcomeHandle,
+    },
+    types::{ExtractedMistralRsState, OnChunkCallback, OnDoneCallback, SharedMistralRsState},
+    util::validate_model_name,
+};
+use anyhow::Result;
+use axum::{
+    extract::{rejection::JsonRejection, Json, State},
+    response::{
+        sse::{Event, KeepAlive, KeepAliveStream},
+        IntoResponse, Sse,
+    },
+    Extension,
+};
+use mistralrs_core::{
+    CompletionChunkResponse, CompletionResponse, Constraint, MistralRs, NormalRequest, Request,
+    RequestMessage, Response, SamplingParams,
+};
+use tokio::sync::mpsc::{Receiver, Sender};
+
+/// A callback function that processes streaming response chunks before they are sent to the client.
+///
+/// This hook allows modification of each chunk in the streaming response, enabling features like
+/// content filtering, transformation, or logging. The callback receives a chunk and must return
+/// a (potentially modified) chunk.
+///
+/// ### Examples
+///
+/// ```no_run
+/// use mistralrs_server_core::completions::CompletionOnChunkCallback;
+///
+/// let on_chunk: CompletionOnChunkCallback = Box::new(|mut chunk| {
+///     // Log the chunk or modify its content
+///     println!("Processing chunk: {:?}", chunk);
+///     chunk
+/// });
+/// ```
+pub type CompletionOnChunkCallback = OnChunkCallback<CompletionChunkResponse>;
+
+/// A callback function that is executed when the streaming response completes.
+///
+/// This hook receives all chunks that were streamed during the response, allowing for
+/// post-processing, analytics, or cleanup operations after the stream finishes.
+///
+/// ### Examples
+///
+/// ```no_run
+/// use mistralrs_server_core::completions::CompletionOnDoneCallback;
+///
+/// let on_done: CompletionOnDoneCallback = Box::new(|chunks| {
+///     println!("Stream completed with {} chunks", chunks.len());
+///     // Process all chunks for analytics
+/// });
+/// ```
+pub type CompletionOnDoneCallback = OnDoneCallback<CompletionChunkResponse>;
+
+/// A streaming response handler.
+///
+/// It processes incoming response chunks from a model and converts them
+/// into Server-Sent Events (SSE) format for real-time streaming to clients.
+pub type CompletionStreamer =
+    BaseStreamer<CompletionChunkResponse, CompletionOnChunkCallback, CompletionOnDoneCallback>;
+
+impl futures::Stream for CompletionStreamer {
+    type Item = Result<Event, axum::Error>;
+
+    /// Polls the stream for the next Server-Sent Event.
+    ///
+    /// This method implements the core streaming logic:
+    /// 1. Handles stream completion by sending `[DONE]` and executing callbacks
+    /// 2. Processes incoming model responses and converts them to SSE events
+    /// 3. Applies chunk modifications if a callback is provided
+    /// 4. Stores chunks if completion callback is configured
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.done_state {
+            DoneState::SendingDone => {
+                // https://platform.openai.com/docs/api-reference/completions/create
+                // If true, returns a stream of events that happen during the Run as server-sent events, terminating when the Run enters a terminal state with a data: [DONE] message.
+                self.done_state = DoneState::Done;
+                return Poll::Ready(Some(Ok(Event::default().data("[DONE]"))));
+            }
+            DoneState::Done => {
+                if let Some(on_done) = &self.on_done {
+                    on_done(&self.chunks);
+                }
+                return Poll::Ready(None);
+            }
+            DoneState::Running => (),
+        }
+
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(resp)) => {
+                observe_response(&self.outcome, &resp);
+                match resp {
+                    Response::CompletionModelError(msg, _) => {
+                        MistralRs::maybe_log_error(
+                            self.state.clone(),
+                            &ModelErrorMessage(msg.to_string()),
+                        );
+                        // Done now, just need to send the [DONE]
+                        self.done_state = DoneState::SendingDone;
+                        Poll::Ready(Some(Ok(openai_error_event(ApiError::model_error()))))
+                    }
+                    Response::ValidationError(e) => {
+                        self.done_state = DoneState::SendingDone;
+                        Poll::Ready(Some(Ok(openai_error_event(ApiError::from_error(
+                            e.as_ref(),
+                            ApiErrorKind::InvalidRequest,
+                        )))))
+                    }
+                    Response::InternalError(e) => {
+                        MistralRs::maybe_log_error(self.state.clone(), &*e);
+                        self.done_state = DoneState::SendingDone;
+                        Poll::Ready(Some(Ok(openai_error_event(ApiError::from_error(
+                            e.as_ref(),
+                            ApiErrorKind::Internal,
+                        )))))
+                    }
+                    Response::CompletionChunk(mut response) => {
+                        if response.choices.iter().all(|x| x.finish_reason.is_some()) {
+                            self.done_state = DoneState::SendingDone;
+                        }
+                        // Done now, just need to send the [DONE]
+                        MistralRs::maybe_log_response(self.state.clone(), &response);
+
+                        if let Some(on_chunk) = &self.on_chunk {
+                            response = on_chunk(response);
+                        }
+
+                        if self.store_chunks {
+                            self.chunks.push(response.clone());
+                        }
+
+                        Poll::Ready(Some(Event::default().json_data(response)))
+                    }
+                    Response::AgenticToolCallProgress { .. }
+                    | Response::BlockDenoisingProgress(_)
+                    | Response::AgenticToolApprovalRequired { .. }
+                    | Response::File(_) => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                    Response::Done(_) => unreachable!(),
+                    Response::CompletionDone(_) => unreachable!(),
+                    Response::Chunk(_) => unreachable!(),
+                    Response::ImageGeneration(_) => unreachable!(),
+                    Response::ModelError(_, _) => unreachable!(),
+                    Response::Speech { .. } => unreachable!(),
+                    Response::Raw { .. } => unreachable!(),
+                    Response::Embeddings { .. } => unreachable!(),
+                }
+            }
+            Poll::Ready(None) => {
+                self.done_state = DoneState::SendingDone;
+                Poll::Ready(Some(Ok(openai_error_event(ApiError::internal()))))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Represents different types of completion responses.
+pub type CompletionResponder =
+    BaseCompletionResponder<CompletionResponse, KeepAliveStream<CompletionStreamer>>;
+
+impl IntoResponse for CompletionResponder {
+    /// Converts the completion responder into an HTTP response.
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            CompletionResponder::Sse(s) => s.into_response(),
+            CompletionResponder::Json(s) => Json(s).into_response(),
+            CompletionResponder::InternalError(e) => {
+                openai_error_from_error(e.as_ref(), ApiErrorKind::Internal)
+            }
+            CompletionResponder::ValidationError(e) => {
+                openai_error_from_error(e.as_ref(), ApiErrorKind::InvalidRequest)
+            }
+            CompletionResponder::ModelError(_, _) => openai_error_response(ApiError::model_error()),
+        }
+    }
+}
+
+/// Parses and validates a completion request.
+///
+/// This function transforms an OpenAI-compatible completion request into the
+/// request format used by mistral.rs.
+pub fn parse_request(
+    oairequest: CompletionRequest,
+    state: Arc<MistralRs>,
+    tx: Sender<Response>,
+) -> Result<(Request, bool)> {
+    let repr = serde_json::to_string(&oairequest).expect("Serialization of request failed.");
+    MistralRs::maybe_log_request(state.clone(), repr);
+
+    // Validate that the requested model matches the loaded model
+    validate_model_name(&oairequest.model, state.clone())?;
+
+    if oairequest.max_tokens == Some(0) {
+        anyhow::bail!("max_tokens must be at least 1.");
+    }
+
+    let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
+
+    let is_streaming = oairequest.stream.unwrap_or(false);
+
+    let dry_params = get_dry_sampling_params(
+        oairequest.dry_multiplier,
+        oairequest.dry_sequence_breakers,
+        oairequest.dry_base,
+        oairequest.dry_allowed_length,
+    )?;
+
+    Ok((
+        Request::Normal(Box::new(NormalRequest {
+            id: state.next_request_id(),
+            queued_at: None,
+            messages: RequestMessage::Completion {
+                text: oairequest.prompt,
+                echo_prompt: oairequest.echo_prompt,
+                best_of: oairequest.best_of,
+            },
+            sampling_params: SamplingParams {
+                temperature: oairequest.temperature,
+                top_k: oairequest.top_k,
+                top_p: oairequest.top_p,
+                min_p: oairequest.min_p,
+                top_n_logprobs: oairequest.logprobs.unwrap_or(1),
+                frequency_penalty: oairequest.frequency_penalty,
+                presence_penalty: oairequest.presence_penalty,
+                repetition_penalty: oairequest.repetition_penalty,
+                max_len: oairequest.max_tokens,
+                stop_toks,
+                ignore_eos: oairequest.ignore_eos,
+                logits_bias: oairequest.logit_bias,
+                n_choices: oairequest.n_choices,
+                dry_params,
+            },
+            seed: oairequest.seed,
+            response: tx,
+            return_logprobs: oairequest.logprobs.is_some(),
+            is_streaming,
+            suffix: oairequest.suffix,
+            constraint: match oairequest.grammar {
+                Some(Grammar::Regex(regex)) => Constraint::Regex(regex),
+                Some(Grammar::Lark(lark)) => Constraint::Lark(lark),
+                Some(Grammar::JsonSchema(schema)) => Constraint::JsonSchema(schema),
+                Some(Grammar::Llguidance(llguidance)) => Constraint::Llguidance(llguidance),
+                None => Constraint::None,
+            },
+            tool_choice: oairequest.tool_choice,
+            tools: oairequest.tools,
+            logits_processors: None,
+            return_raw_logits: false,
+            web_search_options: None,
+            enable_code_execution: false,
+            enable_shell: false,
+            shell_options: None,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: None,
+            agent_approval_handler: None,
+            agent_approval_notifier: None,
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
+            model_id: if oairequest.model == "default" {
+                None
+            } else {
+                Some(oairequest.model.clone())
+            },
+            adapter: oairequest.adapter.map(Into::into),
+            truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
+            session_id: None,
+            files: None,
+            input_files: Vec::new(),
+        })),
+        is_streaming,
+    ))
+}
+
+/// OpenAI-compatible completions endpoint handler.
+#[utoipa::path(
+    post,
+    tag = "Mistral.rs",
+    path = "/v1/completions",
+    request_body = CompletionRequest,
+    responses((
+        status = 200,
+        description = "Completion JSON or server-sent event chunks",
+        content(
+            (CompletionResponseBody = "application/json"),
+            (CompletionChunkResponseBody = "text/event-stream")
+        )
+    ))
+)]
+pub async fn completions(
+    State(state): ExtractedMistralRsState,
+    stream_outcome: Option<Extension<StreamOutcomeHandle>>,
+    payload: Result<Json<CompletionRequest>, JsonRejection>,
+) -> CompletionResponder {
+    let mut oairequest = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return CompletionResponder::ValidationError(Box::new(ApiError::from_json_rejection(
+                error,
+            )));
+        }
+    };
+    let (tx, mut rx) = create_response_channel(None);
+    let requested_model = oairequest.model.clone();
+
+    if let Err(error) =
+        resolve_lora_adapter_model(&state, &mut oairequest.model, &mut oairequest.adapter)
+    {
+        return CompletionResponder::ValidationError(Box::new(error));
+    }
+    let model_override = request_model_override(requested_model, &oairequest.model);
+    let model_id = (oairequest.model != "default").then(|| oairequest.model.clone());
+
+    let (request, is_streaming) = match parse_request(oairequest, state.clone(), tx) {
+        Ok(x) => x,
+        Err(e) => return handle_completion_validation_error(state, e.into()),
+    };
+
+    if let Err(e) = send_request_with_model(&state, request, model_id.as_deref()).await {
+        return handle_error(state, e.into());
+    }
+
+    if is_streaming {
+        let on_chunk = model_override.map(|model| {
+            Box::new(move |mut response: CompletionChunkResponse| {
+                apply_model_override(&mut response.model, Some(&model));
+                response
+            }) as CompletionOnChunkCallback
+        });
+        CompletionResponder::Sse(create_streamer_with_outcome(
+            rx,
+            state,
+            on_chunk,
+            None,
+            stream_outcome.map(|Extension(handle)| handle),
+        ))
+    } else {
+        process_non_streaming_response_with_model(&mut rx, state, model_override.as_deref()).await
+    }
+}
+
+/// Handle route / generation errors and logging them.
+pub fn handle_error(
+    state: SharedMistralRsState,
+    e: Box<dyn std::error::Error + Send + Sync + 'static>,
+) -> CompletionResponder {
+    handle_completion_error(state, e)
+}
+
+/// Creates a SSE streamer for chat completions with optional callbacks.
+pub fn create_streamer(
+    rx: Receiver<Response>,
+    state: SharedMistralRsState,
+    on_chunk: Option<CompletionOnChunkCallback>,
+    on_done: Option<CompletionOnDoneCallback>,
+) -> Sse<KeepAliveStream<CompletionStreamer>> {
+    create_streamer_with_outcome(rx, state, on_chunk, on_done, None)
+}
+
+/// Like [`create_streamer`], also reporting usage and errors to the access log at stream end.
+pub fn create_streamer_with_outcome(
+    rx: Receiver<Response>,
+    state: SharedMistralRsState,
+    on_chunk: Option<CompletionOnChunkCallback>,
+    on_done: Option<CompletionOnDoneCallback>,
+    outcome: Option<StreamOutcomeHandle>,
+) -> Sse<KeepAliveStream<CompletionStreamer>> {
+    let streamer = base_create_streamer(rx, state, on_chunk, on_done, outcome);
+    let keep_alive_interval = get_keep_alive_interval();
+
+    Sse::new(streamer)
+        .keep_alive(KeepAlive::new().interval(Duration::from_millis(keep_alive_interval)))
+}
+
+/// Process non-streaming completion responses.
+pub async fn process_non_streaming_response(
+    rx: &mut Receiver<Response>,
+    state: SharedMistralRsState,
+) -> CompletionResponder {
+    process_non_streaming_response_with_model(rx, state, None).await
+}
+
+async fn process_non_streaming_response_with_model(
+    rx: &mut Receiver<Response>,
+    state: SharedMistralRsState,
+    model_override: Option<&str>,
+) -> CompletionResponder {
+    base_process_non_streaming_response(
+        rx,
+        state,
+        |state, mut response| {
+            match &mut response {
+                Response::CompletionDone(response)
+                | Response::CompletionModelError(_, response) => {
+                    apply_model_override(&mut response.model, model_override);
+                }
+                _ => {}
+            }
+            match_responses(state, response)
+        },
+        handle_error,
+    )
+    .await
+}
+
+/// Matches and processes different types of model responses into appropriate completion responses.
+pub fn match_responses(state: SharedMistralRsState, response: Response) -> CompletionResponder {
+    match response {
+        Response::InternalError(e) => {
+            MistralRs::maybe_log_error(state, &*e);
+            CompletionResponder::InternalError(e)
+        }
+        Response::CompletionModelError(msg, response) => {
+            MistralRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
+            MistralRs::maybe_log_response(state, &response);
+            CompletionResponder::ModelError(msg, response)
+        }
+        Response::ValidationError(e) => CompletionResponder::ValidationError(e),
+        Response::CompletionDone(response) => {
+            MistralRs::maybe_log_response(state, &response);
+            CompletionResponder::Json(response)
+        }
+        Response::CompletionChunk(_) => unreachable!(),
+        Response::Chunk(_) => unreachable!(),
+        Response::Done(_) => unreachable!(),
+        Response::ModelError(_, _) => unreachable!(),
+        Response::ImageGeneration(_) => unreachable!(),
+        Response::Speech { .. } => unreachable!(),
+        Response::Raw { .. } => unreachable!(),
+        Response::Embeddings { .. } => unreachable!(),
+        Response::AgenticToolCallProgress { .. } => unreachable!(),
+        Response::BlockDenoisingProgress(_) => unreachable!(),
+        Response::AgenticToolApprovalRequired { .. } => unreachable!(),
+        Response::File(_) => unreachable!(),
+    }
+}

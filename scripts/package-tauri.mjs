@@ -17,6 +17,7 @@ if(process.platform==='win32'){
  await cp(path.join(root,'dist/native-canvas'),path.join(portable,'dist/native-canvas'),{recursive:true});
  await cp(path.join(root,'build/icons'),path.join(portable,'build/icons'),{recursive:true});
  await cp(path.join(root,'build/velo'),path.join(portable,'build/velo'),{recursive:true});
+ await cp(path.join(root,'build/inference-runtime'),path.join(portable,'build/inference-runtime'),{recursive:true});
  await copyFile(path.join(root,'LICENSE'),path.join(portable,'LICENSE'));
  const archive=path.join(destination,`Orion-Tauri_${version}_windows-x64-portable.zip`);
  const quote=value=>"'"+value.replaceAll("'","''")+"'";

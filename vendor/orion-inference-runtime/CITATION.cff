@@ -1,0 +1,6 @@
+# Citation metadata for the Orion Inference runtime distribution.
+message: "Orion Inference is part of the Orion local AI application. Preserve applicable third-party notices when redistributing derived components."
+title: "Orion Inference"
+version: "0.2.5"
+repository-code: "https://github.com/QuietSource/Orion"
+type: software

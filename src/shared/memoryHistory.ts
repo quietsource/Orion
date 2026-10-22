@@ -141,6 +141,7 @@ export interface MemoryHistoryAPI {
   memoryEdit(conversationId: string, memoryId: string, content: string): Promise<void>;
   memoryRetention(conversationId: string, memoryId: string, retention: "temporary" | "conversation" | "durable" | "never-save"): Promise<void>;
   messageRetention(conversationId: string, messageId: string, retention: "temporary" | "conversation" | "durable" | "never-save"): Promise<void>;
+  prepareMessageEdit(conversationId: string, messageId: string): Promise<void>;
   checkpointMessage(conversationId: string, messageId: string): Promise<void>;
   rollbackMessage(conversationId: string, messageId: string): Promise<Conversation>;
   cleanupUndo(conversationId: string): Promise<boolean>;

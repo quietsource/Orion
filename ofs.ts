@@ -867,6 +867,25 @@ export class OrionFS {
       conversationId: String(row.conversation_id), sourceMessageId: row.source_message_id ? String(row.source_message_id) : null })) };
   }
 
+  /** Remove only already-expired or long-superseded rows after a caller has saved an encrypted snapshot. */
+  public async pruneObsoleteMemories(now = Date.now(), supersededAgeDays = 30): Promise<{ expired: number; superseded: number }> {
+    await this.ingestionQueue;
+    const supersededBefore = now - Math.max(30, Math.min(3650, supersededAgeDays)) * 86400000;
+    const expired = this.db.query('SELECT id, conversation_id FROM ofs_memories WHERE expires_at IS NOT NULL AND expires_at <= ?').all(now) as Array<{id:string;conversation_id:string}>;
+    const superseded = this.db.query('SELECT id, conversation_id FROM ofs_memories WHERE superseded_by IS NOT NULL AND created_at <= ? AND id NOT IN (SELECT value FROM json_each(?))').all(supersededBefore, JSON.stringify(expired.map(row => row.id))) as Array<{id:string;conversation_id:string}>;
+    const rows = [...expired, ...superseded];
+    if (!rows.length) return { expired: 0, superseded: 0 };
+    this.db.transaction(() => {
+      for (const row of rows) {
+        this.db.run('DELETE FROM ofs_memories_fts WHERE id = ?', [row.id]);
+        this.db.run('DELETE FROM ofs_links WHERE source = ? OR target = ?', [row.id, row.id]);
+        this.db.run('DELETE FROM ofs_memories WHERE id = ?', [row.id]);
+      }
+    })();
+    for (const row of rows) this.vectorCache.delete(String(row.id));
+    return { expired: expired.length, superseded: superseded.length };
+  }
+
   public async forgetMemories(conversationId: string, ids: string[]): Promise<void> {
     await this.ingestionQueue;
     this.db.transaction(() => {

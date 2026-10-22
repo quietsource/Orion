@@ -1,0 +1,516 @@
+//! Run mistralrs-cli from a full TOML configuration.
+
+use anyhow::Result;
+use axum::middleware;
+use tracing::info;
+
+use mistralrs_core::initialize_logging;
+use mistralrs_server_core::{
+    metrics::{install_prometheus_recorder, observe_http, ObservabilityState},
+    mistralrs_for_server_builder::{MistralRsForServerBuilder, ModelConfig},
+    mistralrs_server_router_builder::{MistralRsServerRouterBuilder, DEFAULT_MAX_BODY_LIMIT},
+};
+
+use crate::args::{MatformerSelection, RuntimeOptions};
+use crate::commands::run::{interactive_mode, InteractiveConfig};
+use crate::commands::serve::{
+    apply_agent_mode, convert_to_model_selected, extract_sandbox_settings, load_mcp_config,
+    log_agent_runtime, log_api_surfaces, spawn_mcp_server, tcp_nodelay_listener,
+    validate_agent_options,
+};
+#[cfg(feature = "code-execution")]
+use crate::commands::serve::{build_code_exec_config, build_shell_config};
+use crate::config::{load_cli_config, CliConfig};
+use crate::ui::build_ui_router;
+
+/// Execute the CLI using a TOML configuration file.
+pub async fn run_from_config(path: std::path::PathBuf) -> Result<()> {
+    initialize_logging();
+
+    let config = load_cli_config(&path)?;
+
+    match config {
+        CliConfig::Serve(cfg) => run_serve_config(cfg).await,
+        CliConfig::Run(cfg) => run_run_config(cfg).await,
+    }
+}
+
+async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
+    let crate::config::ServeConfig {
+        global,
+        mut runtime,
+        server,
+        paged_attn,
+        sandbox,
+        models,
+        default_model_id,
+    } = cfg;
+
+    if server.observability_config().metrics {
+        install_prometheus_recorder();
+    }
+    let global = global.to_global_options()?;
+    apply_agent_mode(&mut runtime);
+    validate_agent_options(&runtime)?;
+    log_agent_runtime(&runtime, server.max_tool_rounds);
+
+    let (paged_attn, memory_goal, paged_attn_block_size, paged_cache_type) =
+        paged_attn.into_builder_flags()?;
+
+    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
+
+    let mut builder = MistralRsForServerBuilder::new()
+        .with_max_seqs(runtime.max_seqs_for_serve())
+        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
+        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
+        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
+        .with_no_kv_cache(runtime.no_kv_cache)
+        .with_token_source(global.token_source)
+        .with_interactive_mode(false)
+        .with_prefix_cache_n(runtime.prefix_cache_n)
+        .set_paged_attn(paged_attn)
+        .with_cpu(cpu)
+        .with_enable_search(runtime.enable_search)
+        .with_seed_optional(global.seed)
+        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
+        .with_chat_template_optional(
+            runtime
+                .chat_template
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        )
+        .with_jinja_explicit_optional(
+            runtime
+                .jinja_explicit
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        )
+        .with_memory_goal(memory_goal)
+        .with_paged_attn_block_size_optional(paged_attn_block_size)
+        .with_mtp_config_optional(runtime.mtp_config())
+        .with_paged_attn_cache_type(paged_cache_type);
+
+    for config in model_configs {
+        builder = builder.add_model_config(config);
+    }
+
+    if let Some(default_model_id) = default_model_id {
+        builder = builder.with_default_model_id(default_model_id);
+    }
+
+    if let Some(model) = runtime.search_embedding_model {
+        builder = builder.with_search_embedding_model(model.into());
+    }
+
+    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
+    builder = builder.with_mcp_config_optional(mcp_client_config);
+
+    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
+
+    #[cfg(feature = "code-execution")]
+    {
+        builder = builder
+            .with_code_exec_config_optional(build_code_exec_config(
+                &runtime,
+                sandbox_policy.clone(),
+            ))
+            .with_shell_config_optional(build_shell_config(&runtime, sandbox_policy));
+    }
+    #[cfg(not(feature = "code-execution"))]
+    let _ = sandbox_policy;
+
+    let mistralrs = builder.build().await?;
+    let mistralrs_for_ui = mistralrs.clone();
+    let mistralrs_for_mcp = mistralrs.clone();
+
+    let mut app = MistralRsServerRouterBuilder::new()
+        .with_mistralrs(mistralrs)
+        .with_max_tool_rounds_optional(server.max_tool_rounds)
+        .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
+        .with_observability_config(server.observability_config())
+        .with_skills_dir_optional({
+            #[cfg(feature = "code-execution")]
+            {
+                runtime.skills_dir.clone()
+            }
+            #[cfg(not(feature = "code-execution"))]
+            {
+                None
+            }
+        })
+        .build()
+        .await?;
+
+    if !server.no_ui {
+        let enable_code_execution = {
+            #[cfg(feature = "code-execution")]
+            {
+                runtime.enable_code_execution
+            }
+            #[cfg(not(feature = "code-execution"))]
+            {
+                false
+            }
+        };
+        let enable_shell = {
+            #[cfg(feature = "code-execution")]
+            {
+                runtime.enable_shell
+            }
+            #[cfg(not(feature = "code-execution"))]
+            {
+                false
+            }
+        };
+        let ui_observability = ObservabilityState::with_max_body_bytes(
+            server.observability_config(),
+            mistralrs_for_ui.clone(),
+            DEFAULT_MAX_BODY_LIMIT,
+        );
+        let ui_router = build_ui_router(
+            mistralrs_for_ui,
+            runtime.enable_search,
+            runtime.search_embedding_model.map(|m| m.into()),
+            enable_code_execution,
+            enable_shell,
+            server.tool_dispatch_url.clone(),
+        )
+        .await?
+        .layer(middleware::from_fn_with_state(
+            ui_observability,
+            observe_http,
+        ));
+        app = app.nest("/ui", ui_router);
+        info!("UI available at http://{}:{}/ui", server.host, server.port);
+    }
+
+    if let Some(mcp_port) = server.mcp_port {
+        spawn_mcp_server(mistralrs_for_mcp, &server.host, mcp_port, server.port).await?;
+    }
+
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port)).await?;
+    let listener = tcp_nodelay_listener(listener);
+
+    info!("Server listening on http://{}:{}", server.host, server.port);
+    log_api_surfaces(&server.host, server.port);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
+    let crate::config::RunConfig {
+        global,
+        mut runtime,
+        paged_attn,
+        sandbox,
+        models,
+        thinking,
+        reasoning_effort,
+        adapter,
+    } = cfg;
+
+    mistralrs_core::resolve_reasoning_controls(thinking, reasoning_effort)?;
+
+    let global = global.to_global_options()?;
+    apply_agent_mode(&mut runtime);
+    validate_agent_options(&runtime)?;
+    log_agent_runtime(&runtime, None);
+    let (paged_attn, memory_goal, paged_attn_block_size, paged_cache_type) =
+        paged_attn.into_builder_flags()?;
+
+    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
+
+    let mut builder = MistralRsForServerBuilder::new()
+        .with_max_seqs(runtime.max_seqs_for_run())
+        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
+        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
+        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
+        .with_no_kv_cache(runtime.no_kv_cache)
+        .with_token_source(global.token_source)
+        .with_interactive_mode(true)
+        .with_prefix_cache_n(runtime.prefix_cache_n)
+        .set_paged_attn(paged_attn)
+        .with_cpu(cpu)
+        .with_enable_search(runtime.enable_search)
+        .with_seed_optional(global.seed)
+        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
+        .with_chat_template_optional(
+            runtime
+                .chat_template
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        )
+        .with_jinja_explicit_optional(
+            runtime
+                .jinja_explicit
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        )
+        .with_memory_goal(memory_goal)
+        .with_paged_attn_block_size_optional(paged_attn_block_size)
+        .with_mtp_config_optional(runtime.mtp_config())
+        .with_paged_attn_cache_type(paged_cache_type);
+
+    for config in model_configs {
+        builder = builder.add_model_config(config);
+    }
+
+    if let Some(model) = runtime.search_embedding_model {
+        builder = builder.with_search_embedding_model(model.into());
+    }
+
+    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
+    builder = builder.with_mcp_config_optional(mcp_client_config);
+
+    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
+
+    #[cfg(feature = "code-execution")]
+    {
+        builder = builder
+            .with_code_exec_config_optional(build_code_exec_config(
+                &runtime,
+                sandbox_policy.clone(),
+            ))
+            .with_shell_config_optional(build_shell_config(&runtime, sandbox_policy));
+    }
+    #[cfg(not(feature = "code-execution"))]
+    let _ = sandbox_policy;
+
+    let mistralrs = builder.build().await?;
+    if let Some(alias) = adapter.as_deref() {
+        let adapters = mistralrs.list_lora_adapters(None).await?;
+        if !adapters.iter().any(|loaded| loaded.alias == alias) {
+            anyhow::bail!("LoRA adapter alias `{alias}` is not loaded");
+        }
+    }
+
+    #[cfg(feature = "code-execution")]
+    let do_code_exec = runtime.enable_code_execution;
+    #[cfg(not(feature = "code-execution"))]
+    let do_code_exec = false;
+    #[cfg(feature = "code-execution")]
+    let do_shell = runtime.enable_shell;
+    #[cfg(not(feature = "code-execution"))]
+    let do_shell = false;
+
+    info!("Model(s) loaded, starting interactive mode...");
+
+    interactive_mode(
+        mistralrs.clone(),
+        InteractiveConfig {
+            do_search: runtime.enable_search,
+            do_code_exec,
+            do_shell,
+            agent_permission: runtime.code_exec_permission.into(),
+            enable_thinking: thinking,
+            reasoning_effort,
+            adapter,
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+async fn build_model_configs(
+    models: &[crate::config::ModelEntry],
+    runtime: &RuntimeOptions,
+    token_source: &mistralrs_core::TokenSource,
+) -> Result<(Vec<ModelConfig>, bool)> {
+    let mut cpu_setting: Option<bool> = None;
+    let mut configs = Vec::new();
+
+    for entry in models {
+        if let Some(cpu) = entry.device.cpu {
+            match cpu_setting {
+                None => cpu_setting = Some(cpu),
+                Some(existing) if existing != cpu => {
+                    anyhow::bail!(
+                        "cpu must be consistent across all models (found both true and false)"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let cpu = cpu_setting.unwrap_or(false);
+
+    for entry in models {
+        let mut model_type = entry.to_model_type(cpu);
+        let matformer = MatformerSelection {
+            config_path: entry
+                .matformer_config_path
+                .clone()
+                .or_else(|| runtime.matformer_config_path.clone()),
+            slice_name: entry
+                .matformer_slice_name
+                .clone()
+                .or_else(|| runtime.matformer_slice_name.clone()),
+        };
+        crate::commands::serve::apply_quant_resolution(&mut model_type, token_source, &matformer)
+            .await?;
+        let model_selected = convert_to_model_selected(&model_type, &matformer)?;
+
+        let resolved_loader_id = crate::commands::serve::model_id_of(&model_type);
+        let mut config = ModelConfig::new(entry.model_id.clone(), model_selected);
+        if let Some(max_model_len) = entry.max_model_len {
+            config = config.with_max_model_len(max_model_len);
+        }
+        if let Some(overrides) = entry.hf_overrides.clone() {
+            config = config.with_hf_config_overrides(overrides);
+        }
+        if resolved_loader_id != entry.model_id {
+            config = config.with_alias(entry.model_id.clone());
+        }
+
+        if let Some(chat_template) = entry.chat_template.as_ref() {
+            config = config.with_chat_template(chat_template.to_string_lossy().to_string());
+        }
+
+        if let Some(jinja_explicit) = entry.jinja_explicit.as_ref() {
+            config = config.with_jinja_explicit(jinja_explicit.to_string_lossy().to_string());
+        }
+
+        if let Some(device_layers) = entry.device.device_layers.clone() {
+            config = config.with_num_device_layers(device_layers);
+        }
+
+        if let Some(isq) = crate::commands::serve::extract_isq_setting(&model_type) {
+            config = config.with_in_situ_quant(isq);
+        }
+        if let Some(max_bytes) =
+            crate::commands::serve::extract_encoder_cache_memory_bytes(&model_type)?
+        {
+            config = config.with_encoder_cache_memory_bytes(max_bytes);
+        }
+
+        configs.push(config);
+    }
+
+    Ok((configs, cpu))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn toml_sequence_defaults_follow_command_and_preserve_explicit_limits() {
+        for (command, default) in [
+            ("run", RuntimeOptions::default().max_seqs_for_run()),
+            ("serve", RuntimeOptions::default().max_seqs_for_serve()),
+        ] {
+            for runtime_section in ["", "[runtime]\nprefix_cache_n = 4\n"] {
+                let config: CliConfig =
+                    toml::from_str(&format!("command = \"{command}\"\n{runtime_section}")).unwrap();
+                let (runtime, resolved) = match config {
+                    CliConfig::Run(config) => {
+                        let resolved = config.runtime.max_seqs_for_run();
+                        (config.runtime, resolved)
+                    }
+                    CliConfig::Serve(config) => {
+                        let resolved = config.runtime.max_seqs_for_serve();
+                        (config.runtime, resolved)
+                    }
+                };
+                assert_eq!(runtime.max_seqs, None);
+                assert_eq!(resolved, default);
+            }
+            for explicit in [1, 8, 32] {
+                let config: CliConfig = toml::from_str(&format!(
+                    "command = \"{command}\"\n[runtime]\nmax_seqs = {explicit}\n"
+                ))
+                .unwrap();
+                let resolved = match config {
+                    CliConfig::Run(config) => config.runtime.max_seqs_for_run(),
+                    CliConfig::Serve(config) => config.runtime.max_seqs_for_serve(),
+                };
+                assert_eq!(resolved, explicit);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn from_config_infers_gguf_for_an_exact_file() {
+        let root = std::env::temp_dir().join(format!("mistralrs-gguf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("model.gguf"), []).unwrap();
+        fs::write(root.join("mmproj-BF16.gguf"), []).unwrap();
+        let input = format!(
+            r#"
+command = "run"
+
+[[models]]
+model_id = "{}"
+
+[models.format]
+quantized_file = "model.gguf"
+mmproj = "mmproj-BF16.gguf"
+"#,
+            root.display()
+        );
+        let config: CliConfig = toml::from_str(&input).unwrap();
+        let CliConfig::Run(config) = config else {
+            unreachable!()
+        };
+
+        let (models, cpu) = build_model_configs(
+            &config.models,
+            &config.runtime,
+            &mistralrs_core::TokenSource::None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(!cpu);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn from_config_accepts_dynamic_lora_for_text_gguf() {
+        let root = std::env::temp_dir().join(format!("mistralrs-gguf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
+        let input = format!(
+            r#"
+command = "serve"
+
+[[models]]
+model_id = "{}"
+
+[models.format]
+quantized_file = "model-Q4_K_M.gguf"
+
+[models.adapter]
+lora = [
+  {{ alias = "code", source = "org/code-lora" }},
+]
+"#,
+            root.display()
+        );
+        let config: CliConfig = toml::from_str(&input).unwrap();
+        let CliConfig::Serve(config) = config else {
+            unreachable!()
+        };
+        assert!(config.models[0].adapter.dynamic_lora_enabled());
+
+        let (models, cpu) = build_model_configs(
+            &config.models,
+            &config.runtime,
+            &mistralrs_core::TokenSource::None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(!cpu);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}

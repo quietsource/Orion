@@ -12,6 +12,7 @@ parentPort!.on('message', (request: { id: number; method: string; args: unknown[
         case 'recall': result = await engine.recall(...request.args as Parameters<OrionFS['recall']>); break;
         case 'stats': result = engine.getStats(...request.args as Parameters<OrionFS['getStats']>); break;
         case 'list': result = engine.listMemories(...request.args as Parameters<OrionFS['listMemories']>); break;
+        case 'prune-obsolete': result = await engine.pruneObsoleteMemories(...request.args as Parameters<OrionFS['pruneObsoleteMemories']>); break;
         case 'export': result = await engine.exportSnapshot(); break;
         case 'import': result = await engine.importSnapshot(...request.args as Parameters<OrionFS['importSnapshot']>); break;
         case 'forget': result = await engine.forgetMemories(...request.args as Parameters<OrionFS['forgetMemories']>); break;

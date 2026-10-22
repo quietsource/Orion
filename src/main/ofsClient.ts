@@ -130,6 +130,7 @@ export class OFSClient {
     return value;
   }
   listMemories(...args: Parameters<OrionFS['listMemories']>) { return this.call<ReturnType<OrionFS['listMemories']>>('list', args); }
+  pruneObsoleteMemories(...args: Parameters<OrionFS['pruneObsoleteMemories']>) { this.statsCache.clear(); return this.call<Awaited<ReturnType<OrionFS['pruneObsoleteMemories']>>>('prune-obsolete', args); }
   exportSnapshot() { return this.call<Awaited<ReturnType<OrionFS['exportSnapshot']>>>('export'); }
   importSnapshot(...args: Parameters<OrionFS['importSnapshot']>) { this.statsCache.clear(); return this.call<void>('import', args); }
   forgetMemories(conversationId: string, ids: string[]) { this.statsCache.clear(); return this.call<void>('forget', [conversationId, ids]); }

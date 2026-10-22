@@ -7,3 +7,6 @@ src-tauri/binaries/orion-service-*
 .migration/*
 !.migration/source-baseline.json
 release/
+.containerize/
+build/inference-runtime/
+.build/

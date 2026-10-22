@@ -1,0 +1,38 @@
+/// Automatic device mapping for text and multimodal models.
+///
+/// Device mapping distributes model layers across available GPUs automatically.
+/// This example shows both text and multimodal model usage with auto device mapping.
+///
+/// Run with: `cargo run --release --example auto_device_map -p mistralrs`
+use anyhow::Result;
+use mistralrs::{IsqBits, MemoryGoal, TextMessageRole, TextMessages, TextModelBuilder};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = TextModelBuilder::new("meta-llama/Llama-3.3-70B-Instruct")
+        .with_auto_isq(IsqBits::Eight)
+        .with_logging()
+        .with_memory_goal(MemoryGoal::Utilization(0.9))
+        .build()
+        .await?;
+
+    let messages = TextMessages::new()
+        .add_message(
+            TextMessageRole::System,
+            "You are an AI agent with a specialty in programming.",
+        )
+        .add_message(
+            TextMessageRole::User,
+            "Hello! How are you? Please write generic binary search function in Rust.",
+        );
+
+    let response = model.send_chat_request(messages).await?;
+
+    println!("{}", response.choices[0].message.content.as_ref().unwrap());
+    dbg!(
+        response.usage.avg_prompt_tok_per_sec,
+        response.usage.avg_compl_tok_per_sec
+    );
+
+    Ok(())
+}

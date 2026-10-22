@@ -1,0 +1,24 @@
+# Containerize Bucket Specification (v1.0)
+# High-performance, isolated development container manifest
+
+name: orion-tauri
+version: 1.0.0
+runtime: hybrid
+
+storage:
+  compression: zstd
+  dedup: true
+  max_size_mb: 4096
+
+packages:
+  - bun@1.4.3
+  - rust@1.99.0
+
+env:
+  NODE_ENV: "development"
+
+scripts:
+  build: "bun install --frozen-lockfile --ignore-scripts && bun run dist"
+  start: "bun node_modules/@tauri-apps/cli/tauri.js dev --no-watch"
+  dev: "bun run build && bun scripts/dev-tauri.mjs"
+

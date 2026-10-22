@@ -159,6 +159,7 @@ export const shell = {
 };
 export class NativeTray {
   readonly ready = nativeCall('tray-enable');
+  setSwarmState(state: { running: boolean; name: string; iteration: number; idleMinutes: number }) { return nativeCall('tray-swarm-state', state); }
   destroy() { void nativeCall('tray-disable'); }
 }
 setEventReceiver(value => {
@@ -168,5 +169,6 @@ setEventReceiver(value => {
   else if (value.event === 'browser-popup') contents.get(value.label)?.emit('popup', value.url);
   else if (value.event === 'browser-shortcut') windows.get('main')?.webContents.send('browser:shortcut', value.action);
   else if (value.event === 'tray-show' || value.event === 'second-instance') app.emit('activate');
+  else if (value.event === 'tray-swarm-pause') app.emit('tray-swarm-pause');
   else if (value.event === 'tray-quit' || value.event === 'shutdown' || value.event === 'parent-exited') app.quit();
 });

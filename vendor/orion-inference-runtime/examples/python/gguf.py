@@ -1,0 +1,26 @@
+"""Load a GGUF model from Hugging Face.
+
+Configuration and tokenizer assets are discovered automatically. Set `tok_model_id` only to
+override that choice or when the source cannot be identified.
+"""
+
+from mistralrs import Runner, Which, ChatCompletionRequest
+
+runner = Runner(
+    which=Which.GGUF(
+        quantized_model_id="unsloth/Qwen3-0.6B-GGUF",
+        quantized_filename="Qwen3-0.6B-Q4_K_M.gguf",
+    )
+)
+
+res = runner.send_chat_completion_request(
+    ChatCompletionRequest(
+        model="default",
+        messages=[
+            {"role": "user", "content": "Tell me a story about the Rust type system."}
+        ],
+        max_tokens=256,
+    )
+)
+print(res.choices[0].message.content)
+print(res.usage)

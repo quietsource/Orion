@@ -1,0 +1,213 @@
+// Build script to run nvcc and generate the C glue code for launching the flash-attention kernel.
+#[cfg(feature = "cuda")]
+mod cuda_build {
+    use cudaforge::{KernelBuilder, Result};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+    const CUTLASS_COMMIT: &str = "7127592069c2fe01b041e174ba4345ef9b279671";
+    const CUTLASS_COMMIT_ENV: &str = "MISTRALRS_CUTLASS_COMMIT";
+    const CUDA_BUILD_ROOT_ENV: &str = "MISTRALRS_CUDA_BUILD_ROOT";
+    const FLASH_ATTN_BUILD_DIR_ENV: &str = "MISTRALRS_FLASH_ATTN_BUILD_DIR";
+    const CANDLE_FLASH_ATTN_BUILD_DIR_ENV: &str = "CANDLE_FLASH_ATTN_BUILD_DIR";
+
+    const KERNEL_FILES: [&str; 53] = [
+        "kernels/flash_api.cu",
+        "kernels/flash_fwd_splitkv_hdim512_fp16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim512_bf16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim512_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim512_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim64_fp16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim128_fp16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim256_fp16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim64_bf16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim128_bf16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim256_bf16_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim64_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim128_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim256_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim64_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim128_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_splitkv_hdim256_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim128_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim160_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim192_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim224_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim256_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim512_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim32_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim64_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim96_fp16_sm80.cu",
+        "kernels/flash_fwd_hdim128_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim160_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim192_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim224_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim256_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim512_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim32_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim64_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim96_bf16_sm80.cu",
+        "kernels/flash_fwd_hdim128_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim160_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim192_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim224_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim256_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim512_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim32_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim64_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim96_fp16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim128_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim160_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim192_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim224_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim256_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim512_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim32_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim64_bf16_causal_sm80.cu",
+        "kernels/flash_fwd_hdim96_bf16_causal_sm80.cu",
+    ];
+
+    fn update_hash(hash: &mut u64, bytes: &[u8]) {
+        const FNV_PRIME: u64 = 1099511628211;
+        for &byte in bytes {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    fn header_files(root: &Path) -> Result<Vec<PathBuf>> {
+        fn visit(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+            if path.is_dir() {
+                for entry in fs::read_dir(path)? {
+                    visit(&entry?.path(), files)?;
+                }
+            } else if matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("h" | "cuh" | "hpp")
+            ) {
+                files.push(path.to_path_buf());
+            }
+            Ok(())
+        }
+
+        let mut files = Vec::new();
+        visit(root, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn header_hash(files: &[PathBuf]) -> Result<u64> {
+        let mut hash = 14695981039346656037;
+        for file in files {
+            update_hash(&mut hash, file.to_string_lossy().as_bytes());
+            update_hash(&mut hash, &fs::read(file)?);
+        }
+        Ok(hash)
+    }
+
+    fn cuda_build_dir(out_dir: &Path) -> Result<PathBuf> {
+        let build_dir = std::env::var(FLASH_ATTN_BUILD_DIR_ENV)
+            .or_else(|_| std::env::var(CANDLE_FLASH_ATTN_BUILD_DIR_ENV));
+        if let Ok(build_dir) = build_dir {
+            return Ok(PathBuf::from(build_dir).canonicalize()?);
+        }
+
+        let Some(root) = std::env::var_os(CUDA_BUILD_ROOT_ENV) else {
+            return Ok(out_dir.to_path_buf());
+        };
+        let build_dir = PathBuf::from(root).join("flash-attn");
+        fs::create_dir_all(&build_dir)?;
+        Ok(build_dir)
+    }
+
+    fn prepare_cuda_archive(path: PathBuf) -> PathBuf {
+        if [
+            CUDA_BUILD_ROOT_ENV,
+            FLASH_ATTN_BUILD_DIR_ENV,
+            CANDLE_FLASH_ATTN_BUILD_DIR_ENV,
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+        {
+            // Shared objects can be newer than this Cargo build directory's archive.
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("failed to refresh CUDA archive {}: {error}", path.display()),
+            }
+        }
+        path
+    }
+
+    pub fn build() -> Result<()> {
+        println!("cargo::rerun-if-changed=build.rs");
+        println!("cargo::rerun-if-env-changed={CUTLASS_COMMIT_ENV}");
+        println!("cargo:rerun-if-env-changed={CUDA_BUILD_ROOT_ENV}");
+        println!("cargo:rerun-if-env-changed={FLASH_ATTN_BUILD_DIR_ENV}");
+        println!("cargo:rerun-if-env-changed={CANDLE_FLASH_ATTN_BUILD_DIR_ENV}");
+        for kernel_file in KERNEL_FILES.iter() {
+            println!("cargo::rerun-if-changed={kernel_file}");
+        }
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+        let build_dir = cuda_build_dir(&out_dir)?;
+        let header_files = header_files(Path::new("kernels"))?;
+        for header_file in &header_files {
+            println!("cargo::rerun-if-changed={}", header_file.display());
+        }
+
+        let kernels: Vec<_> = KERNEL_FILES.iter().collect();
+        let header_hash_arg = format!(
+            "-DMISTRALRS_FLASH_ATTN_HEADER_HASH=0x{:016x}",
+            header_hash(&header_files)?
+        );
+        let cutlass_commit =
+            std::env::var(CUTLASS_COMMIT_ENV).unwrap_or_else(|_| CUTLASS_COMMIT.to_string());
+        let mut builder = KernelBuilder::new()
+            .source_files(kernels)
+            .watch(["kernels"])
+            .out_dir(&build_dir)
+            .with_cutlass(Some(&cutlass_commit))
+            .arg("-std=c++17")
+            .arg("-O3")
+            .arg("-U__CUDA_NO_HALF_OPERATORS__")
+            .arg("-U__CUDA_NO_HALF_CONVERSIONS__")
+            .arg("-U__CUDA_NO_HALF2_OPERATORS__")
+            .arg("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
+            .arg("--expt-relaxed-constexpr")
+            .arg("--expt-extended-lambda")
+            .arg("--use_fast_math")
+            .arg("--verbose")
+            .arg(&header_hash_arg)
+            .thread_percentage(0.5); // Use up to 50% of available threads
+
+        let mut is_target_msvc = false;
+        if let Ok(target) = std::env::var("TARGET") {
+            if target.contains("msvc") {
+                is_target_msvc = true;
+                builder = builder.arg("-D_USE_MATH_DEFINES");
+            }
+        }
+
+        if !is_target_msvc {
+            builder = builder.arg("-Xcompiler").arg("-fPIC");
+        }
+
+        let out_file = out_dir.join("libflashattention.a");
+        builder.build_lib(prepare_cuda_archive(out_file))?;
+
+        println!("cargo::rustc-link-search={}", out_dir.display());
+        println!("cargo::rustc-link-lib=flashattention");
+        println!("cargo::rustc-link-lib=dylib=cudart");
+        if !is_target_msvc {
+            println!("cargo::rustc-link-lib=dylib=stdc++");
+        }
+        Ok(())
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "cuda")]
+    cuda_build::build().map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}

@@ -1,0 +1,19 @@
+# mistralrs Python SDK
+
+`mistralrs` is the Python SDK for [mistral.rs](https://github.com/EricLBuehler/mistral.rs), a blazing-fast LLM inference engine.
+
+## Documentation
+
+For full documentation, see:
+- [Python SDK Documentation](https://docs.mistralrs.dev/tutorials/03-python-sdk/)
+- [Installation Guide](https://docs.mistralrs.dev/guides/install/)
+
+## Quick Install
+
+```bash
+pip install mistralrs        # CPU, or Metal on Apple Silicon
+```
+
+NVIDIA CUDA wheels ship as GitHub release assets because they vary by CUDA toolkit lane
+(`cuda128`, `cuda129`, `cuda130`, `cuda131`, `cuda132`, `cuda133`) and GPU compute
+capability. See the Python SDK installation guide for the `--find-links` command.

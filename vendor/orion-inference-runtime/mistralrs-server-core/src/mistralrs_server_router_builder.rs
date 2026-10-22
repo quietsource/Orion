@@ -1,0 +1,609 @@
+//! ## mistral.rs server router builder.
+
+use anyhow::Result;
+use axum::{
+    extract::DefaultBodyLimit,
+    http::{self, header::HeaderName, HeaderMap, Method, StatusCode, Uri},
+    middleware,
+    response::IntoResponse,
+    routing::{get, post},
+    Extension, Router,
+};
+use tower_http::cors::{AllowOrigin, CorsLayer};
+#[cfg(feature = "swagger-ui")]
+use utoipa_swagger_ui::SwaggerUi;
+
+#[cfg(feature = "swagger-ui")]
+use crate::openapi_doc::get_openapi_doc;
+use crate::{
+    anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
+    approvals::{resolve_agent_approval, ApprovalBroker},
+    chat_completion::chatcompletions,
+    completions::completions,
+    embeddings::embeddings,
+    files::{
+        delete_file, get_container_file, get_container_file_content, get_file, get_file_content,
+        list_container_files, list_files, upload_file,
+    },
+    handler_core::{openai_error_response, ApiError, ApiErrorKind},
+    handlers::{
+        calibration_apply, calibration_start, calibration_status, delete_session, get_model_status,
+        get_session, health, models, put_session, re_isq, reload_model, system_doctor, system_info,
+        tune_model, unload_model,
+    },
+    image_generation::image_generation,
+    lora_adapters::{
+        list_lora_adapters, load_lora_adapter, unload_lora_adapter, LoraAdapterApiConfig,
+    },
+    metrics::{metrics, metrics_disabled, observe_http, ObservabilityConfig, ObservabilityState},
+    responses::{cancel_response, create_response, delete_response, get_response},
+    route_registry::{
+        AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE, ANTHROPIC_MESSAGES_ROUTE,
+        CALIBRATION_APPLY_ROUTE, CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE,
+        CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILES_ROUTE,
+        CONTAINER_FILE_CONTENT_ROUTE, CONTAINER_FILE_ROUTE, EMBEDDINGS_ROUTE, FILES_ROUTE,
+        FILE_CONTENT_ROUTE, FILE_ROUTE, HEALTH_ROUTE, IMAGE_GENERATION_ROUTE,
+        LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE, MODELS_ROUTE, MODEL_STATUS_ROUTE,
+        RELOAD_MODEL_ROUTE, RESPONSES_ROUTE, RESPONSE_ROUTE, RE_ISQ_ROUTE, ROOT_ROUTE,
+        SESSION_ROUTE, SKILLS_ROUTE, SKILL_VERSIONS_ROUTE, SPEECH_GENERATION_ROUTE,
+        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
+        UNLOAD_MODEL_ROUTE,
+    },
+    skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version, SkillStore},
+    speech_generation::speech_generation,
+    types::SharedMistralRsState,
+};
+
+/// Server-level defaults for agentic features.
+/// Injected as an axum Extension so handlers can apply them to incoming requests.
+#[derive(Clone, Default)]
+pub struct AgenticDefaults {
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+    pub agent_permission: Option<mistralrs_core::AgentPermission>,
+    pub approval_broker: ApprovalBroker,
+}
+
+// NOTE(EricLBuehler): Accept up to 50mb input
+const N_INPUT_SIZE: usize = 50;
+const MB_TO_B: usize = 1024 * 1024; // 1024 kb in a mb
+const ROUTE_NOT_FOUND_MESSAGE: &str = "The requested API route was not found.";
+const METHOD_NOT_ALLOWED_MESSAGE: &str = "The requested HTTP method is not allowed for this route.";
+
+/// This is the axum default request body limit for the router. Accept up to 50mb input.
+pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
+
+/// A builder for creating a mistral.rs server router with configurable options.
+///
+/// ### Examples
+///
+/// Basic usage:
+/// ```ignore
+/// use mistralrs_server_core::mistralrs_server_router_builder::MistralRsServerRouterBuilder;
+///
+/// let router = MistralRsServerRouterBuilder::new()
+///     .with_mistralrs(mistralrs_instance)
+///     .build()
+///     .await?;
+/// ```
+///
+/// With custom configuration:
+/// ```ignore
+/// use mistralrs_server_core::mistralrs_server_router_builder::MistralRsServerRouterBuilder;
+///
+/// let router = MistralRsServerRouterBuilder::new()
+///     .with_mistralrs(mistralrs_instance)
+///     .with_include_swagger_routes(false)
+///     .with_base_path("/api/mistral")
+///     .build()
+///     .await?;
+/// ```
+pub struct MistralRsServerRouterBuilder {
+    /// The shared mistral.rs instance
+    mistralrs: Option<SharedMistralRsState>,
+    /// Whether to include Swagger/OpenAPI documentation routes.
+    /// Only available when the `swagger-ui` feature is enabled.
+    #[cfg(feature = "swagger-ui")]
+    include_swagger_routes: bool,
+    /// Optional base path prefix for Swagger UI routes.
+    /// Only available when the `swagger-ui` feature is enabled.
+    #[cfg(feature = "swagger-ui")]
+    base_path: Option<String>,
+    /// Optional CORS allowed origins
+    allowed_origins: Option<Vec<String>>,
+    /// Optional axum default request body limit
+    max_body_limit: Option<usize>,
+    /// Server-level agentic defaults
+    agentic_defaults: AgenticDefaults,
+    skills_dir: Option<std::path::PathBuf>,
+    observability: ObservabilityConfig,
+    lora_adapter_api: LoraAdapterApiConfig,
+}
+
+impl Default for MistralRsServerRouterBuilder {
+    /// Creates a new builder with default configuration.
+    fn default() -> Self {
+        Self {
+            mistralrs: None,
+            #[cfg(feature = "swagger-ui")]
+            include_swagger_routes: true,
+            #[cfg(feature = "swagger-ui")]
+            base_path: None,
+            allowed_origins: None,
+            max_body_limit: None,
+            agentic_defaults: AgenticDefaults::default(),
+            skills_dir: None,
+            observability: ObservabilityConfig::default(),
+            lora_adapter_api: LoraAdapterApiConfig::from_env(),
+        }
+    }
+}
+
+impl MistralRsServerRouterBuilder {
+    /// Creates a new `MistralRsServerRouterBuilder` with default settings.
+    ///
+    /// This is equivalent to calling `Default::default()`.
+    ///
+    /// ### Examples
+    ///
+    /// ```ignore
+    /// use mistralrs_server_core::mistralrs_server_router_builder::MistralRsServerRouterBuilder;
+    ///
+    /// let builder = MistralRsServerRouterBuilder::new();
+    /// ```
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Sets the shared mistral.rs instance
+    pub fn with_mistralrs(mut self, mistralrs: SharedMistralRsState) -> Self {
+        self.mistralrs = Some(mistralrs);
+        self
+    }
+
+    /// Configures whether to include OpenAPI doc routes.
+    ///
+    /// When enabled (default), the router will include routes for Swagger UI
+    /// at `/docs` and the OpenAPI specification at `/api-doc/openapi.json`.
+    /// These routes respect the configured base path if one is set.
+    ///
+    /// Only available when the `swagger-ui` feature is enabled.
+    #[cfg(feature = "swagger-ui")]
+    pub fn with_include_swagger_routes(mut self, include_swagger_routes: bool) -> Self {
+        self.include_swagger_routes = include_swagger_routes;
+        self
+    }
+
+    /// Sets a base path prefix for Swagger UI routes.
+    ///
+    /// When set, Swagger UI routes will be prefixed with the given path. This is
+    /// useful when including the mistral.rs server instance in another axum project.
+    ///
+    /// Only available when the `swagger-ui` feature is enabled.
+    #[cfg(feature = "swagger-ui")]
+    pub fn with_base_path(mut self, base_path: &str) -> Self {
+        self.base_path = Some(base_path.to_owned());
+        self
+    }
+
+    /// Sets the CORS allowed origins.
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Some(origins);
+        self
+    }
+
+    /// Sets the axum default request body limit.
+    pub fn with_max_body_limit(mut self, max_body_limit: usize) -> Self {
+        self.max_body_limit = Some(max_body_limit);
+        self
+    }
+
+    /// Sets the default maximum tool-call rounds for the agentic loop.
+    pub fn with_max_tool_rounds(mut self, rounds: usize) -> Self {
+        self.agentic_defaults.max_tool_rounds = Some(rounds);
+        self
+    }
+
+    /// Sets the default maximum tool-call rounds if provided.
+    pub fn with_max_tool_rounds_optional(mut self, rounds: Option<usize>) -> Self {
+        if let Some(rounds) = rounds {
+            self = self.with_max_tool_rounds(rounds);
+        }
+        self
+    }
+
+    /// Sets the URL to POST tool calls to for server-side execution.
+    pub fn with_tool_dispatch_url(mut self, url: String) -> Self {
+        self.agentic_defaults.tool_dispatch_url = Some(url);
+        self
+    }
+
+    /// Sets the tool dispatch URL if provided.
+    pub fn with_tool_dispatch_url_optional(mut self, url: Option<String>) -> Self {
+        if let Some(url) = url {
+            self = self.with_tool_dispatch_url(url);
+        }
+        self
+    }
+
+    pub fn with_agent_permission(mut self, permission: mistralrs_core::AgentPermission) -> Self {
+        self.agentic_defaults.agent_permission = Some(permission);
+        self
+    }
+
+    pub fn with_code_execution_permission(
+        self,
+        permission: mistralrs_core::CodeExecutionPermission,
+    ) -> Self {
+        self.with_agent_permission(permission.into())
+    }
+
+    pub fn with_approval_broker(mut self, broker: ApprovalBroker) -> Self {
+        self.agentic_defaults.approval_broker = broker;
+        self
+    }
+
+    pub fn with_skills_dir(mut self, skills_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.skills_dir = Some(skills_dir.into());
+        self
+    }
+
+    pub fn with_skills_dir_optional(mut self, skills_dir: Option<std::path::PathBuf>) -> Self {
+        if let Some(skills_dir) = skills_dir {
+            self = self.with_skills_dir(skills_dir);
+        }
+        self
+    }
+
+    /// Sets server observability options.
+    pub fn with_observability_config(mut self, observability: ObservabilityConfig) -> Self {
+        self.observability = observability;
+        self
+    }
+
+    /// Configures runtime LoRA management routes and their allowed adapter root.
+    pub fn with_lora_adapter_api_config(mut self, config: LoraAdapterApiConfig) -> Self {
+        self.lora_adapter_api = config;
+        self
+    }
+
+    /// Builds the configured axum router.
+    ///
+    /// ### Examples
+    ///
+    /// ```ignore
+    /// use mistralrs_server_core::mistralrs_server_router_builder::MistralRsServerRouterBuilder;
+    ///
+    /// let router = MistralRsServerRouterBuilder::new()
+    ///     .with_mistralrs(mistralrs_instance)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub async fn build(self) -> Result<Router> {
+        if self.observability.metrics {
+            crate::metrics::install_prometheus_recorder();
+        }
+        let lora_adapter_api = self.lora_adapter_api.prepare()?;
+        let mistralrs = self.mistralrs.ok_or_else(|| {
+            anyhow::anyhow!("`mistralrs` instance must be set. Use `with_mistralrs`.")
+        })?;
+        let router_max_body_limit = self.max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
+        let observability = ObservabilityState::with_max_body_bytes(
+            self.observability.clone(),
+            mistralrs.clone(),
+            router_max_body_limit,
+        );
+
+        #[allow(unused_mut)]
+        let mut router = init_router(
+            mistralrs,
+            self.allowed_origins,
+            router_max_body_limit,
+            self.agentic_defaults,
+            self.skills_dir,
+            self.observability,
+            lora_adapter_api,
+        )?;
+
+        #[cfg(feature = "swagger-ui")]
+        if self.include_swagger_routes {
+            let prefix = self.base_path.as_deref().unwrap_or("");
+            let doc = get_openapi_doc(None);
+            router = router.merge(
+                SwaggerUi::new(format!("{prefix}/docs"))
+                    .url(format!("{prefix}/api-doc/openapi.json"), doc),
+            );
+        }
+
+        router = router.layer(middleware::from_fn_with_state(observability, observe_http));
+
+        Ok(router)
+    }
+}
+
+/// Initializes and configures the underlying axum router with MistralRs API endpoints.
+///
+/// This function creates a router with all the necessary API endpoints,
+/// CORS configuration, and body size limits.
+fn init_router(
+    state: SharedMistralRsState,
+    allowed_origins: Option<Vec<String>>,
+    router_max_body_limit: usize,
+    agentic_defaults: AgenticDefaults,
+    skills_dir: Option<std::path::PathBuf>,
+    observability: ObservabilityConfig,
+    lora_adapter_api: LoraAdapterApiConfig,
+) -> Result<Router> {
+    let allow_origin = if let Some(origins) = allowed_origins {
+        let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
+
+        match parsed_origins {
+            Ok(origins) => AllowOrigin::list(origins),
+            Err(_) => anyhow::bail!("Invalid origin format"),
+        }
+    } else {
+        AllowOrigin::any()
+    };
+
+    let skill_store = std::sync::Arc::new(SkillStore::new(
+        skills_dir.unwrap_or_else(SkillStore::default_root),
+    )?);
+    let metrics_route = if observability.metrics {
+        get(metrics)
+    } else {
+        get(metrics_disabled)
+    };
+
+    let cors_layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([
+            http::header::CONTENT_TYPE,
+            http::header::AUTHORIZATION,
+            HeaderName::from_static("x-api-key"),
+            HeaderName::from_static("anthropic-version"),
+            HeaderName::from_static("anthropic-beta"),
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("request-id"),
+        ])
+        .expose_headers([
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("request-id"),
+        ])
+        .allow_origin(allow_origin);
+
+    let mut router = Router::new()
+        .route(CHAT_COMPLETIONS_ROUTE.path, post(chatcompletions))
+        .route(ANTHROPIC_MESSAGES_ROUTE.path, post(anthropic_messages))
+        .route(
+            ANTHROPIC_COUNT_TOKENS_ROUTE.path,
+            post(anthropic_count_tokens),
+        )
+        .route(COMPLETIONS_ROUTE.path, post(completions))
+        .route(EMBEDDINGS_ROUTE.path, post(embeddings))
+        .route(MODELS_ROUTE.path, get(models))
+        .route(LIST_LORA_ADAPTERS_ROUTE.path, get(list_lora_adapters))
+        .route(UNLOAD_MODEL_ROUTE.path, post(unload_model))
+        .route(RELOAD_MODEL_ROUTE.path, post(reload_model))
+        .route(MODEL_STATUS_ROUTE.path, post(get_model_status))
+        .route(TUNE_MODEL_ROUTE.path, post(tune_model))
+        .route(SYSTEM_INFO_ROUTE.path, get(system_info))
+        .route(SYSTEM_DOCTOR_ROUTE.path, post(system_doctor))
+        .route(HEALTH_ROUTE.path, get(health))
+        .route("/metrics", metrics_route)
+        .route(ROOT_ROUTE.path, get(health))
+        .route(RE_ISQ_ROUTE.path, post(re_isq))
+        .route(CALIBRATION_START_ROUTE.path, post(calibration_start))
+        .route(
+            CALIBRATION_STATUS_ROUTE.path,
+            axum::routing::get(calibration_status),
+        )
+        .route(CALIBRATION_APPLY_ROUTE.path, post(calibration_apply))
+        .route(IMAGE_GENERATION_ROUTE.path, post(image_generation))
+        .route(FILES_ROUTE.path, get(list_files).post(upload_file))
+        .route(FILE_ROUTE.path, get(get_file).delete(delete_file))
+        .route(FILE_CONTENT_ROUTE.path, get(get_file_content))
+        .route(CONTAINER_FILES_ROUTE.path, get(list_container_files))
+        .route(CONTAINER_FILE_ROUTE.path, get(get_container_file))
+        .route(
+            CONTAINER_FILE_CONTENT_ROUTE.path,
+            get(get_container_file_content),
+        )
+        .route(SPEECH_GENERATION_ROUTE.path, post(speech_generation))
+        .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
+        .route(RESPONSES_ROUTE.path, post(create_response))
+        .route(SKILLS_ROUTE.path, get(list_skills).post(upload_skill))
+        .route(
+            SKILL_VERSIONS_ROUTE.path,
+            get(list_skill_versions).post(upload_skill_version),
+        )
+        .route(
+            RESPONSE_ROUTE.path,
+            get(get_response).delete(delete_response),
+        )
+        .route(CANCEL_RESPONSE_ROUTE.path, post(cancel_response))
+        .route(
+            SESSION_ROUTE.path,
+            get(get_session).put(put_session).delete(delete_session),
+        );
+
+    if lora_adapter_api.enabled() {
+        if let Some(root) = lora_adapter_api.allowed_root() {
+            tracing::warn!(
+                adapter_root = %root.display(),
+                "runtime LoRA adapter management is enabled; authorized clients can load adapter files from this root"
+            );
+        } else {
+            tracing::warn!(
+                "runtime LoRA adapter management is enabled without an adapter root; authorized clients can load any adapter path readable by the server"
+            );
+        }
+        router = router
+            .route(LOAD_LORA_ADAPTER_ROUTE.path, post(load_lora_adapter))
+            .route(UNLOAD_LORA_ADAPTER_ROUTE.path, post(unload_lora_adapter));
+    }
+
+    let router = router
+        .fallback(api_route_not_found)
+        .method_not_allowed_fallback(api_method_not_allowed)
+        .layer(cors_layer)
+        .layer(DefaultBodyLimit::max(router_max_body_limit))
+        .layer(Extension(agentic_defaults.approval_broker.clone()))
+        .layer(Extension(skill_store))
+        .layer(Extension(agentic_defaults))
+        .layer(Extension(lora_adapter_api))
+        .with_state(state);
+
+    Ok(router)
+}
+
+fn path_is_in_namespace(path: &str, namespace: &str) -> bool {
+    path == namespace
+        || path
+            .strip_prefix(namespace)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn is_anthropic_api_request(uri: &Uri, headers: &HeaderMap) -> bool {
+    if path_is_in_namespace(uri.path(), ANTHROPIC_MESSAGES_ROUTE.path) {
+        return true;
+    }
+    if !path_is_in_namespace(uri.path(), SKILLS_ROUTE.path) {
+        return false;
+    }
+    headers.contains_key("anthropic-version")
+        || headers.contains_key("anthropic-beta")
+        || uri.query().is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "source")
+        })
+}
+
+fn is_versioned_api_path(path: &str) -> bool {
+    path == "/v1" || path.starts_with("/v1/")
+}
+
+fn api_protocol_error(
+    uri: &Uri,
+    headers: &HeaderMap,
+    status: StatusCode,
+    error: ApiError,
+) -> axum::response::Response {
+    let mut response = if is_anthropic_api_request(uri, headers) {
+        anthropic_error_response(error)
+    } else {
+        openai_error_response(error)
+    };
+    *response.status_mut() = status;
+    response
+}
+
+async fn api_route_not_found(uri: Uri, headers: HeaderMap) -> axum::response::Response {
+    if !is_versioned_api_path(uri.path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    api_protocol_error(
+        &uri,
+        &headers,
+        StatusCode::NOT_FOUND,
+        ApiError::new(
+            ApiErrorKind::NotFound,
+            ROUTE_NOT_FOUND_MESSAGE,
+            Some("not_found"),
+            None,
+        ),
+    )
+}
+
+async fn api_method_not_allowed(uri: Uri, headers: HeaderMap) -> axum::response::Response {
+    if !is_versioned_api_path(uri.path()) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    api_protocol_error(
+        &uri,
+        &headers,
+        StatusCode::METHOD_NOT_ALLOWED,
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            METHOD_NOT_ALLOWED_MESSAGE,
+            Some("method_not_allowed"),
+            None,
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    async fn response_body(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unknown_openai_routes_use_openai_errors() {
+        let response = api_route_not_found(Uri::from_static("/v1/unknown"), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn unknown_anthropic_message_routes_use_anthropic_errors() {
+        let response =
+            api_route_not_found(Uri::from_static("/v1/messages/unknown"), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_body(response).await;
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "not_found_error");
+    }
+
+    #[tokio::test]
+    async fn wrong_openai_methods_use_openai_errors() {
+        let response =
+            api_method_not_allowed(Uri::from_static("/v1/chat/completions"), HeaderMap::new())
+                .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = response_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "method_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn wrong_anthropic_message_methods_use_anthropic_errors() {
+        let response =
+            api_method_not_allowed(Uri::from_static("/v1/messages"), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = response_body(response).await;
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[tokio::test]
+    async fn anthropic_skill_fallbacks_use_anthropic_errors() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-version",
+            "2023-06-01".parse().expect("valid header value"),
+        );
+        let response = api_method_not_allowed(Uri::from_static("/v1/skills"), headers).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = response_body(response).await;
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+
+        let response = api_route_not_found(
+            Uri::from_static("/v1/skills/unknown?source=custom"),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_body(response).await;
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "not_found_error");
+    }
+}

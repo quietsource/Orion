@@ -551,6 +551,19 @@ export class MemoryHistory {
     if (!conversation.messages.some(item => item.id === messageId && item.role === "user")) throw Error("This user message is no longer available.");
     await this.deps.checkpointConversation?.(conversation, messageId);
   }
+  async prepareMessageEdit(id: string, messageId: string) {
+    return this.exclusive(async () => {
+      this.assertIdle();
+      const conversation = await this.readConversation(id);
+      const message = conversation.messages.find(item => item.id === messageId && item.role === "user");
+      if (!message) throw Error("This user message is no longer available.");
+      const engine = await this.engine(id);
+      await engine.resetIngestedSource(id, messageId);
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.kind === "image") await engine.resetIngestedSource(id, `${messageId}:ocr:${attachment.id}`);
+      }
+    });
+  }
   async rollbackMessage(id: string, messageId: string) {
     return this.exclusive(async () => {
       this.assertIdle();

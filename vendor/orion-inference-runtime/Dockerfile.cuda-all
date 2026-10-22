@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+#
+# Thin CUDA runtime image. The prebuilt CUDA package (the `mistralrs` binary plus its bundled
+# `lib/`) is staged into `dist/` by the release workflow and copied in - not compiled here.
+# BASE_TAG selects the CUDA runtime matching the binary's toolkit. Build via
+# .github/workflows/release.yml.
+
+ARG BASE_TAG=12.8.1-cudnn
+FROM nvidia/cuda:${BASE_TAG}-runtime-ubuntu22.04 AS runtime
+SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN <<HEREDOC
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        libomp-dev \
+        ca-certificates \
+        libssl-dev \
+        curl
+
+    rm -rf /var/lib/apt/lists/*
+HEREDOC
+
+# The binary carries rpath $ORIGIN/lib, so it finds its bundled CUDA libs beside it.
+# TARGETARCH (amd64/arm64) is set by buildx; the release workflow stages dist/<arch>/.
+ARG TARGETARCH
+COPY dist/${TARGETARCH}/ /opt/mistralrs/
+RUN ln -sf /opt/mistralrs/mistralrs /usr/local/bin/mistralrs
+# Chat templates for models that ship without one
+COPY chat_templates /chat_templates
+
+# hf-hub reads HF_HOME; mount a volume at /data to persist downloaded models
+ENV HF_HOME=/data
+
+# Default port of `mistralrs serve`
+EXPOSE 1234
+
+ENTRYPOINT ["mistralrs"]
+CMD ["--help"]

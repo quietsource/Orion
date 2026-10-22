@@ -13,9 +13,9 @@ export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }
 export type ToolMode = 'chat' | 'code';
-export interface Conversation { localOnly?: boolean; privateVoice?: boolean; id: string; title: string; model: string; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
+export interface Conversation { localOnly?: boolean; privateVoice?: boolean; id: string; title: string; model: string; engine?: InferenceEngine; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
 export type OrionTheme = 'graphite' | 'midnight' | 'ocean' | 'forest' | 'rose' | 'ember' | 'light' | 'paper';
-export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; }
+export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; selectedEngine: InferenceEngine; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; composerDreaming: boolean; idleConsolidationEnabled: boolean; idleConsolidationHours: number; idleConsolidationMinutes: number; idleConsolidationChargingOnly: boolean; idleOvernightReport: boolean; evolvingToolsEnabled: boolean; cameraPerceptionEnabled: boolean; creativeIterationEnabled: boolean; creativeIterationLimit: number; aiChangeHistoryEnabled: boolean; swarmEnabled: boolean; swarmIdleMinutes: number; }
 export interface WorkspaceChange { path: string; status: 'added'|'modified'|'deleted'; additions: number; deletions: number; diff: string; }
 export interface WorkspaceReview { conversationId: string; root: string; changes: WorkspaceChange[]; additions: number; deletions: number; }
 export interface GitCheckpoint { id: string; label: string; ref: string; createdAt: number; }
@@ -25,16 +25,22 @@ export interface UserQuestionRequest { id: string; conversationId: string; quest
 export type ScheduledJobStatus = 'scheduled'|'queued'|'running'|'completed'|'error';
 export interface ScheduledJob { id: string; name: string; cron: string; timezone: string; prompt: string; model: string; agent: boolean; createdBy: 'user'|'agent'; enabled: boolean; status: ScheduledJobStatus; nextRunAt: number|null; lastRunAt: number|null; lastOutput?: string; lastConversationId?: string; createdAt: number; updatedAt: number; }
 export type ModelCategory = 'conversational'|'image'|'video';
-export type ModelEngine = 'llama.cpp'|'exllamav2';
-export interface HubModel { id: string; author?: string; downloads?: number; likes?: number; pipelineTag?: string; description?: string; license?: string; engines?: ModelEngine[]; }
+export type InferenceEngine = 'orion'|'llama.cpp'|'ollama'|'provider';
+export type ModelEngine = 'orion'|'llama.cpp';
+export type ManagedModelFormat = 'gguf'|'gptq'|'awq';
+export interface HubModel { id: string; author?: string; downloads?: number; likes?: number; pipelineTag?: string; description?: string; license?: string; formats?: ManagedModelFormat[]; engines?: ModelEngine[]; }
 export interface HubSearchPage { models: HubModel[]; nextUrl: string | null; }
-export interface HubFile { name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string; revision?: string; bundle?: 'exl2'; relatedFiles?: Array<{ name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string }>; }
-export interface InstalledModel { id: string; repo: string; file: string; category: ModelCategory; path: string; files?: string[]; fileSha256?: Record<string,string>; bundleVersion?: number; size: number; downloadedAt: number; source?: string; invokeKey?: string; engine?: ModelEngine; revision?: string; }
+export interface HubFile { name: string; size: number; sha256?: string; format?: ManagedModelFormat; downloadRepo?: string; downloadName?: string; revision?: string; relatedFiles?: Array<{ name: string; size: number; sha256?: string; downloadRepo?: string; downloadName?: string }>; }
+export interface InstalledModel { id: string; repo: string; file: string; category: ModelCategory; path: string; files?: string[]; fileSha256?: Record<string,string>; bundleVersion?: number; size: number; downloadedAt: number; source?: string; invokeKey?: string; engine?: ModelEngine; format?: ManagedModelFormat; revision?: string; }
 export interface DownloadProgress { id: string; repo: string; file: string; received: number; total: number; phase: 'downloading'|'complete'|'cancelled'|'error'; error?: string; }
 export interface BackendState { installed: boolean; running: boolean; firstEntrySeen: boolean; phase: string; detail: string; gpu: string; port?: number; }
 export interface CreateProgress { id: string; phase: string; detail: string; percent?: number; imagePath?: string; mediaType?: 'image'|'video'; error?: string; download?: { repo: string; file: string; received: number; total: number; phase: DownloadProgress['phase'] }; }
 export interface GeneratedMedia { id: string; prompt: string; modelId: string; path: string; mediaType: 'image'|'video'; createdAt: number; }
 export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'installing'|'error'; version?: string; notes?: string; received?: number; total?: number; detail?: string; }
+export interface MemoryCarePreview { expired: number; superseded: number; total: number; activeMemories: number; databaseBytes: number; }
+export interface MemoryCareReport { ranAt: number; expiredRemoved: number; supersededRemoved: number; indexedConversations: number; snapshotAvailable: boolean; }
+export interface EvolvedToolSummary { id: string; name: string; description: string; enabled: boolean; createdAt: number; useCount: number; }
+export type { SwarmCreateInput, SwarmLogEntry, SwarmRecord, SwarmSteerInput, SwarmStatus } from './swarm';
 export interface EngineInstallProgress { id: string; engine: 'ollama'; phase: 'downloading'|'launched'|'complete'|'error'; received?: number; total?: number; detail: string; }
 export interface OrionAPI {
   voice: import('./voice').VoiceAPI;
@@ -52,8 +58,29 @@ export interface OrionAPI {
   saveConversation(conversation: Conversation, indexMemory?: boolean): Promise<void>; memoryStats(conversationId?: string): Promise<{ indexedTokens: number; limitTokens: number; chunks: number; embeddedChunks: number; embeddingModel: string|null; semantic: boolean; recoveryWarning: string|null; rebuilding: boolean; engine?: 'orion'|'ofs'; activeMemories?: number; workingTurns?: number; links?: number; databaseBytes?: number }>; rebuildMemory(): Promise<void>; deleteConversation(id: string): Promise<void>;
   settings(): Promise<AppSettings>; saveSettings(settings: AppSettings): Promise<void>; getSystemPrompt(model?: string, mode?: ToolMode): Promise<string>;
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
-  streamChat(input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
+  streamChat(input: { conversationId: string; model: string; engine?: InferenceEngine; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
   cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string;sourceName?:string;sourcePart?:number;sourcePage?:number;reason?:string;score?:number}>; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
+  prepareDraft(conversationId: string, model: string, engine: InferenceEngine, draft: string): Promise<{ ready: boolean; memories: number }>;
+  cancelDraftPreparation(conversationId: string): Promise<void>;
+  reportActivity(): Promise<void>;
+  previewMemoryCare(): Promise<MemoryCarePreview>;
+  runMemoryCare(): Promise<MemoryCareReport>;
+  undoMemoryCare(): Promise<boolean>;
+  onMemoryCareReport(callback: (report: MemoryCareReport) => void): () => void;
+  listEvolvedTools(): Promise<EvolvedToolSummary[]>;
+  setEvolvedToolEnabled(id: string, enabled: boolean): Promise<void>;
+  listSwarms(): Promise<import('./swarm').SwarmRecord[]>;
+  createSwarm(input: import('./swarm').SwarmCreateInput): Promise<import('./swarm').SwarmRecord>;
+  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string }): Promise<void>;
+  startSwarm(id: string): Promise<void>;
+  pauseSwarm(id: string): Promise<void>;
+  resumeSwarm(id: string): Promise<void>;
+  killSwarm(id: string): Promise<void>;
+  deleteSwarm(id: string): Promise<void>;
+  steerSwarm(id: string, steer: import('./swarm').SwarmSteerInput): Promise<void>;
+  openSwarmFolder(id: string): Promise<void>;
+  getSwarmVeloHistory(id: string): Promise<string>;
+  onSwarmUpdate(callback: (swarm: import('./swarm').SwarmRecord) => void): () => void;
   installMemoryEmbedding(): Promise<void>;
   onMemoryProgress(callback: (progress: { completed: number; total: number; status?: string; error?: string }) => void): () => void;
   searchWeb(query: string): Promise<{ title: string; url: string; snippet: string }[]>;
@@ -83,10 +110,10 @@ export interface OrionAPI {
   downloadHubModel(repo: string, file: string, category: ModelCategory): Promise<InstalledModel>; cancelModelDownload(id: string): Promise<void>; listInstalledModels(): Promise<InstalledModel[]>;
   deleteInstalledModel(id: string): Promise<void>; deleteOllamaModel(name: string): Promise<void>; onDownloadProgress(callback: (progress: DownloadProgress) => void): () => void;
   enterCreate(): Promise<{ state: BackendState; showInstallPrompt: boolean }>; getCreateEngineState(): Promise<BackendState>; installCreateEngine(): Promise<BackendState>;
-  installOllama(): Promise<{ launched: boolean; detail: string }>; updateRepairEngine(engine: 'llama'|'exllama'|'diffusion'|'ollama'): Promise<string>; uninstallEngine(engine: 'llama'|'exllama'|'diffusion'|'ollama'): Promise<string>; onEngineInstallProgress(callback: (progress: EngineInstallProgress) => void): () => void;
+  installOllama(): Promise<{ launched: boolean; detail: string }>; updateRepairEngine(engine: 'orion'|'llama'|'diffusion'|'ollama'): Promise<string>; uninstallEngine(engine: 'orion'|'llama'|'diffusion'|'ollama'): Promise<string>; onEngineInstallProgress(callback: (progress: EngineInstallProgress) => void): () => void;
   shouldShowLlamaIntro(): Promise<boolean>; dismissLlamaIntro(): Promise<void>; installLlama(): Promise<void>;
   llamaStatus(): Promise<boolean>;
-  exl2Status(): Promise<boolean>; installExl2(): Promise<void>;
+  orionEngineStatus(): Promise<boolean>;
   checkModelCompatibility(id: string): Promise<ModelCompatibilityReport>;
   listGeneratedMedia(): Promise<GeneratedMedia[]>;
   openGeneratedFolder(): Promise<void>;

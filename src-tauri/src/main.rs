@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, LogicalPosition, LogicalSize,
-  menu::{Menu, MenuItem, PredefinedMenuItem}, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
+  menu::{Menu, MenuItem, PredefinedMenuItem, Submenu}, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
   webview::{WebviewBuilder, NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse}};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin, Command}, sync::{Mutex as AsyncMutex, oneshot}};
 
@@ -231,10 +231,32 @@ async fn native_operation(app: AppHandle, method: String, args: Value) -> Result
         let menu = Menu::with_items(&app, &[&show, &separator, &quit]).map_err(|error| error.to_string())?;
         let icon = app.default_window_icon().ok_or("Orion tray icon unavailable")?.clone();
         TrayIconBuilder::with_id("orion").icon(icon).tooltip("Orion · local AI").menu(&menu).show_menu_on_left_click(false)
-          .on_menu_event(|app, event| host_event(app, json!({"type":"host-event","event":if event.id.as_ref()=="quit" {"tray-quit"} else {"tray-show"}})))
+          .on_menu_event(|app, event| host_event(app, json!({"type":"host-event","event":match event.id.as_ref(){"quit"=>"tray-quit","swarm-pause"=>"tray-swarm-pause",_=>"tray-show"}})))
           .on_tray_icon_event(|tray, event| { if matches!(event, TrayIconEvent::Click {button:MouseButton::Left,button_state:MouseButtonState::Up,..}) {host_event(tray.app_handle(),json!({"type":"host-event","event":"tray-show"}));} })
           .build(&app).map_err(|error| error.to_string())?;
       } Ok(json!(true))
+    }
+    "tray-swarm-state" => {
+      if let Some(tray) = app.tray_by_id("orion") {
+        let running=args["running"].as_bool().unwrap_or(false);
+        let show=MenuItem::with_id(&app,"show","Show Orion",true,None::<&str>).map_err(|error|error.to_string())?;
+        let quit=MenuItem::with_id(&app,"quit","Quit Orion",true,None::<&str>).map_err(|error|error.to_string())?;
+        let separator=PredefinedMenuItem::separator(&app).map_err(|error|error.to_string())?;
+        let menu=if running {
+          let name=args["name"].as_str().unwrap_or("Private swarm");
+          let iteration=args["iteration"].as_u64().unwrap_or(0);
+          let idle=args["idleMinutes"].as_u64().unwrap_or(10);
+          let status=MenuItem::with_id(&app,"swarm-status",format!("Running · {name}"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let progress=MenuItem::with_id(&app,"swarm-iteration",format!("Iteration {iteration}"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let schedule=MenuItem::with_id(&app,"swarm-idle",format!("Runs after {idle} min idle"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let pause=MenuItem::with_id(&app,"swarm-pause","Pause now",true,None::<&str>).map_err(|error|error.to_string())?;
+          let swarm=Submenu::with_items(&app,"Pause Swarm",true,&[&status,&progress,&schedule,&pause]).map_err(|error|error.to_string())?;
+          let second_separator=PredefinedMenuItem::separator(&app).map_err(|error|error.to_string())?;
+          Menu::with_items(&app,&[&show,&separator,&swarm,&second_separator,&quit]).map_err(|error|error.to_string())?
+        }else{Menu::with_items(&app,&[&show,&separator,&quit]).map_err(|error|error.to_string())?};
+        tray.set_menu(Some(menu)).map_err(|error|error.to_string())?;
+      }
+      Ok(Value::Null)
     }
     "tray-disable" => { app.remove_tray_by_id("orion"); Ok(Value::Null) }
     "relaunch" => {
@@ -257,6 +279,7 @@ fn contains_backend_resources(path: &PathBuf) -> bool {
   path.join("dist/main/ofsWorker.js").is_file()
     && has_native_binding
     && path.join("build/velo").is_dir()
+    && path.join("build/inference-runtime").join(if cfg!(windows) { "orion-inference.exe" } else { "orion-inference" }).is_file()
 }
 
 async fn start_backend(app: AppHandle) -> Result<(), String> {

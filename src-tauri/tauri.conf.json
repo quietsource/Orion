@@ -53,7 +53,8 @@
       "../dist/ocr/": "dist/ocr/",
       "../dist/native-canvas/": "dist/native-canvas/",
       "../build/icons/": "build/icons/",
-      "../build/velo/": "build/velo/"
+      "../build/velo/": "build/velo/",
+      "../build/inference-runtime/": "build/inference-runtime/"
     },
     "windows": {
       "nsis": {

@@ -1,0 +1,563 @@
+use std::path::PathBuf;
+
+use either::Either;
+use mistralrs_core::{
+    DiffusionLoaderType, EmbeddingLoaderType, ModelDType, MultimodalLoaderType, NormalLoaderType,
+    DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK,
+};
+use pyo3::{pyclass, pymethods};
+
+#[pyclass(get_all)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoraAdapter {
+    pub alias: String,
+    pub source: String,
+    pub revision: Option<String>,
+}
+
+#[pymethods]
+impl LoraAdapter {
+    #[new]
+    #[pyo3(signature = (alias, source, revision=None))]
+    fn new(alias: String, source: String, revision: Option<String>) -> Self {
+        Self {
+            alias,
+            source,
+            revision,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Architecture {
+    Mistral,
+    Gemma,
+    Mixtral,
+    Llama,
+    Phi2,
+    Phi3,
+    Qwen2,
+    Gemma2,
+    Starcoder2,
+    Phi3_5MoE,
+    DeepseekV2,
+    DeepseekV3,
+    Qwen3,
+    GLM4,
+    GLM4MoeLite,
+    GLM4Moe,
+    Qwen3Moe,
+    SmolLm3,
+    GraniteMoeHybrid,
+    GptOss,
+    HunYuanDenseV1,
+    HunYuanMoEV1,
+    Qwen3Next,
+    Lfm2,
+    Lfm2Moe,
+}
+
+impl From<Architecture> for NormalLoaderType {
+    fn from(value: Architecture) -> Self {
+        match value {
+            Architecture::Gemma => Self::Gemma,
+            Architecture::Llama => Self::Llama,
+            Architecture::Mistral => Self::Mistral,
+            Architecture::Mixtral => Self::Mixtral,
+            Architecture::Phi2 => Self::Phi2,
+            Architecture::Phi3 => Self::Phi3,
+            Architecture::Qwen2 => Self::Qwen2,
+            Architecture::Gemma2 => Self::Gemma2,
+            Architecture::Starcoder2 => Self::Starcoder2,
+            Architecture::Phi3_5MoE => Self::Phi3_5MoE,
+            Architecture::DeepseekV2 => Self::DeepSeekV2,
+            Architecture::DeepseekV3 => Self::DeepSeekV3,
+            Architecture::Qwen3 => Self::Qwen3,
+            Architecture::GLM4 => Self::GLM4,
+            Architecture::GLM4MoeLite => Self::GLM4MoeLite,
+            Architecture::GLM4Moe => Self::GLM4Moe,
+            Architecture::Qwen3Moe => Self::Qwen3Moe,
+            Architecture::SmolLm3 => Self::SmolLm3,
+            Architecture::GraniteMoeHybrid => Self::GraniteMoeHybrid,
+            Architecture::GptOss => Self::GptOss,
+            Architecture::HunYuanDenseV1 => Self::HunYuanDenseV1,
+            Architecture::HunYuanMoEV1 => Self::HunYuanMoEV1,
+            Architecture::Qwen3Next => Self::Qwen3Next,
+            Architecture::Lfm2 => Self::Lfm2,
+            Architecture::Lfm2Moe => Self::Lfm2Moe,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum EmbeddingArchitecture {
+    EmbeddingGemma,
+    Qwen3Embedding,
+}
+
+impl From<EmbeddingArchitecture> for EmbeddingLoaderType {
+    fn from(value: EmbeddingArchitecture) -> Self {
+        match value {
+            EmbeddingArchitecture::EmbeddingGemma => EmbeddingLoaderType::EmbeddingGemma,
+            EmbeddingArchitecture::Qwen3Embedding => EmbeddingLoaderType::Qwen3Embedding,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultimodalArchitecture {
+    Phi3V,
+    Idefics2,
+    LLaVANext,
+    LLaVA,
+    Lfm2Vl,
+    VLlama,
+    Qwen2VL,
+    Idefics3,
+    MiniCpmO,
+    Phi4MM,
+    Qwen2_5VL,
+    Gemma3,
+    Mistral3,
+    Llama4,
+    Gemma3n,
+    Qwen3VL,
+    Qwen3VLMoE,
+    Qwen3_5,
+    Qwen3_5Moe,
+    Qwen4Exp,
+    Voxtral,
+    Gemma4,
+    MuseGlimmer,
+    DiffusionGemma,
+}
+
+impl From<MultimodalArchitecture> for MultimodalLoaderType {
+    fn from(value: MultimodalArchitecture) -> Self {
+        match value {
+            MultimodalArchitecture::Phi3V => MultimodalLoaderType::Phi3V,
+            MultimodalArchitecture::Idefics2 => MultimodalLoaderType::Idefics2,
+            MultimodalArchitecture::LLaVANext => MultimodalLoaderType::LLaVANext,
+            MultimodalArchitecture::LLaVA => MultimodalLoaderType::LLaVA,
+            MultimodalArchitecture::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
+            MultimodalArchitecture::VLlama => MultimodalLoaderType::VLlama,
+            MultimodalArchitecture::Qwen2VL => MultimodalLoaderType::Qwen2VL,
+            MultimodalArchitecture::Idefics3 => MultimodalLoaderType::Idefics3,
+            MultimodalArchitecture::MiniCpmO => MultimodalLoaderType::MiniCpmO,
+            MultimodalArchitecture::Phi4MM => MultimodalLoaderType::Phi4MM,
+            MultimodalArchitecture::Qwen2_5VL => MultimodalLoaderType::Qwen2_5VL,
+            MultimodalArchitecture::Gemma3 => MultimodalLoaderType::Gemma3,
+            MultimodalArchitecture::Mistral3 => MultimodalLoaderType::Mistral3,
+            MultimodalArchitecture::Llama4 => MultimodalLoaderType::Llama4,
+            MultimodalArchitecture::Gemma3n => MultimodalLoaderType::Gemma3n,
+            MultimodalArchitecture::Qwen3VL => MultimodalLoaderType::Qwen3VL,
+            MultimodalArchitecture::Qwen3VLMoE => MultimodalLoaderType::Qwen3VLMoE,
+            MultimodalArchitecture::Qwen3_5 => MultimodalLoaderType::Qwen3_5,
+            MultimodalArchitecture::Qwen3_5Moe => MultimodalLoaderType::Qwen3_5Moe,
+            MultimodalArchitecture::Qwen4Exp => MultimodalLoaderType::Qwen4Exp,
+            MultimodalArchitecture::Voxtral => MultimodalLoaderType::Voxtral,
+            MultimodalArchitecture::Gemma4 => MultimodalLoaderType::Gemma4,
+            MultimodalArchitecture::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
+            MultimodalArchitecture::DiffusionGemma => MultimodalLoaderType::DiffusionGemma,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffusionArchitecture {
+    Flux,
+    FluxOffloaded,
+}
+
+impl From<DiffusionArchitecture> for DiffusionLoaderType {
+    fn from(value: DiffusionArchitecture) -> Self {
+        match value {
+            DiffusionArchitecture::Flux => DiffusionLoaderType::Flux,
+            DiffusionArchitecture::FluxOffloaded => DiffusionLoaderType::FluxOffloaded,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpeechLoaderType {
+    Dia,
+}
+
+impl From<SpeechLoaderType> for mistralrs_core::SpeechLoaderType {
+    fn from(value: SpeechLoaderType) -> Self {
+        match value {
+            SpeechLoaderType::Dia => mistralrs_core::SpeechLoaderType::Dia,
+        }
+    }
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum IsqOrganization {
+    Default,
+    MoQE,
+}
+
+impl From<IsqOrganization> for mistralrs_core::IsqOrganization {
+    fn from(value: IsqOrganization) -> Self {
+        match value {
+            IsqOrganization::Default => mistralrs_core::IsqOrganization::Default,
+            IsqOrganization::MoQE => mistralrs_core::IsqOrganization::MoeExpertsOnly,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub enum Which {
+    #[pyo3(constructor = (
+        model_id,
+        arch = None,
+        tokenizer_json = None,
+        topology = None,
+        organization = None,
+        write_uqff = None,
+        from_uqff = None,
+        dtype = ModelDType::Auto,
+        imatrix = None,
+        calibration_file = None,
+        hf_cache_path = None,
+        matformer_config_path = None,
+        matformer_slice_name = None,
+    ))]
+    Plain {
+        model_id: String,
+        arch: Option<Architecture>,
+        tokenizer_json: Option<String>,
+        topology: Option<String>,
+        organization: Option<IsqOrganization>,
+        write_uqff: Option<PathBuf>,
+        from_uqff: Option<Either<String, Vec<String>>>,
+        dtype: ModelDType,
+        imatrix: Option<PathBuf>,
+        calibration_file: Option<PathBuf>,
+        hf_cache_path: Option<PathBuf>,
+        matformer_config_path: Option<PathBuf>,
+        matformer_slice_name: Option<String>,
+    },
+
+    #[pyo3(constructor = (
+        model_id,
+        arch = None,
+        tokenizer_json = None,
+        topology = None,
+        write_uqff = None,
+        from_uqff = None,
+        dtype = ModelDType::Auto,
+        hf_cache_path = None,
+        imatrix = None,
+        calibration_file = None,
+    ))]
+    Embedding {
+        model_id: String,
+        arch: Option<EmbeddingArchitecture>,
+        tokenizer_json: Option<String>,
+        topology: Option<String>,
+        write_uqff: Option<PathBuf>,
+        from_uqff: Option<Either<String, Vec<String>>>,
+        dtype: ModelDType,
+        hf_cache_path: Option<PathBuf>,
+        imatrix: Option<PathBuf>,
+        calibration_file: Option<PathBuf>,
+    },
+
+    #[pyo3(constructor = (
+        xlora_model_id,
+        order,
+        arch = None,
+        model_id = None,
+        tokenizer_json = None,
+        tgt_non_granular_index = None,
+        topology = None,
+        write_uqff = None,
+        from_uqff = None,
+        dtype = ModelDType::Auto,
+        hf_cache_path = None,
+    ))]
+    XLora {
+        xlora_model_id: String,
+        order: String,
+        arch: Option<Architecture>,
+        model_id: Option<String>,
+        tokenizer_json: Option<String>,
+        tgt_non_granular_index: Option<usize>,
+        topology: Option<String>,
+        write_uqff: Option<PathBuf>,
+        from_uqff: Option<Either<String, Vec<String>>>,
+        dtype: ModelDType,
+        hf_cache_path: Option<PathBuf>,
+    },
+
+    #[pyo3(constructor = (
+        model_id,
+        adapters = None,
+        arch = None,
+        tokenizer_json = None,
+        topology = None,
+        write_uqff = None,
+        from_uqff = None,
+        dtype = ModelDType::Auto,
+        hf_cache_path = None,
+        max_adapters = DEFAULT_LORA_MAX_ADAPTERS,
+        max_rank = DEFAULT_LORA_MAX_RANK,
+        max_bytes = DEFAULT_LORA_MAX_BYTES,
+    ))]
+    Lora {
+        model_id: String,
+        adapters: Option<Vec<LoraAdapter>>,
+        arch: Option<Architecture>,
+        tokenizer_json: Option<String>,
+        topology: Option<String>,
+        write_uqff: Option<PathBuf>,
+        from_uqff: Option<Either<String, Vec<String>>>,
+        dtype: ModelDType,
+        hf_cache_path: Option<PathBuf>,
+        max_adapters: usize,
+        max_rank: usize,
+        max_bytes: u64,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        tok_model_id = None,
+        topology = None,
+        dtype = ModelDType::Auto,
+        *,
+        tokenizer_json = None,
+        mmproj_filename = None,
+        organization = None,
+        write_uqff = None,
+        imatrix = None,
+        calibration_file = None,
+        max_edge = None,
+        adapters = None,
+        max_adapters = DEFAULT_LORA_MAX_ADAPTERS,
+        max_rank = DEFAULT_LORA_MAX_RANK,
+        max_bytes = DEFAULT_LORA_MAX_BYTES,
+        hf_cache_path = None,
+        matformer_config_path = None,
+        matformer_slice_name = None,
+        encoder_cache_memory_bytes = None,
+    ))]
+    #[allow(clippy::upper_case_acronyms)]
+    GGUF {
+        quantized_model_id: String,
+        quantized_filename: Either<String, Vec<String>>,
+        tok_model_id: Option<String>,
+        topology: Option<String>,
+        dtype: ModelDType,
+        tokenizer_json: Option<String>,
+        mmproj_filename: Option<Either<String, Vec<String>>>,
+        organization: Option<IsqOrganization>,
+        write_uqff: Option<PathBuf>,
+        imatrix: Option<PathBuf>,
+        calibration_file: Option<PathBuf>,
+        max_edge: Option<u32>,
+        adapters: Option<Vec<LoraAdapter>>,
+        max_adapters: usize,
+        max_rank: usize,
+        max_bytes: u64,
+        hf_cache_path: Option<PathBuf>,
+        matformer_config_path: Option<PathBuf>,
+        matformer_slice_name: Option<String>,
+        encoder_cache_memory_bytes: Option<usize>,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        xlora_model_id,
+        order,
+        tok_model_id = None,
+        tgt_non_granular_index = None,
+        topology = None,
+        dtype = ModelDType::Auto,
+    ))]
+    XLoraGGUF {
+        quantized_model_id: String,
+        quantized_filename: Either<String, Vec<String>>,
+        xlora_model_id: String,
+        order: String,
+        tok_model_id: Option<String>,
+        tgt_non_granular_index: Option<usize>,
+        topology: Option<String>,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        adapters_model_id,
+        order,
+        tok_model_id = None,
+        topology = None,
+        dtype = ModelDType::Auto,
+    ))]
+    LoraGGUF {
+        quantized_model_id: String,
+        quantized_filename: Either<String, Vec<String>>,
+        adapters_model_id: String,
+        order: String,
+        tok_model_id: Option<String>,
+        topology: Option<String>,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        tok_model_id,
+        tokenizer_json = None,
+        gqa = 1,
+        topology = None,
+        dtype = ModelDType::Auto,
+    ))]
+    #[allow(clippy::upper_case_acronyms)]
+    GGML {
+        quantized_model_id: String,
+        quantized_filename: String,
+        tok_model_id: String,
+        tokenizer_json: Option<String>,
+        gqa: usize,
+        topology: Option<String>,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        xlora_model_id,
+        order,
+        tok_model_id = None,
+        tokenizer_json = None,
+        tgt_non_granular_index = None,
+        gqa = 1,
+        topology = None,
+        dtype = ModelDType::Auto,
+    ))]
+    XLoraGGML {
+        quantized_model_id: String,
+        quantized_filename: String,
+        xlora_model_id: String,
+        order: String,
+        tok_model_id: Option<String>,
+        tokenizer_json: Option<String>,
+        tgt_non_granular_index: Option<usize>,
+        gqa: usize,
+        topology: Option<String>,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        quantized_model_id,
+        quantized_filename,
+        adapters_model_id,
+        order,
+        tok_model_id = None,
+        tokenizer_json = None,
+        gqa = 1,
+        topology = None,
+        dtype = ModelDType::Auto,
+    ))]
+    LoraGGML {
+        quantized_model_id: String,
+        quantized_filename: String,
+        adapters_model_id: String,
+        order: String,
+        tok_model_id: Option<String>,
+        tokenizer_json: Option<String>,
+        gqa: usize,
+        topology: Option<String>,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        model_id,
+        arch = None,
+        tokenizer_json = None,
+        topology = None,
+        write_uqff = None,
+        from_uqff = None,
+        dtype = ModelDType::Auto,
+        max_edge = None,
+        calibration_file = None,
+        imatrix = None,
+        hf_cache_path = None,
+        matformer_config_path = None,
+        matformer_slice_name = None,
+        organization = None,
+        encoder_cache_memory_bytes = None,
+    ))]
+    MultimodalPlain {
+        model_id: String,
+        arch: Option<MultimodalArchitecture>,
+        tokenizer_json: Option<String>,
+        topology: Option<String>,
+        write_uqff: Option<PathBuf>,
+        from_uqff: Option<Either<String, Vec<String>>>,
+        dtype: ModelDType,
+        max_edge: Option<u32>,
+        calibration_file: Option<PathBuf>,
+        imatrix: Option<PathBuf>,
+        hf_cache_path: Option<PathBuf>,
+        matformer_config_path: Option<PathBuf>,
+        matformer_slice_name: Option<String>,
+        organization: Option<IsqOrganization>,
+        encoder_cache_memory_bytes: Option<usize>,
+    },
+
+    #[pyo3(constructor = (
+        model_id,
+        arch,
+        dtype = ModelDType::Auto,
+    ))]
+    DiffusionPlain {
+        model_id: String,
+        arch: DiffusionArchitecture,
+        dtype: ModelDType,
+    },
+
+    #[pyo3(constructor = (
+        model_id,
+        arch,
+        dac_model_id = None,
+        dtype = ModelDType::Auto,
+    ))]
+    Speech {
+        model_id: String,
+        arch: SpeechLoaderType,
+        dac_model_id: Option<String>,
+        dtype: ModelDType,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Which_GGUF;
+    use pyo3::impl_::pyclass::{PyClassImplCollector, PyClassNewTextSignature};
+
+    #[test]
+    fn gguf_constructor_preserves_legacy_positional_prefix() {
+        let signature = PyClassImplCollector::<Which_GGUF>::new()
+            .new_text_signature()
+            .unwrap();
+
+        assert!(signature.starts_with(
+            "(quantized_model_id, quantized_filename, tok_model_id=None, topology=None, dtype=..., *"
+        ));
+        assert!(signature.contains("tokenizer_json=None"));
+        assert!(signature.contains("mmproj_filename=None"));
+        assert!(signature.contains("encoder_cache_memory_bytes=None"));
+    }
+}

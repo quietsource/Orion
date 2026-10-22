@@ -14,7 +14,7 @@ import { createCanvas, DOMMatrix } from '@napi-rs/canvas';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState, EngineInstallProgress } from '../shared/types';
+import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState, EngineInstallProgress, InferenceEngine, MemoryCarePreview, MemoryCareReport } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
 import { VoiceManager } from './voice';
@@ -25,7 +25,7 @@ import { MEMORY_CONTEXT_FRACTION, planContextBudget, planRecentPromptBudget } fr
 import { isOrionHelpQuestion, searchOrionHelp } from './orionHelp';
 import { DiffusionManager } from './diffusion';
 import { LlamaManager, isModelCompatibilityError } from './llama';
-import { ExllamaManager } from './exllama';
+import { OrionInferenceRuntime } from './orionInferenceRuntime';
 import { OGS_PROMPT, validateOgsResponse, ogsCorrectionPrompt, validOgsGraphCount } from '../shared/ogs';
 import { buildModelPrompt, addModelTextToolProtocol, isReasoningModelName } from './modelPrompt';
 import { WorkspaceManager } from './workspace';
@@ -38,6 +38,9 @@ import { checkpointConversation as checkpointWithVelo, rollbackConversation as r
 import { downloadUpdateAsset, findLatestUpdate, isNewerVersion, type AppUpdate, type UpdateAsset } from './appUpdater';
 import { fetchWithLocalReconnect } from './localReconnect';
 import { openUpdatePackage } from './updateHandoff';
+import { SwarmManager } from './swarm';
+import type { SwarmRecord, SwarmSteerInput } from '../shared/swarm';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 // pdfjs-dist checks the DOM global before using its canvas renderer. The
 // native canvas package already provides the compatible implementation.
@@ -56,11 +59,25 @@ for (const stream of [process.stdout, process.stderr]) stream.on('error', error 
 let win: NativeWindow;
 const agentRunMemory = new AgentRunMemory();
 let voiceManager: VoiceManager | undefined;
-const VOICE_LOCAL_TOOLS=new Set(['record_assumption','ask_user_question','context_inspect','search_memory','canvas_open','search_orion_help']);
+const VOICE_LOCAL_TOOLS=new Set(['record_assumption','ask_user_question','context_inspect','search_memory','canvas_open','search_orion_help','propose_reusable_tool','run_reusable_tool']);
 function getVoiceManager(){return voiceManager??=new VoiceManager(path.join(dataDir(),'voice'),path.join(app.getAppPath(),'dist','main','voiceWorker.js'),value=>{if(win&&!win.isDestroyed())win.webContents.send('voice:progress',value);});}
 let ofsMemory: OFSClient | null = null;
 let memoryHistory: MemoryHistory | undefined;
 let chatPreparing = false;
+let lastUserActivityAt = Date.now();
+let memoryCareBusy = false;
+let swarmManager: SwarmManager | null = null;
+let memoryCareTimer: ReturnType<typeof setInterval> | undefined;
+let memoryCareLastRunAt = 0;
+const memoryCareDir = () => path.join(dataDir(), 'memory-care');
+const memoryCareLatestFile = () => path.join(memoryCareDir(), 'latest.json');
+const memoryCareReportFile = () => path.join(memoryCareDir(), 'report.json');
+function veloBinaryPath(){return path.join(app.getAppPath(),'build','velo',process.platform==='win32'?'velo.exe':`velo-${process.platform}-${process.arch}`);}
+async function runManagedVelo(args:string[],cwd:string){const binary=veloBinaryPath();await fs.access(binary);const child=Bun.spawn([binary,...args],{cwd,stdout:'pipe',stderr:'pipe',windowsHide:true});const[stdout,stderr,status]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);const output=`${stdout}\n${stderr}`.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g,'').trim();if(status!==0)throw Error(output.slice(-1500)||`Velo ${args[0]} failed.`);return output;}
+const draftDreamCache = new Map<string, { preparedAt: number; conversationId: string; model: string; engine: InferenceEngine; query: string; memories: MemoryChunk[] }>();
+function draftDreamKey(conversationId: string, model: string, engine: InferenceEngine, query: string) {
+  return createHash('sha256').update(`${conversationId}\0${model}\0${engine}\0${query.trim().slice(0, 6000)}`).digest('hex');
+}
 function getMemoryHistory() {
   return memoryHistory ??= new MemoryHistory({
     directory: path.join(dataDir(), 'memory-history'),
@@ -95,7 +112,7 @@ function getMemoryHistory() {
 const ofsDeletedConversations = new Set<string>();
 let diffusionManager: DiffusionManager;
 let llamaManager: LlamaManager;
-let exllamaManager: ExllamaManager;
+let orionInferenceRuntime: OrionInferenceRuntime;
 let modelCompatibilityBusy = false;
 let workspaceManager: WorkspaceManager;
 let orionBrowser: NativeWindow | null = null;
@@ -117,7 +134,105 @@ const creationsIndexFile = () => path.join(creationsDir(), 'index.json');
 const attachmentsDir = () => path.join(dataDir(), 'attachments');
 const chatTokenCalibrationFile = () => path.join(dataDir(), 'chat-token-calibration.json');
 const huggingFaceTokenFile = () => path.join(dataDir(), 'huggingface-token');
-const defaults: AppSettings = { autoCollapseThinking:true, ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2 };
+const evolvedToolsFile = () => path.join(dataDir(), 'evolved-tools.json');
+type EvolvedToolStep = { op: 'split_lines'; input: string; output: string } | { op: 'split'; field: string; delimiter: string; output: string } | { op: 'trim'|'drop_prefix'; field: string; value?: string } | { op: 'parse_key_value'; input: string; output: string; separator: string } | { op: 'extract_between'; input: string; output: string; start: string; end: string } | { op: 'rename'; from: string; to: string } | { op: 'filter_contains'; field: string; value: string } | { op: 'join'; field: string; delimiter: string; output: string };
+type EvolvedTool = { id: string; name: string; description: string; steps: EvolvedToolStep[]; tests: Array<{ input: Record<string, unknown>; expected: Record<string, unknown> }>; enabled: boolean; createdAt: number; useCount: number };
+async function readEvolvedTools(): Promise<EvolvedTool[]> {
+  try { const value: unknown = JSON.parse(await readEncryptedText(evolvedToolsFile())); return Array.isArray(value) ? value.filter((item): item is EvolvedTool => Boolean(item && typeof item === 'object' && typeof (item as EvolvedTool).id === 'string' && typeof (item as EvolvedTool).name === 'string' && Array.isArray((item as EvolvedTool).steps))) : []; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+}
+async function writeEvolvedTools(items: EvolvedTool[]) { await serializeMutation('evolved-tools', () => writeEncryptedText(evolvedToolsFile(), JSON.stringify(items))); }
+function runEvolvedSteps(steps: EvolvedToolStep[], input: Record<string, unknown>) {
+  const value: Record<string, unknown> = structuredClone(input);
+  const safeField=(name:string)=>{if(!/^[a-zA-Z][\w.-]{0,63}$/.test(name)||['__proto__','constructor','prototype'].includes(name))throw Error('The tool contains an invalid field name.');return name;};
+  const field = (name: string) => value[safeField(name)];
+  for (const step of steps) {
+    if (step.op === 'split_lines') { const source=field(step.input);if(typeof source!=='string')throw Error('split_lines requires a text field.');value[safeField(step.output)]=source.split(/\r?\n/).slice(0,20000); }
+    else if (step.op === 'split') { const source=field(step.field);if(typeof source!=='string'||!step.delimiter||step.delimiter.length>64)throw Error('split requires text and a delimiter of 1–64 characters.');value[safeField(step.output)]=source.split(step.delimiter).slice(0,2000); }
+    else if (step.op === 'trim') { const source=field(step.field);if(typeof source!=='string')throw Error('trim requires a text field.');value[step.field]=source.trim(); }
+    else if (step.op === 'drop_prefix') { const source=field(step.field);if(typeof source!=='string'||typeof step.value!=='string')throw Error('drop_prefix requires a text field and prefix.');value[step.field]=source.startsWith(step.value)?source.slice(step.value.length):source; }
+    else if (step.op === 'parse_key_value') { const source=field(step.input);if(typeof source!=='string'||!step.separator||step.separator.length>16)throw Error('parse_key_value requires text and a separator.');const result:Record<string,string>={};for(const line of source.split(/\r?\n/).slice(0,2000)){const at=line.indexOf(step.separator);if(at>0){const key=line.slice(0,at).trim().slice(0,128);if(/^[a-zA-Z][\w.-]{0,63}$/.test(key)&&!['__proto__','constructor','prototype'].includes(key))result[key]=line.slice(at+step.separator.length).trim().slice(0,4000);}}value[safeField(step.output)]=result; }
+    else if (step.op === 'extract_between') { const source=field(step.input);if(typeof source!=='string'||!step.start||!step.end)throw Error('extract_between requires text and nonempty start/end markers.');const a=source.indexOf(step.start);const b=a<0?-1:source.indexOf(step.end,a+step.start.length);value[safeField(step.output)]=a<0||b<0?'':source.slice(a+step.start.length,b); }
+    else if (step.op === 'rename') { const source=field(step.from),to=safeField(step.to);value[to]=source;delete value[step.from]; }
+    else if (step.op === 'filter_contains') { const source=field(step.field);if(!Array.isArray(source)||typeof step.value!=='string')throw Error('filter_contains requires an array field and text value.');value[safeField(step.field)]=source.filter(item=>String(item).includes(step.value)).slice(0,2000); }
+    else if (step.op === 'join') { const source=field(step.field);if(!Array.isArray(source)||step.delimiter.length>64)throw Error('join requires an array and a delimiter.');value[safeField(step.output)]=source.map(item=>String(item)).join(step.delimiter).slice(0,200000); }
+    else throw Error('This Orion tool operation is not supported.');
+  }
+  return value;
+}
+function validateEvolvedTool(raw: Record<string, unknown>): Omit<EvolvedTool,'id'|'enabled'|'createdAt'|'useCount'> {
+  const name=String(raw.name??'').trim().toLowerCase(),description=String(raw.description??'').trim().slice(0,500);
+  if(!/^[a-z][a-z0-9_]{1,31}$/.test(name)||!description||['search_web','canvas_open','create_image','create_video','ask_user_question'].includes(name))throw Error('Use a unique snake_case tool name and a clear description.');
+  if(!Array.isArray(raw.steps)||!raw.steps.length||raw.steps.length>16)throw Error('A reusable tool needs 1–16 supported transformation steps.');
+  const allowed=new Set(['split_lines','split','trim','drop_prefix','parse_key_value','extract_between','rename','filter_contains','join']);
+  const steps=raw.steps.map((step:unknown)=>{if(!step||typeof step!=='object'||!allowed.has(String((step as Record<string,unknown>).op)))throw Error('Tool proposals can use only the listed safe text and data transformations.');return step as EvolvedToolStep;});
+  if(!Array.isArray(raw.tests)||raw.tests.length<1||raw.tests.length>8)throw Error('Include 1–8 sample tests so Orion can verify the tool before installation.');
+  const tests=raw.tests.map((item:unknown)=>{if(!item||typeof item!=='object')throw Error('Each tool test needs input and expected output objects.');const value=item as Record<string,unknown>;if(!value.input||typeof value.input!=='object'||Array.isArray(value.input)||!value.expected||typeof value.expected!=='object'||Array.isArray(value.expected))throw Error('Each tool test needs input and expected output objects.');return{input:value.input as Record<string,unknown>,expected:value.expected as Record<string,unknown>};});
+  for(const test of tests){const actual=runEvolvedSteps(steps,test.input);if(JSON.stringify(actual)!==JSON.stringify(test.expected))throw Error(`Tool test failed for input ${JSON.stringify(test.input).slice(0,300)}. Expected output did not match.`);}
+  return{name,description,steps,tests};
+}
+async function installEvolvedTool(raw: Record<string,unknown>) {
+  if(!(await getSettings()).evolvingToolsEnabled)throw Error('Enable the local Tool Workshop in Settings before proposing reusable tools.');
+  const spec=validateEvolvedTool(raw),tools=await readEvolvedTools();
+  if(tools.length>=50)throw Error('Orion stores up to 50 reusable local tools. Disable or remove an older tool first.');
+  if(tools.some(tool=>tool.name===spec.name))throw Error(`A reusable tool named ${spec.name} already exists. Choose a different name.`);
+  const tool:EvolvedTool={...spec,id:randomUUID(),enabled:true,createdAt:Date.now(),useCount:0};
+  await writeEvolvedTools([...tools,tool]);return tool;
+}
+async function executeEvolvedTool(name:string, input:Record<string,unknown>) {
+  if(!(await getSettings()).evolvingToolsEnabled)return{output:'The local Tool Workshop is disabled in Settings.',success:false};
+  const tools=await readEvolvedTools(),tool=tools.find(item=>item.name===name&&item.enabled);
+  if(!tool)return{output:`Reusable tool “${name}” is unavailable or disabled.`,success:false};
+  if(Buffer.byteLength(JSON.stringify(input),'utf8')>200_000)return{output:'Reusable tool input is limited to 200 KB.',success:false};
+  const result=runEvolvedSteps(tool.steps,input);
+  tool.useCount++;await writeEvolvedTools(tools);
+  return{output:JSON.stringify(result,null,2).slice(0,12000),success:true};
+}
+
+async function swarmInferenceEndpoint(settings:AppSettings){
+  if(settings.selectedEngine==='provider'||settings.selectedModel.startsWith('api:'))throw Error('Swarm work is local-only. Select a local Ollama or Orion-managed model in the composer.');
+  const installed=(await readInstalledModels()).find(item=>item.category==='conversational'&&(`orion-gguf:${item.id}`===settings.selectedModel||item.id===settings.selectedModel||item.repo===settings.selectedModel));
+  if(installed){const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The selected swarm model path is invalid.');const engine=settings.selectedEngine==='llama.cpp'&&(installed.format??'gguf')==='gguf'?'llama.cpp':'orion';if(engine==='llama.cpp'&&!await llamaManager.isInstalled())throw Error('Install llama.cpp from Settings → Engines before running this swarm.');if(engine==='orion'&&!await orionInferenceRuntime.isInstalled())throw Error('Orion Inference is not available for the selected swarm model.');const base=engine==='orion'?await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf'):await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));return{url:`${base}/v1/chat/completions`,model:'orion-local'};}
+  if(settings.selectedEngine!=='ollama')throw Error('Choose a downloaded Orion model or a local Ollama model before starting the swarm.');
+  if(!settings.selectedModel)throw Error('Select a local Ollama model before starting the swarm.');
+  return{url:`${settings.ollamaUrl}/v1/chat/completions`,model:settings.selectedModel};
+}
+async function swarmModelTurn(settings:AppSettings,system:string,user:string,signal:AbortSignal){
+  const endpoint=await swarmInferenceEndpoint(settings),response=await fetch(endpoint.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:endpoint.model,messages:[{role:'system',content:system},{role:'user',content:user}],temperature:.2,max_tokens:1000,stream:false}),signal:AbortSignal.any([signal,AbortSignal.timeout(8*60_000)])});
+  if(!response.ok)throw Error(`Local swarm inference failed (${response.status}): ${(await response.text()).slice(0,600)}`);
+  const payload=await response.json() as {choices?:Array<{message?:{content?:unknown}}>} ,content=payload.choices?.[0]?.message?.content;
+  if(typeof content!=='string'||!content.trim())throw Error('The local model returned no swarm response.');
+  return content.trim();
+}
+function parseSwarmJson<T>(text:string):T{const clean=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const start=clean.indexOf('{'),end=clean.lastIndexOf('}');if(start<0||end<=start)throw Error('The swarm model did not return the required JSON action.');return JSON.parse(clean.slice(start,end+1)) as T;}
+async function runSwarmCycle(swarm:SwarmRecord,signal:AbortSignal){
+  if(!swarmManager)throw Error('The isolated Orion Swarm service is unavailable.');
+  const settings=await getSettings(),active=swarm.steers.filter(item=>item.status==='active').sort((a,b)=>b.importance-a.importance).slice(0,6),focus=active[0]??{text:swarm.objective,completionRules:swarm.completionRules,importance:5};
+  const recalled=await swarmManager.recall(swarm.id,`${swarm.objective}\n${active.map(item=>item.text).join('\n')}`,2200),files=await swarmManager.listFiles(swarm.id),snippets:string[]=[];
+  for(const file of files.slice(-6)){if(signal.aborted)throw Error('Swarm model turn cancelled.');try{snippets.push(`--- ${file} ---\n${(await swarmManager.readFile(swarm.id,file)).slice(0,1600)}`);}catch{}}
+  const memoryText=recalled.slice(0,8).map(item=>`- ${item.content}`).join('\n'),state=`Goal: ${swarm.objective}\nCompletion rules: ${swarm.completionRules}\nHighest active steer (${focus.importance}/5): ${focus.text}\nSteer completion rules: ${focus.completionRules}\nIteration: ${swarm.iteration}\nFiles: ${files.join(', ')||'(empty)'}\nOFS context:\n${memoryText||'(no recalled memory yet)'}\nWorkspace excerpts:\n${snippets.join('\n')||'(empty)'}`;
+  const base='You are one role in a private Orion swarm. You can only use the exact files and OFS excerpts supplied here. You have no web, shell, operating-system, or outside-folder access. Never claim to have verified anything you did not inspect. Follow the initial goal and completion rules; the initial goal is maximum priority. Higher-importance steers take precedence over lower ones. Return only one valid JSON object, no markdown.';
+  const planRaw=await swarmModelTurn(settings,`${base}\nRole: Planner. Decide one small, useful next action that advances the goal without repeating completed work.`,`${state}\nReturn {"summary":"...","action":"research|write|review|complete","target":"..."}.`,signal),plan=parseSwarmJson<{summary?:string;action?:string;target?:string}>(planRaw);
+  if(signal.aborted)return;
+  await swarmManager.appendLog(swarm.id,'planner',String(plan.summary??'Planned the next bounded step.'),String(plan.target??''));
+  if(signal.aborted)return;
+  const workerRole=plan.action==='research'?'researcher':'builder';
+  const workRaw=await swarmModelTurn(settings,`${base}\nRole: ${workerRole==='researcher'?'Researcher':'Builder'}. Use only provided local context. Research means inspect the existing OFS/workspace excerpts and record grounded findings; do not invent sources. If useful, return one safe file operation.`,`${state}\nPlanner direction: ${String(plan.target??plan.summary??'Advance the goal').slice(0,1200)}\nReturn {"summary":"...","action":{"type":"none|write_file|move_file|remember","path":"relative path","content":"complete file content","from":"relative source","to":"relative destination","memory":"grounded note"}}. For write_file provide complete, useful content, not a stub or placeholders.`,signal),work=parseSwarmJson<{summary?:string;action?:{type?:string;path?:string;content?:string;from?:string;to?:string;memory?:string}}>(workRaw),action=work.action??{type:'none'};
+  if(signal.aborted)return;
+  let outcome='No file change was required.';
+  if(action.type==='write_file'){await swarmManager.writeFile(swarm.id,String(action.path??''),String(action.content??''));outcome=`Wrote ${action.path}.`}
+  else if(action.type==='move_file'){await swarmManager.moveFile(swarm.id,String(action.from??''),String(action.to??''));outcome=`Moved ${action.from} to ${action.to}.`}
+  else if(action.type==='remember'){const memory=String(action.memory??'').trim();if(memory)await swarmManager.remember(swarm.id,'assistant',memory);outcome='Added a grounded note to the swarm’s OrionFS.'}
+  else if(action.type!=='none')throw Error(`Rejected unsupported swarm action: ${action.type}`);
+  await swarmManager.appendLog(swarm.id,workerRole,String(work.summary??'Completed the assigned step.'),outcome,false,action.type);
+  if(signal.aborted)return;
+  const currentFiles=await swarmManager.listFiles(swarm.id),reviewRaw=await swarmModelTurn(settings,`${base}\nRole: Reviewer. Check the actual supplied goal, completion rules, files, and evidence. Report gaps and risks. Set complete=true only when each completion rule is explicitly evidenced; otherwise complete=false.`,`${state}\nFiles after this iteration: ${currentFiles.join(', ')||'(empty)'}\nAction result: ${outcome}\nWork summary: ${String(work.summary??'').slice(0,1200)}\nReturn {"summary":"...","complete":false,"evidence":"...","warning":""}.`,signal),review=parseSwarmJson<{summary?:string;complete?:boolean;evidence?:string;warning?:string}>(reviewRaw);
+  await swarmManager.appendLog(swarm.id,'reviewer',String(review.summary??'Reviewed the current workspace.'),String(review.evidence??''),Boolean(review.warning),undefined);
+  if(signal.aborted)return;
+  if(review.warning)await swarmManager.appendLog(swarm.id,'reviewer','Review warning',String(review.warning),true);
+  if(review.complete===true)await swarmManager.complete(swarm.id,String(review.evidence??review.summary??'The reviewer marked completion rules satisfied.'));
+}
+const defaults: AppSettings = { autoCollapseThinking:true, ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', selectedEngine: 'orion', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2, composerDreaming: true, idleConsolidationEnabled: false, idleConsolidationHours: 24, idleConsolidationMinutes: 10, idleConsolidationChargingOnly: false, idleOvernightReport: false, evolvingToolsEnabled: false, cameraPerceptionEnabled: false, creativeIterationEnabled: false, creativeIterationLimit: 20, aiChangeHistoryEnabled: true, swarmEnabled: false, swarmIdleMinutes: 10 };
 
 let settingsCache: AppSettings = { ...defaults };
 const chatTokenSafetyFactors = new Map<string, number>();
@@ -480,15 +595,29 @@ async function getSettings(): Promise<AppSettings> {
     settings.autoCollapseThinking = settings.autoCollapseThinking !== false;
     settings.ollamaUrl = validateOllamaUrl(settings.ollamaUrl);
     if (typeof settings.selectedModel !== 'string' || !Number.isFinite(settings.temperature) ||
-        !Number.isFinite(settings.contextWindow) || !['all', 'external', 'none'].includes(settings.approvalLevel) ||
+        !['orion','llama.cpp','ollama','provider'].includes(settings.selectedEngine) || !Number.isFinite(settings.contextWindow) || !['all', 'external', 'none'].includes(settings.approvalLevel) ||
         typeof settings.workspacePath !== 'string' || typeof settings.keepInTray !== 'boolean' || typeof settings.interConversationMemory !== 'boolean' || typeof settings.experimentalOfsMemory !== 'boolean' || typeof settings.startNewConversation !== 'boolean' ||
         typeof settings.defaultImageModel !== 'string' || typeof settings.defaultVideoModel !== 'string' || ![0, 1, 2].includes(settings.subagentMaxParallel) || !['graphite','midnight','ocean','forest','rose','ember','light','paper'].includes(settings.theme) || !Array.isArray(settings.disabledTools) || settings.disabledTools.some(name => typeof name !== 'string') || !Array.isArray(settings.approvedTools) || settings.approvedTools.some(name => typeof name !== 'string')) throw new Error('Settings fields are invalid.');
+    settings.composerDreaming = settings.composerDreaming !== false;
+    settings.idleConsolidationEnabled = settings.idleConsolidationEnabled === true;
+    settings.idleConsolidationHours = Math.max(1, Math.min(168, Math.floor(Number(settings.idleConsolidationHours) || 24)));
+    settings.idleConsolidationMinutes = Math.max(2, Math.min(180, Math.floor(Number(settings.idleConsolidationMinutes) || 10)));
+    settings.idleConsolidationChargingOnly = settings.idleConsolidationChargingOnly === true;
+    settings.idleOvernightReport = settings.idleOvernightReport === true;
+    settings.evolvingToolsEnabled = settings.evolvingToolsEnabled === true;
+    settings.cameraPerceptionEnabled = settings.cameraPerceptionEnabled === true;
+    settings.creativeIterationEnabled = settings.creativeIterationEnabled === true;
+    settings.creativeIterationLimit = Math.max(1, Math.min(200, Math.floor(Number(settings.creativeIterationLimit) || 20)));
+    settings.aiChangeHistoryEnabled = settings.aiChangeHistoryEnabled !== false;
+    settings.swarmEnabled = settings.swarmEnabled === true;
+    settings.swarmIdleMinutes = Math.max(2, Math.min(180, Math.floor(Number(settings.swarmIdleMinutes) || 10)));
     // Workspace editing and the legacy archive are temporarily disabled. The
     // persisted fields stay in the schema so the feature can be restored later.
     settings.workspacePath = '';
     settings.approvalLevel = 'none';
     settings.approvedTools = [];
     settings.experimentalOfsMemory = true;
+    settingsCache = settings;
     return settings;
   } catch {
     await preserveDamagedStore(settingsFile(), 'Settings', 'The settings file contained invalid values.');
@@ -511,6 +640,62 @@ function getOrionFS(settings: AppSettings): OFSClient {
   });
   }
   return ofsMemory;
+}
+
+async function previewMemoryCare(): Promise<MemoryCarePreview> {
+  const settings = await getSettings(), ofs = getOrionFS(settings), snapshot = await ofs.exportSnapshot(), now = Date.now(), cutoff = now - 30 * 86400000;
+  const expired = snapshot.memories.filter(row => row.superseded_by == null && row.expires_at != null && Number(row.expires_at) <= now).length;
+  const superseded = snapshot.memories.filter(row => row.superseded_by != null && Number(row.created_at) <= cutoff && !(row.expires_at != null && Number(row.expires_at) <= now)).length;
+  const stats = await ofs.getStats();
+  return { expired, superseded, total: expired + superseded, activeMemories: stats.activeMemories, databaseBytes: stats.databaseBytes };
+}
+
+async function runMemoryCare(): Promise<MemoryCareReport> {
+  if (memoryCareBusy) throw Error('OrionFS maintenance is already running.');
+  if (chatPreparing || activeAbort) throw Error('Memory maintenance waits for the current response to finish.');
+  memoryCareBusy = true;
+  try {
+    const settings = await getSettings(), ofs = getOrionFS(settings);
+    await fs.mkdir(memoryCareDir(), { recursive: true });
+    // The full encrypted OFS state is the undo point for re-indexing and cleanup.
+    const before = await ofs.exportSnapshot(), snapshotName = `before-${Date.now()}.snapshot.enc`;
+    const compressed = gzipSync(Buffer.from(JSON.stringify(before)), { level: 6 });
+    await writeEncryptedText(path.join(memoryCareDir(), snapshotName), compressed.toString('base64'));
+    await writeEncryptedText(memoryCareLatestFile(), JSON.stringify({ snapshotName, createdAt: Date.now() }));
+    await indexOFSConversationBatch(settings);
+    const pruned = await ofs.pruneObsoleteMemories(Date.now(), 30);
+    const report: MemoryCareReport = { ranAt: Date.now(), expiredRemoved: pruned.expired, supersededRemoved: pruned.superseded, indexedConversations: (await readConversations()).length, snapshotAvailable: true };
+    memoryCareLastRunAt = report.ranAt;
+    await writeEncryptedText(memoryCareReportFile(), JSON.stringify(report));
+    if (win && !win.isDestroyed()) win.webContents.send('memory:care-report', report);
+    return report;
+  } finally { memoryCareBusy = false; }
+}
+
+async function undoMemoryCare(): Promise<boolean> {
+  if (chatPreparing || activeAbort || memoryCareBusy) throw Error('Wait for active work to finish before undoing memory maintenance.');
+  let meta: { snapshotName?: string };
+  try { meta = JSON.parse(await readEncryptedText(memoryCareLatestFile())) as { snapshotName?: string }; }
+  catch { return false; }
+  if (!meta.snapshotName || path.basename(meta.snapshotName) !== meta.snapshotName || !/^before-\d+\.snapshot\.enc$/.test(meta.snapshotName)) throw Error('The OrionFS undo snapshot is invalid.');
+  const encoded = await readEncryptedText(path.join(memoryCareDir(), meta.snapshotName));
+  const snapshot = JSON.parse(gunzipSync(Buffer.from(encoded, 'base64')).toString('utf8')) as Awaited<ReturnType<OFSClient['exportSnapshot']>>;
+  await getOrionFS(await getSettings()).importSnapshot(snapshot);
+  await Promise.all([fs.rm(path.join(memoryCareDir(), meta.snapshotName), { force: true }), fs.rm(memoryCareLatestFile(), { force: true })]);
+  memoryCareLastRunAt = Date.now();
+  return true;
+}
+
+async function memoryCareTick() {
+  try {
+    const settings = await getSettings();
+    if (!settings.idleConsolidationEnabled || memoryCareBusy || chatPreparing || activeAbort || appQuitting) return;
+    if (memoryCareLastRunAt && Date.now() - memoryCareLastRunAt < settings.idleConsolidationHours * 3600000) return;
+    const idle = Date.now() - lastUserActivityAt;
+    const charging = await si.battery().then(result => result.isCharging === true).catch(() => false);
+    const eligible = settings.idleConsolidationChargingOnly ? charging && idle >= settings.idleConsolidationMinutes * 60000 : charging || idle >= settings.idleConsolidationMinutes * 60000;
+    if (eligible) await runMemoryCare();
+  } catch (error) { console.warn('[OrionFS] Scheduled memory care skipped:', error instanceof Error ? error.message : String(error)); }
 }
 async function indexOFSConversation(conversation: Conversation, settings: AppSettings): Promise<void> {
   const engine = await getMemoryHistory().engine(conversation.id);
@@ -600,7 +785,7 @@ function quitOrion() {
 
 async function ensureTray() {
   if (tray) return true;
-  try { tray = new NativeTray(); await tray.ready; return true; }
+  try { tray = new NativeTray(); await tray.ready; const running=swarmManager?.list().find(item=>item.status==='running'); if(running){const settings=await getSettings();await tray.setSwarmState({running:true,name:running.name,iteration:running.iteration,idleMinutes:settings.swarmIdleMinutes});} return true; }
   catch (error) { console.error('Could not create Orion tray:', error);tray=null;return false; }
 }
 
@@ -759,12 +944,13 @@ app.on('before-quit', event => {
   activeAbort?.abort();
   for (const controller of modelDownloadControllers.values()) controller.abort();
   if (schedulerTimer) clearInterval(schedulerTimer);
+  if (memoryCareTimer) clearInterval(memoryCareTimer);
   tray?.destroy(); tray = null;
   shutdownPromise = (async () => {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.allSettled([llamaManager?.dispose(), exllamaManager?.dispose(), diffusionManager?.stop(), voiceManager?.close(), memoryHistory?.close(), ofsMemory?.close(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
+        Promise.allSettled([swarmManager?.stop(),llamaManager?.dispose(), orionInferenceRuntime?.dispose(), diffusionManager?.stop(), voiceManager?.close(), memoryHistory?.close(), (async()=>{while(memoryCareBusy)await new Promise(resolve=>setTimeout(resolve,100));await ofsMemory?.close();})(), ...mutationQueues.values(), chatTokenCalibrationWrite]),
         new Promise<void>(resolve => { deadline = setTimeout(resolve, 15000); })
       ]);
     } finally {
@@ -795,7 +981,10 @@ else {
     // installed or started in response to their respective user actions.
     diffusionManager = new DiffusionManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) { win.webContents.send('create:progress', progress); if(progress.download)win.webContents.send('models:progress',{id:progress.id,...progress.download}); } });
     llamaManager = new LlamaManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); });
-    exllamaManager = new ExllamaManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); });
+    orionInferenceRuntime = new OrionInferenceRuntime(app.getAppPath());
+    swarmManager=new SwarmManager({root:dataDir(),workerPath:path.join(app.getAppPath(),'dist','main','ofsWorker.js'),emit:swarm=>{if(win&&!win.isDestroyed())win.webContents.send('swarm:update',swarm);if(tray){void getSettings().then(settings=>tray?.setSwarmState({running:swarm.status==='running',name:swarm.name,iteration:swarm.iteration,idleMinutes:settings.swarmIdleMinutes})).catch(()=>undefined);}},canStart:async()=>(await getSettings()).swarmEnabled,canRun:async()=>{const settings=await getSettings();return settings.swarmEnabled&&Date.now()-lastUserActivityAt>=settings.swarmIdleMinutes*60_000&&!activeAbort&&!chatPreparing&&!memoryCareBusy&&!appQuitting;},cycle:runSwarmCycle,runVelo:runManagedVelo});
+    await swarmManager.init();
+    app.on('tray-swarm-pause',()=>{const running=swarmManager?.list().find(item=>item.status==='running');if(running)void swarmManager?.pause(running.id);});
     createWindow();
     const updateCheckTimer = setTimeout(() => void checkForAppUpdate(), 3500);
     updateCheckTimer.unref?.();
@@ -803,6 +992,8 @@ else {
     // on the user manually opening a window before asking Orion to browse.
     ensureBuiltInBrowser();
     const startupSettings = await getSettings();
+    try { const report = JSON.parse(await readEncryptedText(memoryCareReportFile())) as MemoryCareReport; memoryCareLastRunAt = Number(report.ranAt) || 0; } catch { memoryCareLastRunAt = 0; }
+    memoryCareTimer = setInterval(() => void memoryCareTick(), 60_000); memoryCareTimer.unref?.();
     void getOrionFS(startupSettings).getStats().catch(error => console.error('OrionFS startup load failed:', error));
     void indexOFSConversationBatch(startupSettings);
     // No scheduler timer while schedules are disabled.
@@ -951,9 +1142,8 @@ ipcMain.handle('ollama:models', async () => {
       for (const model of ollama) if (Array.isArray(model.capabilities)) installedToolSupport.set(`${settings.ollamaUrl}\0${model.name}`, model.capabilities.includes('tools'));
     }
   } catch { /* Keep Orion-downloaded GGUFs available when Ollama is offline. */ }
-  const managed = (await readInstalledModels()).filter(model => model.category === 'conversational').map(model => model.engine === 'exllamav2'
-    ? { name: `orion-exl2:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: model.file }, source: 'orion' as const }
-    : { name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file) }, source: 'orion' as const });
+  const managed = (await readInstalledModels()).filter(model => model.category === 'conversational').map(model =>
+    ({ name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file), format:model.format??'gguf' }, source: 'orion' as const }));
   const remote = (await readProviders()).flatMap(provider => provider.models.map(model => ({ name: providerModelKey(provider.id, model), size: 0, source: 'api' as const, capabilities: ['completion'], details: { label: `${provider.name} · ${model}` } })));
   return [...ollama, ...managed, ...remote];
 });
@@ -963,9 +1153,9 @@ async function getModelInformation(modelName: string): Promise<{ contextLength: 
     const routed=resolveProviderModel(await readProviders(),modelName);
     return {contextLength:131072,supportsThinking:isReasoningModelName(routed?.model ?? '')};
   }
-  if (modelName.startsWith('orion-gguf:') || modelName.startsWith('orion-exl2:')) {
+  if (modelName.startsWith('orion-gguf:')) {
     // llama.cpp's model template controls reasoning automatically; never force a level.
-    const installed=(await readInstalledModels()).find(item=>modelName==='orion-gguf:'+item.id||modelName==='orion-exl2:'+item.id);
+    const installed=(await readInstalledModels()).find(item=>modelName==='orion-gguf:'+item.id);
     return {contextLength:131072,supportsThinking:isReasoningModelName(installed?.repo ?? '')};
   }
   const {ollamaUrl}=await getSettings();
@@ -994,42 +1184,28 @@ ipcMain.handle('ollama:delete-model', async (_, name: string) => {
 });
 ipcMain.handle('models:search', async (_, query: string, category: ModelCategory, nextUrl?: string|null, engine?: string) => {
   if (!['conversational','image','video'].includes(category)) throw new Error('Unknown Hugging Face model category.');
-  const url = nextUrl ? new URL(nextUrl) : new URL('https://huggingface.co/api/models');
-  if (url.protocol !== 'https:' || url.hostname !== 'huggingface.co' || url.pathname !== '/api/models') throw new Error('Invalid Hugging Face pagination link.');
-  if (!nextUrl) {
-    url.searchParams.set('search', String(query ?? '').slice(0, 160));
-    if(category==='conversational')url.searchParams.set('filter',engine==='exllamav2'?'exl2':'gguf');
-    else url.searchParams.set('pipeline_tag',category==='image'?'text-to-image':'text-to-video');
-    url.searchParams.set('sort', 'downloads'); url.searchParams.set('direction', '-1'); url.searchParams.set('limit', category === 'conversational' && engine === 'exllamav2' ? '100' : '24');
-  }
-  const response = await fetch(url, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error(`Hugging Face search failed (${response.status}).`);
-  const rows = await response.json() as Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; config?: { architectures?: string[]; model_type?: string }; cardData?: { description?: string; license?: string } }>;
-  const modelEngines = (row: typeof rows[number]) => { const tags = row.tags ?? []; const engines: string[] = []; if (tags.includes('gguf') || /[-_.]gguf$/i.test(row.id)) engines.push('llama.cpp'); if (tags.includes('exl2') || /[-_.]exl2/i.test(row.id)) engines.push('exllamav2'); return engines; };
-  const knownExl2Families = /(?:^|[^a-z0-9])(?:llama|qwen|gemma|mistral|mixtral|phi(?:-?\d)?|deepseek|yi(?:-?\d)?|granite|command-?r|starcoder|internlm|minicpm|solar|falcon|olmo|codestral|devstral|arctic|dbrx|jamba|nemotron|glm|smollm|openelm)(?:[^a-z0-9]|$)/i;
-  const isUsableExl2Candidate = (row: typeof rows[number]) => {
-    const tags = row.tags ?? [];
-    if (!tags.includes('exl2') && !/[-_.]exl2(?:[-_.]|$)/i.test(row.id)) return false;
-    // Exclude repositories that are clearly GGUF mirrors or unrelated pipelines,
-    // even when their metadata happens to carry an EXL2 tag.
-    if (/(?:^|[-_.])gguf(?:$|[-_.])/i.test(row.id)) return false;
-    if (row.pipeline_tag && !['text-generation','text2text-generation','conversational'].includes(row.pipeline_tag)) return false;
-    const familyText = `${row.id} ${(tags.filter(tag => tag.startsWith('base_model:')).join(' '))} ${(row.config?.architectures ?? []).join(' ')} ${row.config?.model_type ?? ''}`;
-    if (!knownExl2Families.test(familyText)) return false;
-    const hasChatMetadata = ['text-generation','conversational','text2text-generation','chat'].some(tag => tags.includes(tag)) || Boolean(row.pipeline_tag) || Boolean(row.config?.architectures?.some(name => /ForCausalLM|LMHeadModel|ForConditionalGeneration/.test(name)));
-    if (!hasChatMetadata && !/(?:instruct|chat|assistant|coder|base|causal)/i.test(row.id)) return false;
-    // The unfiltered popular page stays focused on established repositories;
-    // a deliberate search can still surface a newly published model family.
-    if (!String(query ?? '').trim()) {
-      if (/(?:^|[-_.])(?:rp|roleplay|merged?|stew|uncensored|abliterated|erotica|fiction|orthogonalized)(?:$|[-_.])/i.test(row.id)) return false;
-      if ((row.downloads ?? 0) < 50 && (row.likes ?? 0) < 5) return false;
-    }
-    return true;
-  };
+  const validPage=(value:string)=>{const url=new URL(value);if(url.protocol!=='https:'||url.hostname!=='huggingface.co'||url.pathname!=='/api/models')throw new Error('Invalid Hugging Face pagination link.');return url;};
+  let urls: URL[];
+  if(nextUrl?.startsWith('orion-formats:')){
+    let pages: Array<string|null>;try{pages=JSON.parse(decodeURIComponent(nextUrl.slice('orion-formats:'.length))) as Array<string|null>;}catch{throw new Error('Invalid model browser pagination state.');}
+    urls=pages.filter((value):value is string=>Boolean(value)).map(validPage);
+  }else if(nextUrl) urls=[validPage(nextUrl)];
+  else if(category==='conversational'){
+    const formats=engine==='llama.cpp'?['gguf']:['gguf','gptq','awq'];
+    urls=formats.map(format=>{const url=new URL('https://huggingface.co/api/models');url.searchParams.set('search',String(query??'').slice(0,160));url.searchParams.set('filter',format);url.searchParams.set('sort','downloads');url.searchParams.set('direction','-1');url.searchParams.set('limit','24');return url;});
+  }else{const url=new URL('https://huggingface.co/api/models');url.searchParams.set('search',String(query??'').slice(0,160));url.searchParams.set('pipeline_tag',category==='image'?'text-to-image':'text-to-video');url.searchParams.set('sort','downloads');url.searchParams.set('direction','-1');url.searchParams.set('limit','24');urls=[url];}
+  const headers=await huggingFaceHeaders({'user-agent':'Orion-Local-AI/0.1'});
+  const responses=await Promise.all(urls.map(url=>fetch(url,{headers,signal:AbortSignal.timeout(20_000)})));
+  const failed=responses.find(response=>!response.ok);if(failed)throw new Error(`Hugging Face search failed (${failed.status}).`);
+  const rowArrays=await Promise.all(responses.map(response=>response.json() as Promise<Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; config?: { architectures?: string[]; model_type?: string }; cardData?: { description?: string; license?: string } }>>));
+  const rowMap=new Map(rowArrays.flat().map(row=>[row.id,row]));const rows=[...rowMap.values()].sort((a,b)=>(b.downloads??0)-(a.downloads??0));
+  const modelFormats = (row: typeof rows[number]) => { const tags = row.tags ?? [], formats: ('gguf'|'gptq'|'awq')[] = []; if(tags.some(tag=>/gguf/i.test(tag))||/[-_.]gguf$/i.test(row.id))formats.push('gguf'); if(tags.some(tag=>/gptq/i.test(tag))||/gptq/i.test(row.id))formats.push('gptq'); if(tags.some(tag=>/awq/i.test(tag))||/awq/i.test(row.id))formats.push('awq'); return formats; };
+  const modelEngines = (formats: ('gguf'|'gptq'|'awq')[]) => formats.includes('gguf') ? ['orion','llama.cpp'] as ('orion'|'llama.cpp')[] : formats.length ? ['orion'] as ('orion'|'llama.cpp')[] : [];
   const supportsStableDiffusion=(row:typeof rows[number])=>{const tags=row.tags??[];return tags.some(tag=>/^stable-diffusion(?:$|-|\.)/i.test(tag)||/^diffusers:StableDiffusion(?:XL)?Pipeline$/i.test(tag)||/^diffusers:StableDiffusionXL/i.test(tag)||/^base_model:.*stable-diffusion/i.test(tag))||/(?:stable[-_ ]?diffusion|sdxl|sd[_-]?1[._]?5|sd[_-]?2[._]?1|dreamshaper|juggernaut.?xl|realvisxl|pony.?diffusion|animagine.?xl)/i.test(row.id);};
-  const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':engine==='exllamav2'?isUsableExl2Candidate(row):true).map(row => ({ id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, engines: category==='conversational'?modelEngines(row):undefined }));
-  if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0',engines:undefined});}}
-  const next = response.headers.get('link')?.match(/<([^>]+)>\s*;\s*rel="?next"?/i)?.[1] ?? null;
+   const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':modelFormats(row).some(format=>engine==='llama.cpp'?format==='gguf':true)).map(row => {const formats=modelFormats(row),visibleFormats=engine==='llama.cpp'?formats.filter(format=>format==='gguf'):formats;return { id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, formats:category==='conversational'?visibleFormats:undefined, engines: category==='conversational'?modelEngines(formats):undefined };});
+  if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0',formats:undefined,engines:undefined});}}
+  const pages=responses.map(response=>response.headers.get('link')?.match(/<([^>]+)>\s*;\s*rel="?next"?/i)?.[1]??null);
+  const next=pages.some(Boolean)?urls.length>1?`orion-formats:${encodeURIComponent(JSON.stringify(pages))}`:pages.find(Boolean)??null:null;
   return { models: found, nextUrl: next };
 });
 ipcMain.handle('models:hf-token-configured', async () => Boolean(await readHuggingFaceToken()));
@@ -1057,13 +1233,30 @@ async function getHubFiles(repo: string, category?: ModelCategory, engine?: stri
     return companions.length===1?companions:[];
   };
   const output: HubFile[] = [];
-  for (const file of primaryFiles) {
+  for (const file of primaryFiles.filter(file=>category!=='conversational'||/\.gguf$/i.test(file.name))) {
     const match = file.name.match(/^(.*?)[.-](\d{5})-of-(\d{5})(\.gguf)$/i);
     const extras=path.extname(file.name).toLowerCase()==='.gguf'?companionFiles(file.name):[];
-    if (!match) { output.push(extras.length?{...file,relatedFiles:extras}:file); continue; }
+    if (!match) { output.push(extras.length?{...file,format:'gguf',relatedFiles:extras}: { ...file, format:'gguf' }); continue; }
     if (Number(match[2]) !== 1) continue;
     const parts = files.filter(candidate => { const shard = candidate.name.match(/^(.*?)[.-](\d{5})-of-(\d{5})(\.gguf)$/i); return Boolean(shard && shard[1] === match[1] && shard[3] === match[3]); }).sort((a,b) => a.name.localeCompare(b.name));
-    if (parts.length === Number(match[3])) output.push({ ...file, relatedFiles: [...parts.slice(1),...extras] }); else output.push(extras.length?{...file,relatedFiles:extras}:file);
+    if (parts.length === Number(match[3])) output.push({ ...file, format:'gguf', relatedFiles: [...parts.slice(1),...extras] }); else output.push(extras.length?{...file,format:'gguf',relatedFiles:extras}:{...file,format:'gguf'});
+  }
+  if(category==='conversational'&&engine!=='llama.cpp'&&files.some(file=>/\.safetensors$/i.test(file.name))){
+    const configFile=(model.siblings??[]).find(file=>file.rfilename==='config.json');
+    if(configFile){
+      const configResponse=await fetch(`https://huggingface.co/${encoded}/resolve/main/config.json`,{headers:await huggingFaceHeaders({'user-agent':'Orion-Local-AI/0.1'}),signal:AbortSignal.timeout(12000)});
+      if(configResponse.ok){
+        const config=await configResponse.json() as {quantization_config?:{quant_method?:string;quantization_method?:string};compression_config?:{quant_method?:string}};
+        const declared=String(config.quantization_config?.quant_method??config.quantization_config?.quantization_method??config.compression_config?.quant_method??'').toLowerCase();
+        const format: 'gptq'|'awq'|undefined=declared.includes('gptq')?'gptq':declared.includes('awq')?'awq':undefined;
+        if(format){
+          const siblings=model.siblings??[],keep=/^(?:config\.json|generation_config\.json|tokenizer(?:\.json|\.model|_config\.json)?|special_tokens_map\.json|added_tokens\.json|vocab\.json|merges\.txt|model\.safetensors\.index\.json|model(?:-\d{5}-of-\d{5})?\.safetensors)$/i;
+          const related=siblings.filter(file=>file.rfilename!=='config.json'&&keep.test(path.basename(file.rfilename))).map(file=>({name:file.rfilename,size:file.lfs?.size??file.size??0,sha256:file.lfs?.sha256}));
+          const hasWeights=related.some(file=>/\.safetensors$/i.test(file.name));
+          if(hasWeights)output.push({name:'config.json',size:configFile.lfs?.size??configFile.size??0,sha256:configFile.lfs?.sha256,format,relatedFiles:related});
+        }
+      }
+    }
   }
   if(category==='video'&&repo==='QuantStack/Wan2.2-TI2V-5B-GGUF'){
     const main=output.find(file=>/^Wan2\.2-TI2V-5B-Q4_K_M\.gguf$/i.test(file.name));
@@ -1080,155 +1273,23 @@ async function getHubFiles(repo: string, category?: ModelCategory, engine?: stri
   // Video support is currently the verified Wan 2.2 TI2V 5B bundle.
   if(category==='video')return [];
   if (category === 'conversational') {
-    // EXL2 repositories keep each quantization on its own branch while the
-    // default branch usually only carries the measurement file. Offer the
-    // quantization branches alongside any GGUF files in the same listing.
-    const exl2 = engine === 'exllamav2' || model.tags?.includes('exl2') || /[-_.]exl2(?:[-_.]|$)/i.test(repo) ? await exl2BranchFiles(repo) : [];
-    return [...exl2, ...output].sort((a,b) => Number(Boolean(b.revision)) - Number(Boolean(a.revision)) || a.size - b.size);
+    return engine==='llama.cpp'?output.filter(file=>file.format==='gguf'):output;
   }
   return output.sort((a,b) => a.size - b.size);
 }
-const exl2BranchPattern = /^\d+(?:\.\d+)?bpw$/i;
-async function exl2BranchFiles(repo: string): Promise<HubFile[]> {
-  const encoded = repo.split('/').map(encodeURIComponent).join('/');
-  const headers = await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' });
-  const refsResponse = await fetch(`https://huggingface.co/api/models/${encoded}/refs`, { headers, signal: AbortSignal.timeout(20_000) });
-  if (!refsResponse.ok) return [];
-  const refs = await refsResponse.json() as { branches?: Array<{ name?: string }> };
-  const branches = (refs.branches ?? []).map(branch => String(branch.name ?? '')).filter(name => exl2BranchPattern.test(name));
-  const listings = await Promise.all(branches.map(async branch => {
-    const treeResponse = await fetch(`https://huggingface.co/api/models/${encoded}/revision/${encodeURIComponent(branch)}?blobs=true`, { headers, signal: AbortSignal.timeout(30_000) });
-    if (!treeResponse.ok) return null;
-    const revision = await treeResponse.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }>; config?: { quantization_config?: { quant_method?: string } } };
-    const files = (revision.siblings ?? []).map(file => ({ name: file.rfilename, size: file.lfs?.size ?? file.size ?? 0, sha256: file.lfs?.sha256 })).filter(file => !file.name.startsWith('.'));
-    // A downloadable EXL2 branch needs the tokenizer/config companions plus at
-    // least one safetensors weight; measurement-only default branches never pass.
-    if (!files.some(file => file.name === 'config.json') || !files.some(file => /\.safetensors$/i.test(file.name))) return null;
-    if (revision.config?.quantization_config?.quant_method && revision.config.quantization_config.quant_method !== 'exl2') return null;
-    return { branch, files };
-  }));
-  const output: HubFile[] = [];
-  for (const listing of listings) {
-    if (!listing) continue;
-    output.push({ name: listing.branch, size: listing.files.reduce((sum, file) => sum + file.size, 0), revision: listing.branch, bundle: 'exl2', relatedFiles: listing.files.map(file => ({ name: file.name, size: file.size, ...(file.sha256 ? { sha256: file.sha256 } : {}) })) });
-  }
-  return output.sort((a,b) => Number(exl2BranchPattern.exec(a.name)?.[1] ?? 0) - Number(exl2BranchPattern.exec(b.name)?.[1] ?? 0));
-}
 ipcMain.handle('models:files', async (_, repo: string, category?: ModelCategory, engine?: string) => getHubFiles(repo,category,engine));
 ipcMain.handle('models:installed', readInstalledModels);
-// EXL2 quantizations are downloaded as complete branch bundles: every file at
-// the branch revision lands in one model folder that the ExLlamaV2 runtime can
-// load directly. Weights stay next to their tokenizer and config companions.
-async function downloadExl2Bundle(repo: string, selection: HubFile): Promise<InstalledModel> {
-  const revision = selection.revision!;
-  const files = selection.relatedFiles ?? [];
-  if (!files.length || !files.some(file => file.name === 'config.json') || !files.some(file => /\.safetensors$/i.test(file.name))) throw new Error('That EXL2 branch does not contain a complete model.');
-  const selectionId = `conversational|${repo}|${selection.name}`;
-  const installedRows = await readInstalledModels();
-  const existing = installedRows.find(item => item.id === selectionId && item.category === 'conversational');
-  if (existing) {
-    const oldFiles = existing.files?.length ? existing.files : [existing.path];
-    const valid = oldFiles.length === files.length && await Promise.all(files.map(async asset => {
-      const relative = oldFiles[files.indexOf(asset)];
-      if (!relative) return false;
-      const target = path.resolve(modelsRoot(), relative);
-      return target.startsWith(`${path.resolve(modelsRoot())}${path.sep}`) && fs.stat(target).then(stat => stat.isFile() && (!asset.size || stat.size === asset.size), () => false);
-    })).then(values => values.every(Boolean));
-    if (valid) return existing;
-    await serializeMutation('models', () => atomicWrite(modelIndexFile(), JSON.stringify(installedRows.filter(item => item.id !== selectionId), null, 2)));
-  }
-  const activeId = crypto.randomUUID(), root = modelsRoot(), controller = new AbortController();
-  modelDownloadControllers.set(activeId, controller);
-  const encodedRepo = repo.split('/').map(encodeURIComponent).join('/');
-  const targets = files.map(asset => {
-    validHubFile(asset.name);
-    const relative = path.join('chat', ...repo.split('/'), revision, ...asset.name.split('/'));
-    const target = path.resolve(root, relative);
-    if (!target.startsWith(`${path.resolve(root)}${path.sep}`)) throw new Error('Invalid model output path.');
-    return { name: asset.name, expectedSize: asset.size, sha256: asset.sha256, relative, target, url: `https://huggingface.co/${encodedRepo}/resolve/${encodeURIComponent(revision)}/${asset.name.split('/').map(encodeURIComponent).join('/')}`, temporary: `${target}.${activeId}.partial` };
-  });
-  await Promise.all(targets.map(target => fs.mkdir(path.dirname(target.target), { recursive: true })));
-  const totalExpected = targets.reduce((sum, target) => sum + target.expectedSize, 0);
-  let receivedTotal = 0, indexed = false;
-  const fileSha256: Record<string, string> = {}, finalized: string[] = [], backups: Array<{ target: string; backup: string }> = [];
-  reportModelProgress({ id: activeId, repo, file: selection.name, received: 0, total: totalExpected, phase: 'downloading' });
-  try {
-    for (const target of targets) {
-      const response = await fetch(target.url, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60 * 60_000)]) });
-      if (!response.ok || !response.body) throw new Error(`Model download failed (${response.status}): ${target.name}`);
-      const headerLength = Number(response.headers.get('content-length') ?? 0), expected = target.expectedSize || headerLength;
-      const handle = await fs.open(target.temporary, 'w', 0o600);
-      let received = 0, lastReport = 0;
-      const checksum = createHash('sha256');
-      try {
-        const reader = response.body.getReader();
-        while (true) {
-          const { value, done } = await reader.read(); if (done) break;
-          let offset = 0;
-          while (offset < value.byteLength) { const written = await handle.write(value, offset, value.byteLength - offset); offset += written.bytesWritten; }
-          received += value.byteLength;
-          checksum.update(value);
-          if (received - lastReport >= 512 * 1024) { reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal + received, total: totalExpected || expected, phase: 'downloading' }); lastReport = received; }
-        }
-        await handle.sync();
-      } finally { await handle.close(); }
-      if (expected && received !== expected) throw new Error(`Downloaded ${target.name} is incomplete (${received} of ${expected} bytes).`);
-      const sha256 = checksum.digest('hex');
-      if (target.sha256 && sha256 !== target.sha256) throw new Error(`Downloaded ${target.name} failed its SHA-256 integrity check.`);
-      fileSha256[target.relative] = sha256;
-      receivedTotal += received;
-    }
-    if (controller.signal.aborted) throw new Error('Download cancelled.');
-    for (const target of targets) {
-      if (controller.signal.aborted) throw new Error('Download cancelled.');
-      const backup = `${target.target}.${activeId}.previous`;
-      if (await fs.access(target.target).then(() => true, () => false)) { await fs.rename(target.target, backup); backups.push({ target: target.target, backup }); }
-      await fs.rename(target.temporary, target.target);
-      finalized.push(target.target);
-    }
-    const installed: InstalledModel = { id: selectionId, repo, file: selection.name, category: 'conversational', path: targets.find(target => target.name === 'config.json')!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now(), engine: 'exllamav2', revision };
-    await fs.mkdir(root, { recursive: true });
-    await serializeMutation('models', async () => {
-      const all = await readInstalledModels(), previous = all.find(item => item.id === installed.id);
-      const next = all.filter(item => item.id !== installed.id); next.push(installed);
-      await atomicWrite(modelIndexFile(), JSON.stringify(next, null, 2));
-      if (previous) {
-        const kept = new Set(next.flatMap(item => item.files?.length ? item.files : [item.path]));
-        for (const oldFile of previous.files ?? [previous.path]) {
-          const target = path.resolve(root, oldFile);
-          if (!kept.has(oldFile) && target.startsWith(`${root}${path.sep}`)) await fs.rm(target, { force: true }).catch(() => undefined);
-        }
-      }
-    });
-    indexed = true;
-    for (const previous of backups) await fs.rm(previous.backup, { force: true }).catch(() => undefined);
-    reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal, total: totalExpected || receivedTotal, phase: 'complete' });
-    return installed;
-  } catch (error) {
-    if (!indexed) {
-      for (const target of targets) await fs.rm(target.temporary, { force: true }).catch(() => undefined);
-      for (const target of finalized) await fs.rm(target, { force: true }).catch(() => undefined);
-      for (const previous of backups) await fs.rename(previous.backup, previous.target).catch(() => undefined);
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    const cancelled = controller.signal.aborted;
-    reportModelProgress({ id: activeId, repo, file: selection.name, received: receivedTotal, total: totalExpected, phase: cancelled ? 'cancelled' : 'error', error: cancelled ? undefined : message });
-    throw new Error(cancelled ? 'Download cancelled.' : message);
-  } finally {
-    modelDownloadControllers.delete(activeId);
-  }
-}
 ipcMain.handle('models:download', async (_, repo: string, file: string, category: ModelCategory): Promise<InstalledModel> => {
   if(!['conversational','image','video'].includes(category))throw new Error('Unknown model category.');
   if(category!=='conversational'&&!await diffusionManager.isInstalled())throw new Error('Install Orion’s managed native image/video engine from the Create page before downloading image or video models.');
   validRepo(repo);
-  validHubFile(file);const extension=path.extname(file).toLowerCase();if(category==='conversational'&&extension!=='.gguf'&&!exl2BranchPattern.test(file))throw new Error('Conversational model downloads must be GGUF files or EXL2 quantizations.');if(category==='image'&&!['.safetensors','.ckpt','.gguf'].includes(extension))throw new Error('Stable Diffusion checkpoints must be safetensors, GGUF, or CKPT files.');if(category==='video'&&extension!=='.gguf')throw new Error('Wan video model downloads must be GGUF files.');
-  const selectionId = `${category}|${repo}|${file}`;
-  const selected=(await getHubFiles(repo,category,exl2BranchPattern.test(file)?'exllamav2':undefined)).find(item=>item.name===file);if(!selected)throw new Error('That model quantization or file is no longer available. Reload the model files and choose a quantization.');
-  if (category==='conversational'&&selected.revision&&selected.bundle==='exl2') return downloadExl2Bundle(repo, selected);
+  validHubFile(file);const extension=path.extname(file).toLowerCase();if(category==='conversational'&&!['.gguf','.json'].includes(extension))throw new Error('Choose a supported GGUF, GPTQ, or AWQ model from the model browser.');if(category==='image'&&!['.safetensors','.ckpt','.gguf'].includes(extension))throw new Error('Stable Diffusion checkpoints must be safetensors, GGUF, or CKPT files.');if(category==='video'&&extension!=='.gguf')throw new Error('Wan video model downloads must be GGUF files.');
+  const selected=(await getHubFiles(repo,category,'orion')).find(item=>item.name===file);if(!selected)throw new Error('That model format is no longer available. Reload the model files and choose a supported format.');
+  if(category==='conversational'&&selected.format!=='gguf'&&selected.format!=='gptq'&&selected.format!=='awq')throw new Error('Only GGUF, GPTQ, and AWQ conversational models are supported.');
+  const selectionId = `${category}|${repo}|${selected.format??'gguf'}|${file}`;
   const related=selected.relatedFiles??[],names=[file,...related.map(part=>part.name)],sizes=new Map<string,number>([[file,selected.size],...related.map(part=>[part.name,part.size] as [string,number])]);
   const installedRows=await readInstalledModels(),existing=installedRows.find(item=>item.id===selectionId&&item.category===category);
-  if(existing){const oldFiles=existing.files?.length?existing.files:[existing.path];const valid=oldFiles.length===names.length&&await Promise.all(names.map(async name=>{const index=names.indexOf(name),relative=oldFiles[index],expected=sizes.get(name)??0;if(!relative)return false;const target=path.resolve(modelsRoot(),relative);return target.startsWith(`${path.resolve(modelsRoot())}${path.sep}`)&&fs.stat(target).then(stat=>stat.isFile()&&(!expected||stat.size===expected),()=>false);})).then(values=>values.every(Boolean));if(valid){if(category==='conversational')await llamaManager.install();return existing;}await serializeMutation('models',()=>atomicWrite(modelIndexFile(),JSON.stringify(installedRows.filter(item=>item.id!==selectionId),null,2)));}
+  if(existing){const oldFiles=existing.files?.length?existing.files:[existing.path];const valid=oldFiles.length===names.length&&await Promise.all(names.map(async name=>{const index=names.indexOf(name),relative=oldFiles[index],expected=sizes.get(name)??0;if(!relative)return false;const target=path.resolve(modelsRoot(),relative);return target.startsWith(`${path.resolve(modelsRoot())}${path.sep}`)&&fs.stat(target).then(stat=>stat.isFile()&&(!expected||stat.size===expected),()=>false);})).then(values=>values.every(Boolean));if(valid){if(category==='conversational')await orionInferenceRuntime.verify();return existing;}await serializeMutation('models',()=>atomicWrite(modelIndexFile(),JSON.stringify(installedRows.filter(item=>item.id!==selectionId),null,2)));}
   const activeId = crypto.randomUUID(), root = modelsRoot(), controller = new AbortController();
   modelDownloadControllers.set(activeId, controller);
   const targets = names.map(name => {
@@ -1274,7 +1335,7 @@ ipcMain.handle('models:download', async (_, repo: string, file: string, category
       if(await fs.access(target.target).then(()=>true,()=>false)){await fs.rename(target.target,backup);backups.push({target:target.target,backup});}
       await fs.rename(target.temporary,target.target);finalized.push(target.target);
     }
-    const installed: InstalledModel = { id: selectionId, repo, file, category, path: targets[names.indexOf(file)]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now() };
+    const installed: InstalledModel = { id: selectionId, repo, file, format:selected.format, category, path: targets[names.indexOf(file)]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now() };
     await fs.mkdir(root, { recursive: true });
     await serializeMutation('models', async () => {
       const all = await readInstalledModels(), previous = all.find(item => item.id === installed.id);
@@ -1291,7 +1352,7 @@ ipcMain.handle('models:download', async (_, repo: string, file: string, category
     indexed = true;
     for(const previous of backups)await fs.rm(previous.backup,{force:true}).catch(()=>undefined);
     reportModelProgress({ id: activeId, repo, file, received: receivedTotal, total: totalExpected || receivedTotal, phase: 'complete' });
-    if (category === 'conversational') await llamaManager.install(); else await diffusionManager.getState();
+    if (category === 'conversational') await orionInferenceRuntime.verify(); else await diffusionManager.getState();
     return installed;
   } catch (error) {
     if (!indexed) {
@@ -1315,10 +1376,10 @@ ipcMain.handle('models:delete', async (_, id: string) => {
   const root = path.resolve(modelsRoot()), files = item.files?.length ? item.files : [item.path];
   const targets = files.map(file => path.resolve(root, file));
   if (targets.some(target => !target.startsWith(`${root}${path.sep}`))) throw new Error('Model index contains an invalid path.');
-  if (item.category === 'conversational') { await Promise.allSettled([llamaManager.stop(), exllamaManager.stop()]); } else await diffusionManager.stop();
+  if (item.category === 'conversational') { await Promise.allSettled([llamaManager.stop(), orionInferenceRuntime.stop()]); } else await diffusionManager.stop();
   for (const target of targets) await fs.rm(target, { force: true });
   await serializeMutation('models', () => atomicWrite(modelIndexFile(), JSON.stringify(all.filter(model => model.id !== id), null, 2)));
-  const settings=await getSettings();let changed=false;if(settings.defaultImageModel===id||settings.defaultImageModel.startsWith(`image|${item.repo}|`)){settings.defaultImageModel='';changed=true;}if(settings.defaultVideoModel===id||settings.defaultVideoModel.startsWith(`video|${item.repo}|`)){settings.defaultVideoModel='';changed=true;}if(settings.selectedModel===`orion-gguf:${id}`||settings.selectedModel===`orion-exl2:${id}`){settings.selectedModel='';changed=true;}if(changed)await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));
+  const settings=await getSettings();let changed=false;if(settings.defaultImageModel===id||settings.defaultImageModel.startsWith(`image|${item.repo}|`)){settings.defaultImageModel='';changed=true;}if(settings.defaultVideoModel===id||settings.defaultVideoModel.startsWith(`video|${item.repo}|`)){settings.defaultVideoModel='';changed=true;}if(settings.selectedModel===`orion-gguf:${id}`){settings.selectedModel='';changed=true;}if(changed)await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));
 });
 ipcMain.handle('create:enter', async () => diffusionManager.enter());
 ipcMain.handle('create:state', async () => diffusionManager.getState());
@@ -1327,7 +1388,7 @@ async function markLlamaIntroSeen() { const marker=path.join(app.getPath('userDa
 ipcMain.handle('llama:intro', async () => {
   // Profiles that already have a managed engine do not need onboarding,
   // including profiles upgraded from versions with older marker locations.
-  if (await llamaManager.isInstalled() || await exllamaManager.isInstalled()) { await markLlamaIntroSeen(); return false; }
+  if (await llamaManager.isInstalled() || await orionInferenceRuntime.isInstalled()) { await markLlamaIntroSeen(); return false; }
   // Versioned markers let existing profiles migrate through newly added
   // first-run experiences without old profile state suppressing the prompt.
   const marker = path.join(app.getPath('userData'), 'orion', 'migrations', 'llama-onboarding-v2-seen');
@@ -1336,29 +1397,28 @@ ipcMain.handle('llama:intro', async () => {
 ipcMain.handle('llama:dismiss-intro', async () => markLlamaIntroSeen());
 ipcMain.handle('llama:install', async () => { await markLlamaIntroSeen(); return llamaManager.install(); });
 ipcMain.handle('llama:status', async () => llamaManager.isInstalled());
-ipcMain.handle('exl2:install', async () => { await markLlamaIntroSeen(); return exllamaManager.install(); });
-ipcMain.handle('exl2:status', async () => exllamaManager.isInstalled());
+ipcMain.handle('orion-engine:status', async () => orionInferenceRuntime.isInstalled());
 ipcMain.handle('engine:update-repair', async (event, engine: string) => {
   if (!win || event.sender !== win.webContents) throw Error('Engine management is only available in Orion.');
-  if (!['llama','exllama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
+  if (!['orion','llama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
   if (chatPreparing || activeAbort || modelCompatibilityBusy) throw Error('Wait for chat generation and model checks to finish before maintaining engines.');
   if ((await diffusionManager.getState()).running) throw Error('Wait for image or video generation to finish before maintaining engines.');
   if (engine === 'ollama') {
     await shell.openExternal(process.platform === 'linux' ? 'https://ollama.com/download/linux' : 'https://ollama.com/download');
     return 'Opened Ollama’s official installer page. Ollama is updated through its own installer.';
   }
+  if (engine === 'orion') { await orionInferenceRuntime.verify(); return 'Orion’s bundled inference runtime is present and ready.'; }
   if (engine === 'llama') { await llamaManager.install(true); return 'Checked and updated or repaired the managed llama.cpp runtime.'; }
-  if (engine === 'exllama') { await exllamaManager.install(true); return 'Checked and updated or repaired ExLlamaV2. Its managed runtime was recreated and verified.'; }
   const state = await diffusionManager.install(true);
   return state.detail.includes('healthy and current') ? 'stable-diffusion.cpp is healthy and already up to date.' : state.detail;
 });
 ipcMain.handle('engine:uninstall', async (event, engine: string) => {
   if (!win || event.sender !== win.webContents) throw Error('Engine management is only available in Orion.');
-  if (!['llama','exllama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
+  if (!['orion','llama','diffusion','ollama'].includes(engine)) throw Error('Unknown engine.');
   if (chatPreparing || activeAbort || modelCompatibilityBusy) throw Error('Wait for chat generation and model checks to finish before removing an engine.');
   if ((await diffusionManager.getState()).running) throw Error('Wait for image or video generation to finish before removing an engine.');
+  if (engine === 'orion') throw Error('Orion’s inference runtime is bundled with the application and cannot be uninstalled separately.');
   if (engine === 'llama') { await llamaManager.uninstall(); return 'Removed Orion’s managed llama.cpp engine. Downloaded models were kept.'; }
-  if (engine === 'exllama') { await exllamaManager.uninstall(); return 'Removed Orion’s managed ExLlamaV2 runtime. Downloaded models and shared uv were kept.'; }
   if (engine === 'diffusion') { await diffusionManager.uninstall(); return 'Removed Orion’s managed stable-diffusion.cpp engine. Downloaded models and creations were kept.'; }
   if (engine === 'ollama') {
     if (process.platform === 'win32') await shell.openExternal('ms-settings:appsfeatures-app');
@@ -1430,12 +1490,6 @@ ipcMain.handle('models:check-compatibility', async (event, id: string) => {
     const model = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
     if (!model) throw new Error('Compatibility checking is available only for installed Orion conversational models.');
     const root = path.resolve(modelsRoot());
-    if (model.engine === 'exllamav2') {
-      if (!await exllamaManager.isInstalled()) throw new Error('Install Orion’s managed ExLlamaV2 engine first.');
-      const modelDirectory = exl2ModelDirectory(model, root);
-      if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
-      return await exllamaManager.checkCompatibility(modelDirectory, Math.min((await getSettings()).contextWindow, 4096));
-    }
     if (!await llamaManager.isInstalled()) throw new Error('Install Orion’s managed llama.cpp engine first.');
     const modelPath = path.resolve(root, model.path);
     if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The installed model path is invalid.');
@@ -1592,7 +1646,7 @@ ipcMain.handle('memory:ingest-documents', async (event, conversationId: string) 
   if (!imported.length) throw Error(`No documents could be imported.\n${errors.slice(0, 8).join('\n')}`);
   return { imported, skipped: errors.slice(0, 32) };
 });
-for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare','cleanupPreview','cleanup','cleanupUndo','retrievalPreview','memoryEdit','memoryRetention','messageRetention','checkpointMessage','rollbackMessage'] as const) {
+for (const method of ['context','dashboard','checkpoint','preview','branch','lens','assumption','tag','packet','carry','compare','cleanupPreview','cleanup','cleanupUndo','retrievalPreview','memoryEdit','memoryRetention','messageRetention','checkpointMessage','prepareMessageEdit','rollbackMessage'] as const) {
   ipcMain.handle(`memory-history:${method}`, async (event, ...args: unknown[]) => {
     if (!win || event.sender !== win.webContents) throw Error('Conversation history is only available in the main Orion window.');
     if (args.some(value => typeof value === 'string' && value.length > 256)) throw Error('Invalid memory request.');
@@ -1619,6 +1673,41 @@ ipcMain.handle('schedule:complete', async (event, id: string, status: 'completed
   void schedulerTick(); return true;
 });
 ipcMain.handle('memory:rebuild', async () => indexOFSConversationBatch(await getSettings()));
+ipcMain.handle('memory-care:preview', previewMemoryCare);
+ipcMain.handle('memory-care:run', runMemoryCare);
+ipcMain.handle('memory-care:undo', undoMemoryCare);
+ipcMain.handle('background:activity', event => {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Activity updates are only available in Orion.');
+  lastUserActivityAt = Date.now(); return true;
+});
+ipcMain.handle('swarm:list', () => swarmManager?.list() ?? []);
+ipcMain.handle('swarm:create', async (_event,input: {name:string;objective:string;completionRules:string}) => {if(!swarmManager)throw Error('Swarm is still starting.');return swarmManager.create(input);});
+ipcMain.handle('swarm:edit', async (_event,id:string,changes:{name?:string;objective?:string;completionRules?:string}) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.edit(id,changes);});
+ipcMain.handle('swarm:start', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.start(id);});
+ipcMain.handle('swarm:pause', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.pause(id);});
+ipcMain.handle('swarm:resume', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.resume(id);});
+ipcMain.handle('swarm:kill', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.kill(id);});
+ipcMain.handle('swarm:delete', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.delete(id);});
+ipcMain.handle('swarm:steer', async (_event,id:string,value:SwarmSteerInput) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.steer(id,value);});
+ipcMain.handle('swarm:open-folder', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return shell.openPath(await swarmManager.openFolder(id));});
+ipcMain.handle('dream:prepare', async (event, conversationId: string, model: string, engine: InferenceEngine, draft: string) => {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Draft preparation is only available in Orion chat.');
+  const settings = await getSettings();
+  if (!settings.composerDreaming || !conversationId || !/^[a-f0-9-]{36}$/i.test(conversationId) || !['orion','llama.cpp','ollama'].includes(engine) || model.startsWith('api:')) return { ready: false, memories: 0 };
+  const query = String(draft ?? '').trim().slice(0, 6000);
+  if (query.length < 12) return { ready: false, memories: 0 };
+  const conversation = (await readConversations()).find(item => item.id === conversationId);
+  const key = draftDreamKey(conversationId, model, engine, query);
+  const matches = await retrieveConversationMemory(query, settings, Math.min(3600, Math.floor(settings.contextWindow * 0.24)), new Set(), chunk => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, model) + 1, conversationId, Boolean(conversation?.localOnly || conversation?.privateVoice));
+  draftDreamCache.set(key, { preparedAt: Date.now(), conversationId, model, engine, query, memories: matches });
+  while (draftDreamCache.size > 24) draftDreamCache.delete(draftDreamCache.keys().next().value!);
+  return { ready: true, memories: matches.length };
+});
+ipcMain.handle('dream:cancel', async (event, conversationId: string) => {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Draft preparation is only available in Orion chat.');
+  for (const [key, item] of draftDreamCache) if (item.conversationId === conversationId) draftDreamCache.delete(key);
+  return true;
+});
 ipcMain.handle('settings:get', getSettings);
 ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
   if (!value || typeof value !== 'object') throw new Error('Settings payload is invalid.');
@@ -1626,6 +1715,7 @@ ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
   const settings: AppSettings = {
     ollamaUrl: validateOllamaUrl(String(value.ollamaUrl ?? defaults.ollamaUrl)),
     selectedModel: typeof value.selectedModel === 'string' ? value.selectedModel.slice(0, 256) : '',
+    selectedEngine: ['orion','llama.cpp','ollama','provider'].includes(String(value.selectedEngine)) ? value.selectedEngine as InferenceEngine : defaults.selectedEngine,
     defaultImageModel: typeof value.defaultImageModel === 'string' ? value.defaultImageModel.slice(0, 256) : defaults.defaultImageModel,
     defaultVideoModel: typeof value.defaultVideoModel === 'string' ? value.defaultVideoModel.slice(0, 256) : defaults.defaultVideoModel,
     temperature: Number.isFinite(rawTemperature) ? Math.max(0, Math.min(2, rawTemperature)) : defaults.temperature,
@@ -1641,6 +1731,19 @@ ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
     theme: defaults.theme,
     disabledTools: Array.isArray(value.disabledTools) ? [...new Set(value.disabledTools.filter((name): name is string => typeof name === 'string' && name.length <= 100))] : [],
     subagentMaxParallel: [0, 1, 2].includes(Number(value.subagentMaxParallel)) ? Number(value.subagentMaxParallel) as 0|1|2 : defaults.subagentMaxParallel
+    ,composerDreaming: value.composerDreaming !== false
+    ,idleConsolidationEnabled: value.idleConsolidationEnabled === true
+    ,idleConsolidationHours: Math.max(1, Math.min(168, Math.floor(Number(value.idleConsolidationHours) || defaults.idleConsolidationHours)))
+    ,idleConsolidationMinutes: Math.max(2, Math.min(180, Math.floor(Number(value.idleConsolidationMinutes) || defaults.idleConsolidationMinutes)))
+    ,idleConsolidationChargingOnly: value.idleConsolidationChargingOnly === true
+    ,idleOvernightReport: value.idleOvernightReport === true
+    ,evolvingToolsEnabled: value.evolvingToolsEnabled === true
+    ,cameraPerceptionEnabled: value.cameraPerceptionEnabled === true
+    ,creativeIterationEnabled: value.creativeIterationEnabled === true
+    ,creativeIterationLimit: Math.max(1, Math.min(200, Math.floor(Number(value.creativeIterationLimit) || defaults.creativeIterationLimit)))
+    ,aiChangeHistoryEnabled: value.aiChangeHistoryEnabled !== false
+    ,swarmEnabled: value.swarmEnabled === true
+    ,swarmIdleMinutes: Math.max(2, Math.min(180, Math.floor(Number(value.swarmIdleMinutes) || defaults.swarmIdleMinutes)))
   };
   await serializeMutation('settings', () => writeEncryptedText(settingsFile(), JSON.stringify(settings, null, 2)));
   settingsCache = settings;
@@ -1755,59 +1858,48 @@ const disabledWorkspaceTools = new Set([
 function toolsForModel(_workspaceAvailable = false) {
   // Workspace-specific features are paused as a unit; preserve their handlers
   // and schemas for a future re-enable. General Orion tools remain available.
-  return ollamaTools.filter(tool => !disabledWorkspaceTools.has(tool.function.name));
+  const tools = ollamaTools.filter(tool => !disabledWorkspaceTools.has(tool.function.name)) as Array<{type:'function';function:{name:string;description:string;parameters:Record<string,unknown>}} >;
+  if (settingsCache.evolvingToolsEnabled) tools.push(
+    { type:'function', function:{ name:'propose_reusable_tool', description:'Create a reusable, permanently stored Orion tool from safe declarative transformations. This is not executable code: it cannot access files, processes, or networks. Include 1–16 steps and at least one input/expected-output test case. Orion validates every test and asks the user to approve the first installation.', parameters:{ type:'object', properties:{ name:{type:'string',description:'Unique snake_case identifier.'}, description:{type:'string'}, steps:{type:'array',minItems:1,maxItems:16,items:{type:'object',properties:{op:{type:'string',enum:['split_lines','split','trim','drop_prefix','parse_key_value','extract_between','rename','filter_contains','join']},input:{type:'string'},output:{type:'string'},field:{type:'string'},delimiter:{type:'string'},value:{type:'string'},separator:{type:'string'},start:{type:'string'},end:{type:'string'},from:{type:'string'},to:{type:'string'}},required:['op']}}, tests:{type:'array',minItems:1,maxItems:8,items:{type:'object',properties:{input:{type:'object'},expected:{type:'object'}},required:['input','expected']}}},required:['name','description','steps','tests']} } },
+    { type:'function', function:{ name:'run_reusable_tool', description:'Run one of the user-approved local reusable transformations. Provide its exact stored name and a JSON object for input.', parameters:{ type:'object',properties:{name:{type:'string'},input:{type:'object'}},required:['name','input']} } }
+  );
+  return tools;
 }
 
 ipcMain.handle('tools:list', async () => {
   const current = await getSettings();
+  settingsCache = current;
   return toolsForModel().map(tool => ({ name: tool.function.name, description: tool.function.description, enabled: true }));
 });
+ipcMain.handle('tools:evolved-list', async () => (await readEvolvedTools()).map(({id,name,description,enabled,createdAt,useCount})=>({id,name,description,enabled,createdAt,useCount})));
+ipcMain.handle('tools:evolved-set-enabled', async (_event,id:string,enabled:boolean) => {const items=await readEvolvedTools(),item=items.find(value=>value.id===id);if(!item)throw Error('Reusable tool not found.');item.enabled=enabled===true;await writeEvolvedTools(items);return true;});
 
 async function getModelIdentity(model: string) {
-  if (!model.startsWith('orion-gguf:') && !model.startsWith('orion-exl2:')) return model;
-  const prefix = model.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
+  if (!model.startsWith('orion-gguf:')) return model;
+  const prefix = 'orion-gguf:';
   const installed = await readInstalledModels();
   const item = installed.find(candidate => `${prefix}${candidate.id}` === model);
-  return item ? `${item.repo} (${item.file})` : 'the selected local model';
+  return item ? `${item.repo} (${(item.format??'gguf').toUpperCase()})` : 'the selected local model';
 }
 function modelMmprojPath(item: InstalledModel, root: string) {
   const companion = (item.files ?? []).find(file => /(?:mmproj|projector)/i.test(path.basename(file)) && file.toLowerCase().endsWith('.gguf'));
   return companion ? path.resolve(root, companion) : undefined;
 }
 
-function exl2ModelDirectory(item: InstalledModel, root: string) {
-  // Older nightly indexes stored an arbitrary weight file as `path`; resolve
-  // the model root from config.json so every EXL2 entry launches consistently.
-  const config = item.files?.find(file => path.basename(file).toLowerCase() === 'config.json');
-  const candidate = path.dirname(path.resolve(root, config ?? item.path));
-  if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
-  return candidate;
-}
-
-async function prepareModelToolSupport(model: string, context: number, loadManaged = (modelPath: string, context: number, mmproj?: string) => llamaManager.ensureServer(modelPath, context, mmproj), loadExl2 = (modelDirectory: string, context: number) => exllamaManager.ensureServer(modelDirectory, context)): Promise<string | undefined> {
+async function prepareModelToolSupport(model: string, context: number, engine: 'orion'|'llama.cpp', loadManaged: (modelPath: string, context: number, mmproj?: string, initialFailure?: Error, format?: InstalledModel['format']) => Promise<string>): Promise<string | undefined> {
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before loading a chat model.');
-  const key = `${settingsCache.ollamaUrl}\0${model}`;
-  if (model.startsWith('orion-exl2:')) {
-    const id = model.slice('orion-exl2:'.length);
-    const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
-    if (!installed) { installedToolSupport.set(key, false); return undefined; }
-    const root = path.resolve(modelsRoot()), modelDirectory = exl2ModelDirectory(installed, root);
-    if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
-    // EXL2 models use Orion's text-based tool protocol; no native tool template.
-    installedToolSupport.set(key, false);
-    return await loadExl2(modelDirectory, context);
-  }
+  const key = model.startsWith('orion-gguf:') ? `${settingsCache.ollamaUrl}\0${engine}\0${model}` : `${settingsCache.ollamaUrl}\0${model}`;
   if (model.startsWith('orion-gguf:')) {
     const id = model.slice('orion-gguf:'.length);
     const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
     if (!installed) { installedToolSupport.set(key, false); return undefined; }
     const root = path.resolve(modelsRoot()), modelPath = path.resolve(root, installed.path);
     if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The selected model path is invalid.');
-    const baseUrl = await loadManaged(modelPath, context, modelMmprojPath(installed, root));
-    let supportsTools = false;
+    const baseUrl = await loadManaged(modelPath, context, modelMmprojPath(installed, root), undefined, installed.format ?? 'gguf');
+    let supportsTools = engine === 'orion';
     try {
-      const response = await fetch(`${baseUrl}/props`, { signal: AbortSignal.timeout(5000) });
-      if (response.ok) {
+      const response = engine === 'orion' ? null : await fetch(`${baseUrl}/props`, { signal: AbortSignal.timeout(5000) });
+      if (response?.ok) {
         const props = await response.json() as Record<string, unknown>;
         const caps = props.chat_template_caps && typeof props.chat_template_caps === 'object' ? props.chat_template_caps as Record<string, unknown> : {};
         supportsTools = caps.supports_tools === true && caps.supports_tool_calls === true;
@@ -1886,39 +1978,36 @@ async function providerMediaRestore(provider: ApiProvider, model: string, contex
 }
 
 let modelHandoffQueue: Promise<void> = Promise.resolve();
-async function withMediaModelHandoff<T>(model: string, context: number, operation: () => Promise<T>): Promise<T> {
+async function withMediaModelHandoff<T>(model: string, context: number, operation: () => Promise<T>, selectedEngine?: InferenceEngine): Promise<T> {
   const previous = modelHandoffQueue;
   let release!: () => void;
   modelHandoffQueue = new Promise<void>(resolve => { release = resolve; });
   await previous;
-  try { return await withMediaModelHandoffLocked(model, context, operation); }
+  try { return await withMediaModelHandoffLocked(model, context, operation, selectedEngine); }
   finally { release(); }
 }
 
-async function withMediaModelHandoffLocked<T>(model: string, context: number, operation: () => Promise<T>): Promise<T> {
+async function withMediaModelHandoffLocked<T>(model: string, context: number, operation: () => Promise<T>, selectedEngine?: InferenceEngine): Promise<T> {
   const remote = model ? resolveProviderModel(await readProviders(), model) : undefined;
   let restore: (() => Promise<void>) | undefined;
   if (remote) restore = await providerMediaRestore(remote.provider, remote.model, context);
   else if (!model) return operation();
     else {
     const settings = await getSettings();
-    if (model.startsWith('orion-gguf:') || model.startsWith('orion-exl2:')) {
-      const prefix = model.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
-      const id = model.slice(prefix.length);
+    if (model.startsWith('orion-gguf:')) {
+      const id = model.slice('orion-gguf:'.length);
       const installed = (await readInstalledModels()).find(item => item.id === id && item.category === 'conversational');
       if (!installed) throw new Error('The active Orion chat model is no longer installed.');
       const root = path.resolve(modelsRoot());
-      if (installed.engine === 'exllamav2') {
-        const modelDirectory = exl2ModelDirectory(installed, root);
-        if (!modelDirectory.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
-        await exllamaManager.stop();
-        restore = async () => { await exllamaManager.ensureServer(modelDirectory, context); };
-      } else {
-        const modelPath = path.resolve(root, installed.path);
-        if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
+      const modelPath = path.resolve(root, installed.path);
+      if (!modelPath.startsWith(`${root}${path.sep}`)) throw new Error('The active Orion chat model path is invalid.');
+      if ((selectedEngine ?? settings.selectedEngine) === 'llama.cpp') {
         const mmproj = modelMmprojPath(installed, root);
         await llamaManager.stop();
         restore = async () => { await llamaManager.ensureServer(modelPath, context, mmproj); };
+      } else {
+        await orionInferenceRuntime.stop();
+        restore = async () => { await orionInferenceRuntime.ensureServer(modelPath, context, installed.format ?? 'gguf'); };
       }
     } else {
       const response = await fetchWithLocalReconnect(`${settings.ollamaUrl}/api/generate`, {
@@ -2080,17 +2169,18 @@ ipcMain.handle('system:prompt', async (_event, model?: string, mode?: ToolMode) 
   const remote = resolveProviderModel(await readProviders(), activeModel);
   // Prompt inspection is read-only: never start llama-server or warm a model.
   // Ollama /api/show reads stored metadata without loading inference weights.
-  if (!remote && activeModel && !activeModel.startsWith('orion-gguf:') && !activeModel.startsWith('orion-exl2:')) await getModelInformation(activeModel);
+  if (!remote && activeModel && !activeModel.startsWith('orion-gguf:')) await getModelInformation(activeModel);
   const activeMode: ToolMode = 'chat';
   const promptTools = toolsForModel();
   const native = remote ? remote.provider.tools : installedToolSupport.get(`${currentSettings.ollamaUrl}\0${activeModel}`) === true;
   return addTextToolProtocol(await buildOrionSystemPrompt(await getModelIdentity(activeModel), promptTools, '', activeMode, false, native), promptTools, native);
 });
 
-ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; model: string; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }) => {
+ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; model: string; engine?: InferenceEngine; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }) => {
   if (chatPreparing || activeAbort) throw Error('A conversation is already generating.');
   chatPreparing = true;
   try {
+  await swarmManager?.yieldForChat();
   await getMemoryHistory().settled();
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before starting a chat.');
   const settings = await getSettings();
@@ -2118,10 +2208,12 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const privateVoice = conversation?.localOnly || conversation?.privateVoice || input.messages.some(message=>message.voiceInput);
   if(privateVoice&&remote)throw Error('This conversation stays on this computer. Select an Orion-managed or local Ollama model.');
   const installedConversational = remote ? [] : await readInstalledModels();
-  const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === `orion-exl2:${item.id}` || input.model === item.id || input.model === item.repo));
-  const routedEngine = routedManaged?.engine === 'exllamav2' ? 'exllamav2' : 'llama.cpp';
-  const routedModel = remote ? input.model : routedManaged ? `${routedEngine === 'exllamav2' ? 'orion-exl2:' : 'orion-gguf:'}${routedManaged.id}` : input.model;
-  if(privateVoice&&!routedModel.startsWith('orion-gguf:')&&!routedModel.startsWith('orion-exl2:')){
+  const requestedEngine = input.engine ?? conversation?.engine ?? settings.selectedEngine ?? 'orion';
+  const routedManaged = installedConversational.find(item => item.category === 'conversational' && (input.model === `orion-gguf:${item.id}` || input.model === item.id || input.model === item.repo));
+  const routedEngine: 'orion'|'llama.cpp'|'ollama'|'provider' = remote ? 'provider' : routedManaged ? (requestedEngine === 'llama.cpp' && (routedManaged.format??'gguf')==='gguf' ? 'llama.cpp' : 'orion') : requestedEngine === 'provider' ? 'ollama' : requestedEngine;
+  if (routedManaged && !['orion','llama.cpp'].includes(routedEngine)) throw new Error('Choose Orion or llama.cpp for this downloaded GGUF model.');
+  const routedModel = remote ? input.model : routedManaged ? `orion-gguf:${routedManaged.id}` : input.model;
+  if(privateVoice&&!routedModel.startsWith('orion-gguf:')){
     if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(routedModel))throw Error('Ollama cloud models cannot be used for this local conversation. Select a downloaded local model.');
     const info=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:routedModel}),signal:AbortSignal.timeout(10000)});
     if(!info.ok)throw Error('Could not verify that this Ollama model is local. Select an installed local model and try again.');
@@ -2130,8 +2222,8 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   }
 
   const checkedCompatibility = new Set<string>();
-  const loadManaged = async (modelPath: string, context: number, mmproj?: string, initialFailure?: Error): Promise<string> => {
-    const startEngine = () => routedEngine === 'exllamav2' ? exllamaManager.ensureServer(modelPath, context) : llamaManager.ensureServer(modelPath, context, mmproj);
+  const loadManaged = async (modelPath: string, context: number, mmproj?: string, initialFailure?: Error, format: InstalledModel['format'] = routedManaged?.format ?? 'gguf'): Promise<string> => {
+    const startEngine = () => routedEngine === 'orion' ? orionInferenceRuntime.ensureServer(modelPath, context, format ?? 'gguf') : llamaManager.ensureServer(modelPath, context, mmproj);
     try {
       if (initialFailure) throw initialFailure;
       return await startEngine();
@@ -2145,9 +2237,8 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       publish('started', 'The managed model reported an incompatibility. Checking available repairs…');
       modelCompatibilityBusy = true;
       try {
-        const report = routedEngine === 'exllamav2'
-          ? await exllamaManager.checkCompatibility(modelPath, Math.min(context, 4096), detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)))
-          : await llamaManager.checkCompatibility(modelPath, Math.min(context, 4096), mmproj, detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)));
+        if (routedEngine === 'orion') throw failure(error instanceof Error ? error.message : String(error));
+        const report = await llamaManager.checkCompatibility(modelPath, Math.min(context, 4096), mmproj, detail => publish('updated', detail), error instanceof Error ? error : new Error(String(error)));
         const success = report.status === 'compatible' || report.status === 'repaired';
         const detail = [report.detail, ...(report.actions ?? []), report.restoreWarning].filter(Boolean).join('\n');
         publish('finished', detail, success);
@@ -2160,14 +2251,15 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
     }
   };
   if (!remote) {
-    try { await prepareModelToolSupport(routedModel, contextBudget, loadManaged); }
+    try { await prepareModelToolSupport(routedModel, contextBudget, routedEngine === 'orion' ? 'orion' : 'llama.cpp', loadManaged); }
     catch (error) {
       event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'error', content: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
   const modelInformation = await getModelInformation(routedModel);
-  let nativeToolCalling = remote ? remote.provider.tools : installedToolSupport.get(`${settings.ollamaUrl}\0${routedModel}`) === true;
+  const toolSupportKey = routedManaged ? `${settings.ollamaUrl}\0${routedEngine}\0${routedModel}` : `${settings.ollamaUrl}\0${routedModel}`;
+  let nativeToolCalling = remote ? remote.provider.tools : installedToolSupport.get(toolSupportKey) === true;
   // Project workspaces and their tool schemas are temporarily disabled.
   // The original handlers remain in place for a later re-enable.
   const workspaceSelected = false;
@@ -2290,7 +2382,13 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const retrievalQuestion = (attachmentStart >= 0 ? latestUserRequest.slice(0, attachmentStart) : latestUserRequest).trim();
   const memoryPromptTokens = (chunk: { title: string; role: string; text: string; createdAt: number }) => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, input.model) + 1;
   const memoryScope = input.conversationId;
-  const currentRequestMemory = retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice));
+  const dreamEngine = input.engine ?? conversation?.engine ?? settings.selectedEngine ?? 'orion';
+  const dreamKey = draftDreamKey(input.conversationId, input.model, dreamEngine, retrievalQuestion);
+  const prewarmedDraft = settings.composerDreaming ? draftDreamCache.get(dreamKey) : undefined;
+  if (prewarmedDraft) draftDreamCache.delete(dreamKey);
+  const currentRequestMemory = prewarmedDraft && Date.now() - prewarmedDraft.preparedAt < 45_000
+    ? Promise.resolve(prewarmedDraft.memories.filter(chunk => !recentMessageIds.has(chunk.messageId)).slice(0, 48))
+    : retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice));
   const recentContextQuery = [
     `Current request: ${latestUserRequest.slice(0, 2400)}`,
     ...priorDialogueContext.map(message => `Recent ${message.role} context: ${message.content.slice(0, 800)}`)
@@ -2407,15 +2505,15 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   };
   const requestAbort = new AbortController(); activeAbort = requestAbort;
   try {
-    if (remote || routedManaged || routedModel.startsWith('orion-gguf:') || routedModel.startsWith('orion-exl2:')) {
-      const routedPrefix = routedModel.startsWith('orion-exl2:') ? 'orion-exl2:' : 'orion-gguf:';
+    if (remote || routedManaged || routedModel.startsWith('orion-gguf:')) {
+      const routedPrefix = 'orion-gguf:';
       const managedId = routedManaged?.id ?? routedModel.slice(routedPrefix.length);
       const managed = routedManaged ?? (await readInstalledModels()).find(item => item.id === managedId && item.category === 'conversational');
       if (!managed && !remote) throw new Error('The selected Orion model is no longer installed. Open Models → Manage and refresh your models.');
       const modelRoot = path.resolve(modelsRoot());
-      const modelPath = routedEngine === 'exllamav2' ? path.dirname(path.resolve(modelRoot, managed?.path ?? '.')) : path.resolve(modelRoot, managed?.path ?? '.');
+      const modelPath = path.resolve(modelRoot, managed?.path ?? '.');
       if (!remote && !modelPath.startsWith(`${modelRoot}${path.sep}`)) throw new Error('The selected model path is invalid.');
-      const managedEndpoint = async () => `${await (routedEngine === 'exllamav2' ? exllamaManager.ensureServer(modelPath, contextBudget) : loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot)))}/v1/chat/completions`;
+      const managedEndpoint = async () => `${await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot))}/v1/chat/completions`;
       let repeatedLoopDetected = false;
       for (;;) {
         if (toolRounds++ >= 20) { event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: '\n\nI stopped this run after 20 tool rounds so it would not loop indefinitely. The tool results above are available if you want me to continue from them.' }); break; }
@@ -2441,7 +2539,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         if (!remote && !response.ok) {
           const failure = new Error(await response.clone().text());
           if (isModelCompatibilityError(failure)) {
-            await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot), failure);
+            await loadManaged(modelPath, contextBudget, modelMmprojPath(managed!, modelRoot), failure, managed!.format ?? 'gguf');
             response = await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
           }
         }
@@ -2463,7 +2561,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
               const index = part.index ?? calls.size, call = { id: part.content_block.id ?? crypto.randomUUID(), name: part.content_block.name ?? '', arguments: '{}', uiId: part.content_block.id ?? crypto.randomUUID() };
               calls.set(index, call); publishToolUpdate(call, 'started');
             } else if (part.type === 'content_block_delta' && part.delta?.type === 'text_delta' && part.delta.text) {
-              turnContent += part.delta.text; if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += part.delta.text; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: part.delta.text }); }
+              turnContent += part.delta.text; if (!(webSearchRequired && !webSearchAttempted)) { full += part.delta.text; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: part.delta.text }); }
             } else if (part.type === 'content_block_delta' && part.delta?.type === 'input_json_delta') {
               const call = calls.get(part.index ?? -1); if (call) { call.arguments += part.delta.partial_json ?? ''; publishToolUpdate(call, 'updated'); }
             } else if (part.type === 'message_delta' && part.delta?.stop_reason) finishReason = part.delta.stop_reason;
@@ -2471,7 +2569,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           }
           if (remote?.provider.kind === 'google' && part.candidates) {
             for (const [candidateIndex, candidate] of part.candidates.entries()) for (const [partIndex, chunk] of (candidate.content?.parts ?? []).entries()) {
-              if (chunk.text) { turnContent += chunk.text; if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += chunk.text; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: chunk.text }); } }
+              if (chunk.text) { turnContent += chunk.text; if (!(webSearchRequired && !webSearchAttempted)) { full += chunk.text; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: chunk.text }); } }
               if (chunk.functionCall?.name) {
                 const index = candidateIndex * 1000 + partIndex;
                 const call = calls.get(index) ?? { id: crypto.randomUUID(), name: chunk.functionCall.name, arguments: '{}', uiId: crypto.randomUUID() };
@@ -2486,7 +2584,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           if (part.usage?.completion_tokens) completionTokens = part.usage.completion_tokens; if (part.usage?.prompt_tokens) { promptContextTokens = part.usage.prompt_tokens; reportContextUsage(); }
           const reasoning = delta?.reasoning_content ?? delta?.reasoning;
           if (reasoning) { generatedContextTokens += estimateModelChatTokens(reasoning, settings.ollamaUrl, input.model); reportContextUsage(); event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'reasoning', content: reasoning }); }
-          if (delta?.content) { generatedContextTokens += estimateModelChatTokens(delta.content, settings.ollamaUrl, input.model); reportContextUsage(); turnContent += delta.content; if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += delta.content; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: delta.content }); } }
+          if (delta?.content) { generatedContextTokens += estimateModelChatTokens(delta.content, settings.ollamaUrl, input.model); reportContextUsage(); turnContent += delta.content; if (!(webSearchRequired && !webSearchAttempted)) { full += delta.content; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: delta.content }); } }
           for (const fragment of delta?.tool_calls ?? []) { const call = calls.get(fragment.index) ?? { id: '', name: '', arguments: '', uiId: crypto.randomUUID() }; call.id += fragment.id ?? ''; call.name += fragment.function?.name ?? ''; call.arguments += fragment.function?.arguments ?? ''; calls.set(fragment.index, call); publishToolUpdate(call, call.id && call.name ? 'updated' : 'started'); }
         };
         while (true) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const events = buffer.split(/\r?\n\r?\n/); buffer = events.pop() ?? ''; for (const part of events) for (const line of part.split(/\r?\n/)) processEvent(line); }
@@ -2498,12 +2596,12 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
             const rawTurnContent = turnContent;
             textProtocolRound = true; turnContent = parsed.visibleText;
             textCallContext = parsed.calls.map(call => `${call.name} ${JSON.stringify(call.arguments)}`).join('\n');
-            if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) full = full.slice(0, Math.max(0, full.length - rawTurnContent.length));
+            if (!(webSearchRequired && !webSearchAttempted)) full = full.slice(0, Math.max(0, full.length - rawTurnContent.length));
             full += turnContent;
             event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'replace', content: full });
             parsed.calls.forEach((call, index) => { const callId = crypto.randomUUID(); calls.set(index, { id: callId, uiId: callId, name: call.name, arguments: JSON.stringify(call.arguments) }); });
-          } else if (!nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += turnContent; if (turnContent) event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: turnContent }); }
-        } else if (!nativeToolCalling && turnContent && !(webSearchRequired && !webSearchAttempted)) { full += turnContent; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: turnContent }); }
+          }
+        }
         if (completionTokens > 0) evaluatedTokens += completionTokens;
         evaluationNanos += (Date.now() - began) * 1e6;
         if (!calls.size) {
@@ -2527,7 +2625,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           if (readKey) callsThisRound.add(readKey);
           const cached = duplicateInBatch ? undefined : cachedReadResult(call.name, args);
           const approvalSettings = await getSettings();
-          const requiresApproval = !(call.name === 'search_web' && webSearchRequired) && !cached && toolNeedsApproval(call.name, approvalSettings);
+          const requiresApproval = call.name === 'propose_reusable_tool' || (!(call.name === 'search_web' && webSearchRequired) && !cached && toolNeedsApproval(call.name, approvalSettings));
           const tool: ToolRequest = { id: toolId, name: call.name, input: args, description: 'Orion requested this action.', requiresApproval, conversationId: input.conversationId };
           event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'tool', phase: 'started', tool });
           const approved = requiresApproval ? await askForToolApproval(tool, event.sender) : true;
@@ -2590,7 +2688,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         if (!part.message) return;
         assistant = { ...assistant, ...part.message };
         if (part.message.thinking) { generatedContextTokens += estimateModelChatTokens(part.message.thinking, settings.ollamaUrl, input.model); reportContextUsage(); event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'reasoning', content: part.message.thinking }); }
-        if (part.message.content) { generatedContextTokens += estimateModelChatTokens(part.message.content, settings.ollamaUrl, input.model); reportContextUsage(); turnContent += part.message.content; if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += part.message.content; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: part.message.content }); } }
+        if (part.message.content) { generatedContextTokens += estimateModelChatTokens(part.message.content, settings.ollamaUrl, input.model); reportContextUsage(); turnContent += part.message.content; if (!(webSearchRequired && !webSearchAttempted)) { full += part.message.content; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: part.message.content }); } }
         for (const [index, item] of (part.message.tool_calls ?? []).entries()) {
           const current = streamedCalls.get(index) ?? { uiId: item.id ?? crypto.randomUUID(), name: '', arguments: '' };
           current.id = item.id ?? current.id; current.name = item.function.name || current.name;
@@ -2615,12 +2713,12 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           const rawTurnContent = turnContent;
           textProtocolRound = true; turnContent = parsed.visibleText;
           textCallContext = parsed.calls.map(call => `${call.name} ${JSON.stringify(call.arguments)}`).join('\n');
-          if (nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) full = full.slice(0, Math.max(0, full.length - rawTurnContent.length));
+          if (!(webSearchRequired && !webSearchAttempted)) full = full.slice(0, Math.max(0, full.length - rawTurnContent.length));
           full += turnContent;
           event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'replace', content: full });
           calls = parsed.calls.map(call => { const callId = crypto.randomUUID(); return { id: callId, uiId: callId, function: { name: call.name, arguments: call.arguments } }; });
-        } else if (!nativeToolCalling && !(webSearchRequired && !webSearchAttempted)) { full += turnContent; if (turnContent) event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: turnContent }); }
-      } else if (!nativeToolCalling && turnContent && !(webSearchRequired && !webSearchAttempted)) { full += turnContent; event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'token', content: turnContent }); }
+        }
+      }
       if (!calls?.length) {
         if (webSearchRequired && !webSearchAttempted) { await addRequiredResearchFallback(ollamaAgentHistory); continue; }
         if(queueOgsRepair(ollamaAgentHistory))continue;
@@ -2641,7 +2739,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         if (readKey) callsThisRound.add(readKey);
         const cached = duplicateInBatch ? undefined : cachedReadResult(name, args);
         const approvalSettings = await getSettings();
-        const requiresApproval = !(name === 'search_web' && webSearchRequired) && !cached && toolNeedsApproval(name, approvalSettings);
+        const requiresApproval = name === 'propose_reusable_tool' || (!(name === 'search_web' && webSearchRequired) && !cached && toolNeedsApproval(name, approvalSettings));
         const tool: ToolRequest = { id: call.uiId, name, input: args, description: 'Orion requested this action.', requiresApproval, conversationId: input.conversationId };
         event.sender.send('ollama:stream', { conversationId: input.conversationId, type: 'tool', phase: 'started', tool });
         const approved = requiresApproval ? await askForToolApproval(tool, event.sender) : true;
@@ -3053,6 +3151,13 @@ async function controlDesktopWindow(action: string, target: string) {
   return { output: `${action} window: ${match.title} (${match.class})`, success: true };
 }
 async function executeToolNow(tool: ToolRequest, memoryExcludedIds: ReadonlySet<string> = new Set(), conversationId?: string, activeModel = '', context = 8192): Promise<{ output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }> {
+  if (tool.name === 'propose_reusable_tool') {
+    try { const item=await installEvolvedTool(tool.input);return{output:`Installed “${item.name}” after all ${item.tests.length} sample tests passed and the user approved it. It is stored locally as a constrained transformation and can be disabled in Settings → Tool Workshop.`,success:true}; }
+    catch(error){return{output:error instanceof Error?error.message:String(error),success:false};}
+  }
+  if (tool.name === 'run_reusable_tool') {
+    const name=String(tool.input.name??'');const input=tool.input.input&&typeof tool.input.input==='object'&&!Array.isArray(tool.input.input)?tool.input.input as Record<string,unknown>:{};return executeEvolvedTool(name,input);
+  }
   if(conversationId&&(await readConversations()).some(item=>item.id===conversationId&&(item.privateVoice||item.localOnly))&&!VOICE_LOCAL_TOOLS.has(tool.name))return {output:'This tool is unavailable in a private local conversation.',success:false};
   if (tool.name === 'record_assumption') {
     if (!conversationId) throw Error('An active conversation is required.');

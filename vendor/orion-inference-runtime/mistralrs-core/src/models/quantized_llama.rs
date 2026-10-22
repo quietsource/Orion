@@ -1,0 +1,414 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
+use std::sync::Arc;
+
+use candle_core::quantized::ggml_file;
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{Embedding, Module};
+use mistralrs_quant::{GgufMatMul, QuantMethod, QuantMethodConfig};
+
+use crate::attention::{AttentionMask, SdpaParams};
+use crate::device_map::{DeviceMappedMask, DeviceMapper};
+use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
+use crate::layers_masker::PastKvLenCache;
+use crate::paged_attention::PagedAttention;
+use crate::pipeline::extract_logits;
+use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
+use crate::pipeline::EitherCache;
+use crate::pipeline::KvCache;
+use crate::pipeline::NormalCache;
+use crate::utils::gguf_metadata::ContentMetadata;
+use crate::utils::model_config as ModelConfig;
+use crate::utils::progress::{new_multi_progress, NiceProgressBar};
+// Default fallback for models that don't specify context_length
+const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
+
+fn attention_output_rows(
+    output: &Tensor,
+    mask: &AttentionMask,
+    batch: usize,
+    query_len: usize,
+) -> Result<Tensor> {
+    if mask.is_none() {
+        output.reshape((batch, query_len, ()))
+    } else {
+        output.transpose(1, 2)?.reshape((batch, query_len, ()))
+    }
+}
+
+struct Mlp {
+    feed_forward_w1: Arc<dyn QuantMethod>,
+    feed_forward_w2: Arc<dyn QuantMethod>,
+    feed_forward_w3: Arc<dyn QuantMethod>,
+}
+
+impl Mlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let w1 = self.feed_forward_w1.forward(xs)?;
+        let w3 = self.feed_forward_w3.forward(xs)?;
+        let y = crate::ops::mul_and_act(&w1, &w3, crate::layers::Activation::Silu)?;
+        self.feed_forward_w2.forward(&y)
+    }
+}
+
+struct LayerWeights {
+    attention_wq: Arc<dyn QuantMethod>,
+    attention_wk: Arc<dyn QuantMethod>,
+    attention_wv: Arc<dyn QuantMethod>,
+    attention_wo: Arc<dyn QuantMethod>,
+    attention_norm: QRmsNorm,
+    mlp: Mlp,
+    ffn_norm: QRmsNorm,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+    rotary: Arc<RotaryEmbedding>,
+    paged_attn: Option<PagedAttention>,
+    sdpa_params: SdpaParams,
+    dtype: DType,
+}
+
+impl LayerWeights {
+    fn forward_attn(
+        &self,
+        x: &Tensor,
+        mask: &AttentionMask,
+        start_offsets: &[usize],
+        kv_cache: &mut KvCache,
+        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    ) -> Result<Tensor> {
+        let (b_sz, seq_len, _) = x.dims3()?;
+
+        let q = self.attention_wq.forward(x)?.to_dtype(self.dtype)?;
+        let k = self.attention_wk.forward(x)?.to_dtype(self.dtype)?;
+        let v = self.attention_wv.forward(x)?.to_dtype(self.dtype)?;
+
+        let (q, k, v) = if seq_len != 1 {
+            let q = q
+                .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = k
+                .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = v
+                .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v)
+        } else {
+            let q = q.reshape((b_sz, self.n_head, seq_len, self.head_dim))?;
+            let k = k.reshape((b_sz, self.n_kv_head, seq_len, self.head_dim))?;
+            let v = v.reshape((b_sz, self.n_kv_head, seq_len, self.head_dim))?;
+            (q, k, v)
+        };
+
+        let positions =
+            crate::pipeline::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
+        let (q, k) = self.rotary.forward(&q, &k, &positions)?;
+
+        let y = match &self.paged_attn {
+            Some(paged_attn) => {
+                let ((key_cache, value_cache), input_metadata) = metadata.unwrap();
+                paged_attn.forward(
+                    &q,
+                    &k,
+                    &v,
+                    mask,
+                    Some(key_cache),
+                    Some(value_cache),
+                    input_metadata,
+                    &self.sdpa_params,
+                    None,
+                )?
+            }
+            None => {
+                let (k, v) = kv_cache.append(&k, &v)?;
+
+                Sdpa.run_attention(&q, &k, &v, mask, None, &self.sdpa_params)?
+            }
+        };
+
+        let y = attention_output_rows(&y, mask, b_sz, seq_len)?;
+
+        let y = self.attention_wo.forward(&y.to_dtype(x.dtype())?)?;
+        Ok(y)
+    }
+}
+
+pub struct ModelWeights {
+    tok_embeddings: Embedding,
+    layers: Vec<LayerWeights>,
+    norm: QRmsNorm,
+    output: Arc<dyn QuantMethod>,
+    pub device: Device,
+    pub cache: EitherCache,
+    pub max_seq_len: usize,
+    mapper: Option<Box<dyn DeviceMapper + Send + Sync>>,
+    dtype: DType,
+}
+
+impl ModelConfig::FromGGML for ModelWeights {
+    fn from_ggml(mut ct: ggml_file::Content, gqa: usize, dtype: DType) -> Result<Self> {
+        let head_dim = (ct.hparams.n_embd / ct.hparams.n_head) as usize;
+        let rotary = RotaryEmbedding::new_partial(
+            10000.,
+            ct.hparams.n_rot as usize,
+            DEFAULT_MAX_SEQ_LEN as usize,
+            &ct.device,
+            false,
+            dtype,
+        )?;
+        let tok_embeddings = ct.remove("tok_embeddings.weight")?;
+        let tok_embeddings = tok_embeddings.dequantize(&ct.device)?;
+        let norm = QRmsNorm::new(ct.remove("norm.weight")?, 1e-5)?;
+        let output = ct.remove("output.weight")?;
+        let mut layers = Vec::with_capacity(ct.hparams.n_layer as usize);
+        for layer_idx in NiceProgressBar::<_, 'b'>(
+            0..ct.hparams.n_layer,
+            "Loading repeating layers",
+            &new_multi_progress(),
+        ) {
+            let prefix = format!("layers.{layer_idx}");
+            let attention_wq = ct.remove(&format!("{prefix}.attention.wq.weight"))?;
+            let attention_wk = ct.remove(&format!("{prefix}.attention.wk.weight"))?;
+            let attention_wv = ct.remove(&format!("{prefix}.attention.wv.weight"))?;
+            let attention_wo = ct.remove(&format!("{prefix}.attention.wo.weight"))?;
+            let mlp = {
+                let feed_forward_w1 = ct.remove(&format!("{prefix}.feed_forward.w1.weight"))?;
+                let feed_forward_w2 = ct.remove(&format!("{prefix}.feed_forward.w2.weight"))?;
+                let feed_forward_w3 = ct.remove(&format!("{prefix}.feed_forward.w3.weight"))?;
+                Mlp {
+                    feed_forward_w1: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                        q_weight: Arc::new(feed_forward_w1),
+                        b: None,
+                    })?),
+                    feed_forward_w2: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                        q_weight: Arc::new(feed_forward_w2),
+                        b: None,
+                    })?),
+                    feed_forward_w3: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                        q_weight: Arc::new(feed_forward_w3),
+                        b: None,
+                    })?),
+                }
+            };
+            let attention_norm = ct.remove(&format!("{prefix}.attention_norm.weight"))?;
+            let ffn_norm = ct.remove(&format!("{prefix}.ffn_norm.weight"))?;
+            let n_kv_head = ct.hparams.n_head as usize / gqa;
+            layers.push(LayerWeights {
+                attention_wq: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                    q_weight: Arc::new(attention_wq),
+                    b: None,
+                })?),
+                attention_wk: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                    q_weight: Arc::new(attention_wk),
+                    b: None,
+                })?),
+                attention_wv: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                    q_weight: Arc::new(attention_wv),
+                    b: None,
+                })?),
+                attention_wo: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                    q_weight: Arc::new(attention_wo),
+                    b: None,
+                })?),
+                attention_norm: QRmsNorm::new(attention_norm, 1e-5)?,
+                mlp,
+                ffn_norm: QRmsNorm::new(ffn_norm, 1e-5)?,
+                n_head: ct.hparams.n_head as usize,
+                n_kv_head: ct.hparams.n_head as usize / gqa,
+                head_dim: (ct.hparams.n_embd / ct.hparams.n_head) as usize,
+                rotary: rotary.clone().into(),
+                paged_attn: None, // TODO
+                sdpa_params: SdpaParams {
+                    n_kv_groups: ct.hparams.n_head as usize / n_kv_head,
+                    softcap: None,
+                    softmax_scale: 1.0 / (head_dim as f32).sqrt(),
+                    sliding_window: None,
+                    sinks: None,
+                },
+                dtype,
+            })
+        }
+        Ok(Self {
+            tok_embeddings: Embedding::new(tok_embeddings, ct.hparams.n_embd as usize),
+            layers,
+            norm,
+            output: Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+                q_weight: Arc::new(output),
+                b: None,
+            })?),
+            device: ct.device.clone(),
+            cache: EitherCache::Normal(NormalCache::new(
+                ct.hparams.n_layer as usize,
+                DEFAULT_MAX_SEQ_LEN as usize,
+            )),
+            max_seq_len: DEFAULT_MAX_SEQ_LEN as usize, // Cannot determine from ggml.
+            mapper: None,
+            dtype,
+        })
+    }
+}
+
+// llama `llm` fields:
+// https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#llm
+// NOTE: Types here do not match spec
+pub(crate) struct PropsGGUF {
+    pub n_expert: usize,
+    pub n_expert_used: usize,
+    pub head_count: usize,
+    pub head_count_kv: usize,
+    pub block_count: usize,
+    pub embedding_length: usize,
+    pub rope_dim: usize,
+    pub rms_norm_eps: f32,
+    pub max_seq_len: usize,
+    pub rope_freq_base: f32,
+    pub key_length: usize,
+    pub value_length: usize,
+}
+
+impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
+    type Error = anyhow::Error;
+
+    fn try_from(c: ContentMetadata) -> std::result::Result<Self, Self::Error> {
+        c.verify_arch_any(&["llama", "mistral3"])?;
+
+        let required = [
+            "attention.head_count",
+            "attention.head_count_kv",
+            "block_count",
+            "embedding_length",
+            "rope.dimension_count",
+            "attention.layer_norm_rms_epsilon",
+        ];
+        c.has_required_keys(&required)?;
+
+        let embed_len = c.get_value::<u32>("embedding_length")? as usize;
+        let head_count = c.get_value::<u32>("attention.head_count")? as usize;
+
+        // NOTE: Values are not aligned with GGUFv3 types
+        // TODO: Normalize value types to spec
+        let props = Self {
+            n_expert: c.get_value::<u32>("expert_count").ok().unwrap_or(0) as usize,
+            n_expert_used: c.get_value::<u32>("expert_used_count").ok().unwrap_or(0) as usize,
+            head_count,
+            head_count_kv: c.get_value::<u32>("attention.head_count_kv")? as usize,
+            block_count: c.get_value::<u32>("block_count")? as usize,
+            embedding_length: embed_len,
+            rope_dim: c.get_value::<u32>("rope.dimension_count")? as usize,
+            // Strangely this value is generally 1e-6 in GGUF file but used to be 1e-5 by default.
+            rms_norm_eps: c.get_value("attention.layer_norm_rms_epsilon")?,
+            max_seq_len: c
+                .get_value::<u64>("context_length")
+                .ok()
+                .unwrap_or(DEFAULT_MAX_SEQ_LEN as u64) as usize,
+            rope_freq_base: c.get_value("rope.freq_base").ok().unwrap_or(10_000_f32),
+            key_length: c
+                .get_value::<u32>("attention.key_length")
+                .ok()
+                .map(|x| x as usize)
+                .unwrap_or(embed_len / head_count),
+            value_length: c
+                .get_value::<u32>("attention.value_length")
+                .ok()
+                .map(|x| x as usize)
+                .unwrap_or(embed_len / head_count),
+        };
+
+        Ok(props)
+    }
+}
+
+impl ModelWeights {
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        start_offsets: &[usize],
+        context_lens: Vec<(usize, usize)>,
+        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
+    ) -> Result<Tensor> {
+        let mut layer_in = self.tok_embeddings.forward(x)?;
+        let cache = &mut self.cache.normal().0;
+        let mask = CausalMasker.make_causal_mask(
+            x,
+            metadata
+                .as_ref()
+                .map(|(_, _)| &start_offsets as &dyn PastKvLenCache)
+                .unwrap_or(cache as &dyn PastKvLenCache),
+            self.dtype,
+            &CausalMaskConfig::default(),
+        )?;
+        // PagedAttention prompt chunking
+        let mask = if metadata
+            .as_ref()
+            .map(|(_, meta)| meta.is_first_prompt_chunk)
+            .unwrap_or(true)
+        {
+            mask
+        } else {
+            AttentionMask::None
+        };
+        let mask = if let Some(ref mapper) = self.mapper {
+            DeviceMappedMask::new(mask, &**mapper)?
+        } else {
+            DeviceMappedMask::from_single(mask)
+        };
+        for (i, layer) in self.layers.iter().enumerate() {
+            if let Some(ref mapper) = self.mapper {
+                layer_in = mapper.map(layer_in, i)?;
+            }
+            let x = layer_in;
+            let residual = &x;
+            let x = layer.attention_norm.forward(&x)?;
+            let attn = layer.forward_attn(
+                &x,
+                &mask.get(x.device()),
+                start_offsets,
+                &mut cache[i],
+                metadata
+                    .as_ref()
+                    .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
+            )?;
+            let x = (attn + residual)?;
+
+            // MLP
+            let residual = &x;
+            let x = layer.ffn_norm.forward(&x)?;
+            let x = layer.mlp.forward(&x)?;
+            let x = (x + residual)?;
+            layer_in = x;
+        }
+        let layer_in = layer_in.to_device(&self.device)?;
+        let x = self.norm.forward(&layer_in)?;
+        let x = extract_logits(&x, context_lens)?;
+        self.output.forward(&x.contiguous()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_prefill_preserves_query_head_order() -> Result<()> {
+        let head_major = Tensor::from_vec(
+            vec![0f32, 1., 4., 5., 2., 3., 6., 7.],
+            (1, 2, 2, 2),
+            &Device::Cpu,
+        )?;
+        let custom = AttentionMask::Custom(Tensor::zeros((2, 2), DType::F32, &Device::Cpu)?);
+        for mask in [AttentionMask::CausalFlash, custom] {
+            let output = attention_output_rows(&head_major, &mask, 1, 2)?;
+            assert_eq!(
+                output.to_vec3::<f32>()?,
+                vec![vec![vec![0., 1., 2., 3.], vec![4., 5., 6., 7.]]]
+            );
+        }
+        let row_major = Tensor::arange(0f32, 8., &Device::Cpu)?.reshape((1, 2, 2, 2))?;
+        assert_eq!(
+            attention_output_rows(&row_major, &AttentionMask::None, 1, 2)?.to_vec3::<f32>()?,
+            vec![vec![vec![0., 1., 2., 3.], vec![4., 5., 6., 7.]]]
+        );
+        Ok(())
+    }
+}

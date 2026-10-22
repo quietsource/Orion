@@ -5,6 +5,7 @@ process.chdir(root);
 async function run(command, args) { const child = Bun.spawn([command, ...args], { cwd: root, stdout: 'inherit', stderr: 'inherit' }); if (await child.exited !== 0) throw Error(`${command} ${args.join(' ')} failed`); }
 await run('bun', ['scripts/generate-highlight-languages.mjs']);
 await run('bun', ['run', 'typecheck']);
+await run('bun', ['scripts/build-inference-runtime.mjs']);
 await mkdir('dist/main', { recursive: true });
 await mkdir('dist/ocr', { recursive: true });
 await mkdir('dist/native-canvas', { recursive: true });

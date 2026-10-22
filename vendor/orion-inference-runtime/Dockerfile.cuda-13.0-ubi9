@@ -1,0 +1,33 @@
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubi9 AS builder
+
+RUN dnf install -y git
+RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup update nightly && rustup default nightly
+
+WORKDIR /mistralrs
+COPY . .
+
+# Rayon threads are limited to minimize memory requirements in CI, avoiding OOM
+# Rust threads are increased with a nightly feature for faster compilation (single-threaded by default)
+ARG CUDA_COMPUTE_CAP=80
+ARG RAYON_NUM_THREADS=4
+ARG RUST_NUM_THREADS=4
+ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
+ARG WITH_FEATURES="cuda,cudnn"
+RUN cargo build --release -p mistralrs-cli --features "${WITH_FEATURES}"
+
+FROM nvidia/cuda:13.0.2-cudnn-runtime-ubi9
+
+COPY --chmod=755 --from=builder /mistralrs/target/release/mistralrs /usr/local/bin/mistralrs
+# Chat templates for models that ship without one
+COPY --from=builder /mistralrs/chat_templates /chat_templates
+
+# hf-hub reads HF_HOME; mount a volume at /data to persist downloaded models
+ENV HF_HOME=/data
+
+# Default port of `mistralrs serve`
+EXPOSE 1234
+
+ENTRYPOINT ["mistralrs"]
+CMD ["--help"]

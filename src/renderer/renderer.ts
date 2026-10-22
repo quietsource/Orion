@@ -10,7 +10,7 @@ import DOMPurify from 'dompurify';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 function applyTheme() { document.documentElement.dataset.theme = 'graphite'; document.body.dataset.theme = 'graphite'; document.documentElement.style.colorScheme = 'dark'; }
-import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolCallRecord, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, BackendState, GeneratedMedia, WorkspaceReview, WorkspaceStatus, ToolMode, WebResearchSource, AppUpdateState } from '../shared/types';
+import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolCallRecord, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, BackendState, GeneratedMedia, WorkspaceReview, WorkspaceStatus, ToolMode, WebResearchSource, AppUpdateState, InferenceEngine, SwarmRecord } from '../shared/types';
 import './style.css';
 import './agent.css';
 import { installMemoryHistory } from './memoryHistory';
@@ -38,6 +38,8 @@ document.addEventListener('pointerdown', event => {
   if (target instanceof Element && target.closest('.message-retention-control')) return;
   document.querySelectorAll<HTMLDetailsElement>('.message-retention-control[open]').forEach(menu => { menu.open = false; });
 });
+let lastActivityPing=0;const pingLocalActivity=()=>{const now=Date.now();if(now-lastActivityPing<5000)return;lastActivityPing=now;void window.orion.reportActivity();};
+for(const eventName of ['keydown','pointerdown','wheel','touchstart'])document.addEventListener(eventName,pingLocalActivity,{passive:true});
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
   const open = document.querySelector<HTMLDetailsElement>('.message-retention-control[open]');
@@ -125,22 +127,23 @@ const memoryControls = installMemoryHistory({
 });
 let memoryControlsConversation: string | undefined;
 
-type QueuedMessage = { id: string; conversationId: string; content: string; model: string; attachments: typeof attachments; canvasAttachment?: MessageAttachment; voiceInput?: boolean; editMessageId?: string; replaceMessageId?: string };
+type QueuedMessage = { id: string; conversationId: string; content: string; model: string; engine: InferenceEngine; attachments: typeof attachments; canvasAttachment?: MessageAttachment; voiceInput?: boolean; editMessageId?: string; replaceMessageId?: string };
 type SendOutcome = 'complete'|'cancelled'|'failed'|'unavailable';
 const messageQueue = new MessageQueue<QueuedMessage>();
 let activeChatTask: Promise<SendOutcome> | null = null, queueInterruptPending = false, queueAutoPaused = false;
 let editingMessageId: string | null = null, editingDraft = '', rollbackDraftMessageId: string | null = null;
+let rollbackPending = false, editingPending = false;
 let generationIdle: Promise<void> = Promise.resolve(), resolveGenerationIdle: (() => void) | undefined;
 let canvasDocument: CanvasDocument|null=null, canvasNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], canvasPrevious:string|null=null, canvasPreviousNotes:Array<{kind:'comment'|'remove';quote:string;text:string}>=[], pendingCanvasReview:{document:CanvasDocument;notes:Array<{kind:'comment'|'remove';quote:string;text:string}>;edited:string}|null=null;
 type CanvasSession = { document: CanvasDocument; notes: Array<{kind:'comment'|'remove';quote:string;text:string}>; previous: string|null; previousNotes: Array<{kind:'comment'|'remove';quote:string;text:string}>; mode: 'source'|'preview'|'diff' };
 const canvasSessions = new Map<string, CanvasSession>();
 let workspaceSettingsWrite: Promise<void> = Promise.resolve();
-let activeView: 'Chat' | 'Models' | 'Create' = 'Chat';
+let activeView: 'Chat' | 'Models' | 'Create' | 'Swarm' = 'Chat';
 let chatMode: ToolMode = 'chat';
 let workspaceReview: WorkspaceReview | null = null;
 let modelTab: 'conversational'|'creative'|'manage'|'providers' = 'conversational', creativeCategory: 'image'|'video' = 'image';
-let managedLlamaInstalled = false, managedExl2Installed = false, checkingModelId = '';
-let browseEngine: 'llama.cpp'|'exllamav2' = 'llama.cpp';
+let managedLlamaInstalled = false, managedOrionInstalled = false, checkingModelId = '';
+let browseEngine: 'llama.cpp'|'orion' = 'orion';
 const modelCompatibilityReports = new Map<string, import('../shared/types').ModelCompatibilityReport | string>();
 let modelQuery = '', hubModels: HubModel[] = [], installedModels: InstalledModel[] = [], activeHubRepo = '', activeHubFiles: HubFile[] = [], createState: BackendState | null = null, createEngineStateLoading = false;
 let hfTokenConfigured: boolean | null = null, hfTokenDraft = '', hfTokenStatus = '', hfTokenSaveTimer: number | undefined, hfTokenSaveRequest = 0, hfTokenConfigLoading = false;
@@ -411,31 +414,50 @@ async function stopGenerationForMessageEdit() {
   if (pending) await pending.catch(() => undefined); else if (streaming) await idle;
 }
 async function rollbackUserMessage(messageId: string) {
-  if (!current) return;
-  const selected = current.messages.find(item => item.id === messageId && item.role === 'user');
-  if (!selected || !await askConfirm('Remove every message after this point and remove those turns from OrionFS memory? The selected message will stay available to edit in the composer.', 'Roll back conversation')) return;
+  const target = current;
+  if (!target || rollbackPending || editingPending) return;
+  const selected = target.messages.find(item => item.id === messageId && item.role === 'user');
+  if (!selected) return;
+  rollbackPending = true;
   try {
+    if (!await askConfirm('Remove the replies and later messages after this point, and remove their OrionFS memories? The selected message will be placed in the composer for editing.', 'Roll back conversation')) return;
     await stopGenerationForMessageEdit();
-    const rolled = await window.orion.memoryHistory.rollbackMessage(current.id, messageId);
+    if (current?.id !== target.id) return;
+    const rolled = await window.orion.memoryHistory.rollbackMessage(target.id, messageId);
     Object.assign(current, rolled); conversations = conversations.map(item => item.id === rolled.id ? current! : item);
     rollbackDraftMessageId = messageId; editingMessageId = null;
     promptBox.value = selected.content; promptBox.dispatchEvent(new Event('input', { bubbles: true })); promptBox.focus();
     await memoryControls.refresh(); renderHistory(); renderMessages(true); await save(current);
-    showNotice('The conversation and matching OrionFS entries now end at this message. Edit it in the composer and send to continue.', 'Conversation rolled back');
+    showNotice('Later messages and their OrionFS sources were removed. Edit the selected message in the composer and send it to continue.', 'Conversation rolled back');
   } catch (error) { showNotice(error instanceof Error ? error.message : String(error), 'Rollback failed'); }
+  finally { rollbackPending = false; }
 }
 function editUserMessage(messageId: string, content: string) {
+  if (streaming || rollbackPending) return;
   editingMessageId = messageId; editingDraft = content; renderMessages();
   const input = chatBox.querySelector<HTMLTextAreaElement>(`[data-message-id="${CSS.escape(messageId)}"] .message-edit-input`);
-  input?.focus(); input?.setSelectionRange(input.value.length, input.value.length);
+  if (!input) return;
+  input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+  input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 360)}px`;
 }
 function submitUserMessageEdit(messageId: string, content: string) {
-  if (!current || !content.trim()) return;
+  if (!current || !content.trim() || rollbackPending) return;
   const target = current, model = ($('model') as HTMLSelectElement).value || target.model;
+  if (!target.messages.some(item => item.id === messageId && item.role === 'user')) { showNotice('This message is no longer in the conversation. Refresh the chat and try again.', 'Message unavailable'); return; }
   editingMessageId = null; editingDraft = ''; rollbackDraftMessageId = null;
-  void launchSubmission({ id: id(), conversationId: target.id, content: content.trim(), model, attachments: [], editMessageId: messageId });
+  void launchSubmission({ id: id(), conversationId: target.id, content: content.trim(), model, engine: ($('engine') as HTMLSelectElement).value as InferenceEngine, attachments: [], editMessageId: messageId });
 }
-function newConversation(reuseEmpty = false) { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); const reusable = reuseEmpty ? conversations.find(isReusableUntitledConversation) : undefined; current = reusable ?? { id: id(), title: 'Untitled', model: settings.selectedModel, createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; current.title='Untitled'; switchCanvasConversation(current.id); if(!reusable)conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
+function cancelUserMessageEdit() { editingMessageId = null; editingDraft = ''; renderMessages(); }
+async function beginUserMessageEdit(active: Conversation, message: Message) {
+  if (editingPending || rollbackPending) return;
+  editingPending = true;
+  try {
+    await stopGenerationForMessageEdit();
+    if (current?.id === active.id && active.messages.some(item => item.id === message.id && item.role === 'user')) editUserMessage(message.id, message.content);
+  } catch (error) { showNotice(error instanceof Error ? error.message : String(error), 'Could not stop the response'); }
+  finally { editingPending = false; }
+}
+function newConversation(reuseEmpty = false) { voiceControls.changedConversation(); if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Chat'); const t = now(); const reusable = reuseEmpty ? conversations.find(isReusableUntitledConversation) : undefined; current = reusable ?? { id: id(), title: 'Untitled', model: settings.selectedModel, engine: settings.selectedEngine ?? 'orion', createdAt: t, updatedAt: t, messages: [], mode: 'chat' }; current.title='Untitled'; switchCanvasConversation(current.id); if(!reusable)conversations.unshift(current); renderWorkspaceReview(null); save(); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true); void renderMemoryUsage(); if (!commandPalette.hidden) closeCommandPalette(); promptBox.focus(); }
 let memoryRenderSequence = 0;
 let memoryFailureCount = 0;
 async function renderMemoryUsage() {
@@ -576,7 +598,7 @@ function renderProviders(page: HTMLElement) {
 
 function appendCompatibilityCheck(card: HTMLElement, modelId: string) {
   const installed = installedModels.find(item => item.id === modelId);
-  if (installed?.engine === 'exllamav2' ? !managedExl2Installed : !managedLlamaInstalled) return;
+  if (!managedOrionInstalled && !managedLlamaInstalled) return;
   const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary model-compatibility-button';
   button.textContent = checkingModelId === modelId ? 'Checking compatibility…' : 'Check compatibility';
   button.disabled = Boolean(checkingModelId);
@@ -606,7 +628,7 @@ function appendCompatibilityCheck(card: HTMLElement, modelId: string) {
     card.append(result);
   }
 }
-function assessModelFit(size: number, engine: 'llama.cpp'|'exllamav2'): ModelFit {
+function assessModelFit(size: number, _engine: 'llama.cpp'|'orion'): ModelFit {
   if (!modelFitResources || size <= 0) return 'unknown';
   const ramFree = Math.max(0, modelFitResources.totalRamMB - modelFitResources.usedRamMB) / 1024;
   const vramTotal = modelFitResources.totalVramMB / 1024;
@@ -616,7 +638,6 @@ function assessModelFit(size: number, engine: 'llama.cpp'|'exllamav2'): ModelFit
   const gpuNeed = weights * 1.18 + 1.25;
   const ramNeed = weights * 1.25 + 2;
   if (vramTotal > 0 && vramFree >= gpuNeed) return 'gpu';
-  if (engine === 'exllamav2') return 'large';
   if (ramFree >= ramNeed) return vramFree >= 1.5 ? 'hybrid' : 'cpu';
   return 'large';
 }
@@ -624,7 +645,9 @@ function modelFitLabel(fit: ModelFit) {
   return fit === 'gpu' ? 'Good fit · GPU' : fit === 'hybrid' ? 'Fits · partial GPU offload' : fit === 'cpu' ? 'Fits · CPU' : fit === 'large' ? 'May exceed free memory' : 'Fit estimate unavailable';
 }
 function modelQuantLabel(file: HubFile) {
-  if (file.revision) return file.revision;
+  if (file.format === 'gptq' || file.format === 'awq') return file.format.toUpperCase();
+  if (file.revision && file.revision !== 'main') return file.revision;
+  if (file.revision === 'main' && /\bbpw\b/i.test(file.name)) return file.name.replace(/\s+·\s+main$/i, '');
   const base = file.name.split('/').at(-1) ?? file.name;
   return base.match(/(?:^|[._-])((?:I?Q)\d+(?:_[A-Z0-9]+)*)(?:[._-]|$)/i)?.[1] ?? base.replace(/\.(?:gguf|safetensors|ckpt)$/i, '');
 }
@@ -674,12 +697,12 @@ function appendModelFileControls(actions: HTMLElement, repo: string, category: M
   if (!files.length) {
     select.add(new Option('No supported quantizations found', ''));
     select.disabled = true;
-    const hint=document.createElement('span');hint.className='hub-file-fit';hint.textContent=category==='conversational'&&browseEngine==='exllamav2'?'No complete EXL2 branch was found. Try Reload files or a different repository.':'No supported model files were found.';
+    const hint=document.createElement('span');hint.className='hub-file-fit';hint.textContent='No supported GGUF, GPTQ, or AWQ model files were found.';
     const download=document.createElement('button');download.type='button';download.className='primary hub-model-download';download.textContent='Download';download.disabled=true;
     actions.append(select,hint,download);
     return;
   }
-  for(const file of files){const size=file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0);const fit=category==='conversational'?assessModelFit(size,browseEngine):'unknown';const option=new Option(`${file.name} · ${modelSize(size)}${file.revision?' · complete EXL2 bundle':file.relatedFiles?.length?` · ${file.relatedFiles.length+1} files`:''}${category==='conversational'?` · ${modelFitLabel(fit)}`:''}`,file.name);option.dataset.fit=fit;option.dataset.size=String(size);select.add(option);}
+  for(const file of files){const size=file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0);const fit=category==='conversational'?assessModelFit(size,browseEngine):'unknown';const label=file.format&&file.format!=='gguf'?`${file.format.toUpperCase()} model bundle`:file.name;const option=new Option(`${label} · ${modelSize(size)}${file.relatedFiles?.length?` · ${file.relatedFiles.length+1} files`:''}${category==='conversational'?` · ${modelFitLabel(fit)}`:''}`,file.name);option.dataset.fit=fit;option.dataset.size=String(size);select.add(option);}
   const fit=document.createElement('span');fit.className='hub-file-fit';fit.textContent=category==='conversational'?`${modelFitLabel(assessModelFit(Number(select.selectedOptions[0]?.dataset.size??0),browseEngine))}. Estimate varies with context length and other running apps.`:'';
   const download=document.createElement('button');download.type='button';download.className='primary hub-model-download';download.textContent='Download';download.disabled=!select.value;download.onclick=()=>{if(!select.value)return;void beginModelDownload(repo,select.value,category,download);};
   select.onchange=()=>{const option=select.selectedOptions[0];fit.textContent=category==='conversational'?`${modelFitLabel((option?.dataset.fit??'unknown') as ModelFit)} · ${modelSize(Number(option?.dataset.size??0))}. Estimate varies with context length and other running apps.`:'';download.disabled=!select.value;};
@@ -698,7 +721,7 @@ function renderModelsView() {
   chatBox.replaceChildren();
   const page = document.createElement('section'); page.className = 'workspace-view models-page'; page.setAttribute('aria-labelledby', 'models-heading');
   const title = document.createElement('h1'); title.id = 'models-heading'; title.textContent = 'Model browser';
-  const subtitle = document.createElement('p'); subtitle.textContent = modelTab==='providers' ? 'Connect and manage OpenAI-compatible API providers.' : modelTab==='creative' ? 'Browse Hugging Face image and video models. Orion installs them into its private headless native image/video engine model folders.' : 'Find and manage local models. Orion downloads GGUF chat models for the managed llama.cpp engine and EXL2 quantizations for the managed ExLlamaV2 engine.';
+  const subtitle = document.createElement('p'); subtitle.textContent = modelTab==='providers' ? 'Connect and manage OpenAI-compatible API providers.' : modelTab==='creative' ? 'Browse Hugging Face image and video models. Orion installs them into its private headless native image/video engine model folders.' : 'Find GGUF, GPTQ, and AWQ chat models for Orion inference, or GGUF models for llama.cpp.';
   page.append(title, subtitle);
   const tabs = document.createElement('div'); tabs.className = 'model-tabs';
   for (const [tab, label] of [['conversational','Conversational'],['creative','Image / Video'],['manage','Manage'],['providers','Providers']] as const) { const button = document.createElement('button'); button.type = 'button'; button.className = `model-tab${modelTab===tab?' active':''}`; button.textContent = label; button.onclick = () => { if(modelTab!==tab){hubModels=[];hubNextUrl=null;modelQuery='';activeHubRepo='';activeHubFiles=[];}modelTab = tab; void renderModelsView(); if(tab==='conversational')void loadPopularHubModels('conversational');else if(tab==='creative')void loadPopularHubModels(creativeCategory); }; tabs.append(button); }
@@ -718,7 +741,7 @@ function renderModelsView() {
     if (modelTab==='conversational') {
       ensureModelFitResources();
       const enginesRow=document.createElement('div'); enginesRow.className='model-tabs model-subtabs model-engine-tabs';
-      for (const [value,label] of [['llama.cpp','#llama.cpp · GGUF models'],['exllamav2','#exllamav2 · EXL2 models']] as const) { const b=document.createElement('button');b.type='button';b.className=`model-tab${browseEngine===value?' active':''}`;b.textContent=label;b.title=`Browse models for the managed ${value} engine`;b.onclick=()=>{if(browseEngine!==value){hubModels=[];hubNextUrl=null;modelQuery='';activeHubRepo='';activeHubFiles=[];}browseEngine=value;void renderModelsView();void loadPopularHubModels('conversational');};enginesRow.append(b);}
+      for (const [value,label] of [['llama.cpp','#llama.cpp · GGUF models'],['orion','#orion · GGUF, GPTQ, AWQ']] as const) { const b=document.createElement('button');b.type='button';b.className=`model-tab${browseEngine===value?' active':''}`;b.textContent=label;b.title=`Browse models for the managed ${value} engine`;b.onclick=()=>{if(browseEngine!==value){hubModels=[];hubNextUrl=null;modelQuery='';activeHubRepo='';activeHubFiles=[];}browseEngine=value;void renderModelsView();void loadPopularHubModels('conversational');};enginesRow.append(b);}
       page.append(enginesRow);
       const filters=document.createElement('div');filters.className='model-browser-filters';
       const fitLabel=document.createElement('label');fitLabel.textContent='Hardware fit';const fitSelect=document.createElement('select');fitSelect.setAttribute('aria-label','Filter by estimated hardware fit');fitSelect.innerHTML='<option value="all">All models</option><option value="fits">Fits this PC</option><option value="gpu">Good GPU fit</option><option value="cpu">CPU or partial GPU fit</option><option value="large">May exceed memory</option>';fitSelect.value=modelFitFilter;fitSelect.disabled=!modelFitResources;fitSelect.onchange=()=>{modelFitFilter=fitSelect.value as typeof modelFitFilter;applyModelBrowserFilters();};fitLabel.append(fitSelect);
@@ -726,13 +749,14 @@ function renderModelsView() {
       const note=document.createElement('span');note.className='model-fit-note';note.textContent=modelFitResources?'Estimates use current free RAM and VRAM. Actual use depends on context length and other apps.':'Reading current RAM and VRAM…';
       filters.append(fitLabel,sortLabel,note);page.append(filters);
     }
-    const search = document.createElement('div'); search.className = 'model-search'; const input=document.createElement('input'); input.placeholder = modelTab==='conversational' ? (browseEngine==='exllamav2'?'Search Hugging Face chat models (e.g. EXL2)':'Search Hugging Face chat models (e.g. Qwen GGUF)') : `Search Hugging Face ${creativeCategory} models`; input.value = modelQuery; input.oninput=()=>{modelQuery=input.value;};
+    const search = document.createElement('div'); search.className = 'model-search'; const input=document.createElement('input'); input.placeholder = modelTab==='conversational' ? ('Search Hugging Face GGUF, GPTQ, or AWQ chat models (e.g. Qwen)') : `Search Hugging Face ${creativeCategory} models`; input.value = modelQuery; input.oninput=()=>{modelQuery=input.value;};
     const searchButton=document.createElement('button');searchButton.type='button';searchButton.className='primary';searchButton.textContent='Search';searchButton.onclick=async()=>{modelQuery=input.value.trim();hubModels=[];hubNextUrl=null;popularHubRequest++;popularHubLoading=null;popularHubError='';results.replaceChildren();results.textContent='Searching Hugging Face…';try{const found=await window.orion.searchHub(modelQuery,browseCategory,null,browseCategory==='conversational'?browseEngine:undefined);hubModels=found.models;hubNextUrl=found.nextUrl;await renderModelsView();}catch(error){results.textContent=`Search failed: ${error instanceof Error?error.message:String(error)}`;}};
     input.id='hub-query'; input.addEventListener('keydown',e=>{if(e.key==='Enter')searchButton.click();}); search.append(input,searchButton); page.append(search);
     const popularLabel=document.createElement('p');popularLabel.className='muted hub-popular-label';popularLabel.textContent=modelQuery?'Search results':'Popular on Hugging Face · sorted by downloads';page.append(popularLabel);
     if (hubModels.length) for (const model of hubModels) {
       const card=document.createElement('article');card.className='model-card';card.dataset.repo=model.id;card.dataset.fit='unknown';const top=document.createElement('div');top.className='model-card-top';const name=document.createElement('h2');name.textContent=model.id==='QuantStack/Wan2.2-TI2V-5B-GGUF'?'Wan 2.2 TI2V 5B':model.id;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=modelTab==='creative'?'Hugging Face repository':model.pipelineTag??'Hugging Face';top.append(name,badge);card.append(top);
       if (model.engines?.length) { const tags=document.createElement('div'); tags.className='model-tags'; for (const engine of model.engines) { const chip=document.createElement('span'); chip.className=`model-engine-tag${browseEngine===engine?' active':''}`; chip.textContent=`#${engine}`; chip.title=`Runs on the managed ${engine} engine`; tags.append(chip); } card.append(tags); }
+      if(model.formats?.length){const formats=document.createElement('div');formats.className='model-tags';for(const format of model.formats){const chip=document.createElement('span');chip.className='model-engine-tag';chip.textContent=format.toUpperCase();formats.append(chip);}card.append(formats);}
       card.dataset.downloads=String(model.downloads??0);
       const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=`${(model.downloads??0).toLocaleString()} downloads${model.likes?` · ${model.likes.toLocaleString()} likes`:''}${model.license?` · License: ${model.license}`:''}${model.description?` · ${model.description.slice(0,180)}`:''}`;card.append(meta);
       const size=document.createElement('p');size.className='model-download-size';size.textContent='Checking supported download size…';card.append(size);
@@ -741,15 +765,15 @@ function renderModelsView() {
       let sizePromise=modelCardSizes.get(sizeKey);
       if(!sizePromise){sizePromise=window.orion.getHubFiles(model.id,modelTab==='conversational'?'conversational':creativeCategory,modelTab==='conversational'?browseEngine:undefined).then(files=>{
         const seen=new Set<string>();let total=0;let quantizations=0;
-        for(const f of files){if(!seen.has(f.name)){seen.add(f.name);total+=f.revision?f.size:f.size+(f.relatedFiles??[]).reduce((sum,file)=>sum+(seen.has(file.name)?0:file.size),0);}if(f.revision)quantizations++;if(!f.revision)for(const shard of f.relatedFiles??[])seen.add(shard.name);}
+        for(const f of files){if(!seen.has(f.name)){seen.add(f.name);total+=f.revision?f.size:f.size+(f.relatedFiles??[]).reduce((sum,file)=>sum+(seen.has(file.name)?0:file.size),0);}if(f.revision||f.format==='gptq'||f.format==='awq')quantizations++;if(!f.revision)for(const shard of f.relatedFiles??[])seen.add(shard.name);}
         const variants=files.map(file=>({name:file.name,size:file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0),...(file.revision?{revision:file.revision}:{}),fit:assessModelFit(file.revision?file.size:file.size+(file.relatedFiles??[]).reduce((sum,part)=>sum+part.size,0),browseEngine),quant:modelQuantLabel(file)}));
         const ordered=[...variants].sort((a,b)=>fitRank[a.fit]-fitRank[b.fit]||b.size-a.size);
         return{total,count:files.length,quantizations,variants,bestFit:ordered[0]?.fit??'unknown',recommendation:ordered[0]};
       });modelCardSizes.set(sizeKey,sizePromise);}
-      void sizePromise.then(summary=>{if(!size.isConnected)return;size.textContent=modelTab==='conversational'?(summary.quantizations?`${summary.quantizations} EXL2 quantization${summary.quantizations===1?'':'s'}${summary.count>summary.quantizations?` · ${summary.count-summary.quantizations} GGUF file${summary.count-summary.quantizations===1?'':'s'}`:''} · ${modelSize(summary.total)} total`:`Available GGUF files · ${modelSize(summary.total)} total`):summary.count?`${summary.count===1?'Supported download':'Supported downloads'} · ${modelSize(summary.total)}`:'No complete supported bundle available';if(modelTab==='conversational'){renderModelFit(card,summary);applyModelBrowserFilters();}}).catch(()=>{if(size.isConnected){size.textContent='Download size unavailable';fit.textContent='Hardware fit unavailable';}});
+      void sizePromise.then(summary=>{if(!size.isConnected)return;size.textContent=modelTab==='conversational'?(summary.count?`${summary.count} supported format${summary.count===1?'':'s'} · ${modelSize(summary.total)} total`:'No supported GGUF, GPTQ, or AWQ files found'):summary.count?`${summary.count===1?'Supported download':'Supported downloads'} · ${modelSize(summary.total)}`:'No complete supported bundle available';if(modelTab==='conversational'){renderModelFit(card,summary);applyModelBrowserFilters();}}).catch(()=>{if(size.isConnected){size.textContent='Download size unavailable';fit.textContent='Hardware fit unavailable';}});
       const actions=document.createElement('div');actions.className='model-actions';
       const downloadCategory=modelTab==='conversational'?'conversational':creativeCategory;
-      const filesButton=document.createElement('button');filesButton.type='button';filesButton.className='secondary';filesButton.textContent=activeHubRepo===model.id?'Reload files':modelTab==='conversational'?'Choose quantization / file':creativeCategory==='video'?'View supported Wan bundle':'View Stable Diffusion checkpoints';filesButton.onclick=async()=>{activeHubRepo=model.id;filesButton.disabled=true;filesButton.textContent='Loading files…';try{activeHubFiles=await window.orion.getHubFiles(model.id,downloadCategory,modelTab==='conversational'?browseEngine:undefined);activeHubFiles=activeHubFiles.filter(file=>modelTab==='conversational'?Boolean(file.revision)||/\.gguf$/i.test(file.name):/\.(safetensors|ckpt|gguf)$/i.test(file.name));appendModelFileControls(actions,model.id,downloadCategory,activeHubFiles);}catch(error){const message=document.createElement('span');message.className='hub-file-fit';message.textContent=error instanceof Error?error.message:String(error);actions.querySelector('.hub-file-fit')?.remove();actions.append(message);}finally{filesButton.disabled=false;filesButton.textContent='Reload files';}};actions.append(filesButton);
+      const filesButton=document.createElement('button');filesButton.type='button';filesButton.className='secondary';filesButton.textContent=activeHubRepo===model.id?'Reload files':modelTab==='conversational'?'Choose quantization / format':creativeCategory==='video'?'View supported Wan bundle':'View Stable Diffusion checkpoints';filesButton.onclick=async()=>{activeHubRepo=model.id;filesButton.disabled=true;filesButton.textContent='Loading files…';try{activeHubFiles=await window.orion.getHubFiles(model.id,downloadCategory,modelTab==='conversational'?browseEngine:undefined);activeHubFiles=activeHubFiles.filter(file=>modelTab==='conversational'?file.format==='gguf'||file.format==='gptq'||file.format==='awq':/\.(safetensors|ckpt|gguf)$/i.test(file.name));appendModelFileControls(actions,model.id,downloadCategory,activeHubFiles);}catch(error){const message=document.createElement('span');message.className='hub-file-fit';message.textContent=error instanceof Error?error.message:String(error);actions.querySelector('.hub-file-fit')?.remove();actions.append(message);}finally{filesButton.disabled=false;filesButton.textContent='Reload files';}};actions.append(filesButton);
       if(activeHubRepo===model.id&&activeHubFiles.length)appendModelFileControls(actions,model.id,downloadCategory,activeHubFiles);
       card.append(actions);const inlineProgress=document.createElement('div');inlineProgress.className='model-download-progress';inlineProgress.hidden=true;const progressText=document.createElement('div');progressText.className='download-detail';const progressBar=document.createElement('progress');const cancelDownload=document.createElement('button');cancelDownload.type='button';cancelDownload.className='download-cancel';cancelDownload.textContent='Cancel download';cancelDownload.onclick=()=>{const active=[...downloadProgress.values()].find(item=>item.repo===model.id&&item.phase==='downloading');if(active){cancellingModelDownloads.add(active.id);cancelDownload.disabled=true;cancelDownload.textContent='Cancelling…';void window.orion.cancelModelDownload(active.id);}};inlineProgress.append(progressText,progressBar,cancelDownload);card.append(inlineProgress);results.append(card);
     } else if (popularHubLoading===browseCacheKey) { const hint=document.createElement('p');hint.className='muted model-hint';hint.textContent='Loading popular models from Hugging Face…';results.append(hint); }
@@ -758,7 +782,7 @@ function renderModelsView() {
     if (hubNextUrl) { const next=document.createElement('button');next.type='button';next.className='secondary model-next-page';next.textContent=hubNextLoading?'Loading next page…':'Load next page';next.disabled=hubNextLoading;next.onclick=async()=>{if(!hubNextUrl||hubNextLoading)return;hubNextLoading=true;const previousHeight=chatScroller.scrollHeight;void renderModelsView();try{const found=await window.orion.searchHub(modelQuery,browseCategory,hubNextUrl,browseCategory==='conversational'?browseEngine:undefined);hubModels=[...hubModels,...found.models];hubNextUrl=found.nextUrl;if(!modelQuery)popularHubCache.set(browseCacheKey,{models:hubModels,nextUrl:hubNextUrl});}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not load next model page');}finally{hubNextLoading=false;void renderModelsView();requestAnimationFrame(()=>{if(hubModels.length)chatScroller.scrollTop=previousHeight;});}};results.append(next); }
   } else {
     const refresh=document.createElement('button');refresh.type='button';refresh.className='secondary';refresh.textContent='Refresh installed models';refresh.onclick=async()=>{installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();};page.append(refresh);
-    const all=[...installedModels.map(model=>({id:model.id,name:model.invokeKey?model.file:model.repo,file:model.invokeKey?'Managed by native image/video engine':model.engine==='exllamav2'?`EXL2 · ${model.file}`:model.file,size:model.size,origin:model.engine==='exllamav2'?'Orion · ExLlamaV2':'Orion',category:model.category==='conversational'?'conversational':'creative'})),...models.filter(model=>model.source!=='orion' && model.source!=='api').map(model=>({id:model.name,name:model.name,file:'',size:model.size,origin:'Ollama',category:'conversational'}))];
+    const all=[...installedModels.map(model=>({id:model.id,name:model.invokeKey?model.file:model.repo,file:model.invokeKey?'Managed by native image/video engine':model.category==='conversational'?`${(model.format??'gguf').toUpperCase()} · ${model.file}`:model.file,size:model.size,origin:'Orion · Orion inference',category:model.category==='conversational'?'conversational':'creative'})),...models.filter(model=>model.source!=='orion' && model.source!=='api').map(model=>({id:model.name,name:model.name,file:'',size:model.size,origin:'Ollama',category:'conversational'}))];
     all.sort((a,b)=>a.category===b.category?0:a.category==='conversational'?-1:1);
     if(!all.length){results.textContent='No models are installed yet.';} else { let currentCategory=''; for(const item of all){if(currentCategory!==item.category){currentCategory=item.category;const sectionTitle=document.createElement('h2');sectionTitle.className='model-manage-heading';sectionTitle.textContent=currentCategory==='conversational'?'Conversational models':'Image / video models';results.append(sectionTitle);}const card=document.createElement('article');card.className='model-card';const top=document.createElement('div');top.className='model-card-top';const title=document.createElement('h2');title.textContent=item.name;const badge=document.createElement('span');badge.className='model-badge';badge.textContent=item.origin;top.append(title,badge);card.append(top);const meta=document.createElement('p');meta.className='model-card-meta';meta.textContent=[item.file,modelSize(item.size)].filter(Boolean).join(' · ');card.append(meta);const del=document.createElement('button');del.type='button';del.className='secondary danger-button';del.textContent='Delete model';del.onclick=async()=>{if(!(await askConfirm(`Delete ${item.name} from this device?`, 'Delete model')))return;try{if(item.origin==='Ollama')await window.orion.deleteOllamaModel(item.id);else await window.orion.deleteInstalledModel(item.id);installedModels=await window.orion.listInstalledModels();await refreshModels();renderModelsView();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not delete model');}};del.disabled=Boolean(checkingModelId);card.append(del);if(item.origin==='Orion'&&item.category==='conversational')appendCompatibilityCheck(card,item.id);results.append(card);} }
   }
@@ -979,19 +1003,22 @@ function renderMessage(active: Conversation, message: Message) {
   }
   const body = document.createElement('div');
   body.className = 'message-body';
+  if (message.role === 'user' && editingMessageId === message.id) article.classList.add('message-editing');
   if (message.role === 'user' && editingMessageId === message.id) {
-    const editor = document.createElement('textarea'); editor.className = 'message-edit-input'; editor.setAttribute('aria-label', 'Edit your message'); editor.value = editingDraft; editor.rows = Math.max(2, Math.min(10, editingDraft.split('\n').length)); editor.addEventListener('input', () => { editingDraft = editor.value; }); body.append(editor);
+    const editor = document.createElement('textarea'); editor.className = 'message-edit-input'; editor.setAttribute('aria-label', 'Edit your message'); editor.value = editingDraft; editor.rows = Math.max(2, Math.min(10, editingDraft.split('\n').length));
+    editor.addEventListener('input', () => { editingDraft = editor.value; editor.style.height = 'auto'; editor.style.height = `${Math.min(editor.scrollHeight, 360)}px`; const saveButton = article.querySelector<HTMLButtonElement>('.message-edit-send'); if (saveButton) saveButton.disabled = !editingDraft.trim(); });
+    editor.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); cancelUserMessageEdit(); } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submitUserMessageEdit(message.id, editingDraft); } }); body.append(editor);
   } else { body.replaceChildren(safeMarkdownFragment(message.content, live)); wireCodeButtons(body, active); }
   body.dataset.contentLength = String(message.content.length);
   article.append(body);
   for(const doc of message.canvasDocuments??[]){const open=document.createElement('button');open.type='button';open.className='canvas-reopen';open.textContent='▤  '+doc.name+' · Open in Canvas';open.onclick=()=>showCanvas(doc);article.append(open);}
   const footer = document.createElement('div'); footer.className = 'message-footer';
-  const copy = iconButton('copy', 'Copy message'); copy.onclick = async () => { await navigator.clipboard.writeText(message.content); copy.title = 'Copied'; copy.setAttribute('aria-label', 'Copied'); setTimeout(() => { copy.title = 'Copy message'; copy.setAttribute('aria-label', 'Copy message'); }, 1200); }; footer.append(copy);
+  const copy = iconButton('copy', 'Copy message'); copy.onclick = async () => { await navigator.clipboard.writeText(message.content); copy.title = 'Copied'; copy.setAttribute('aria-label', 'Copied'); setTimeout(() => { copy.title = 'Copy message'; copy.setAttribute('aria-label', 'Copy message'); }, 1200); };
   if (message.role === 'user') {
     if (editingMessageId === message.id) {
-      const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'message-inline-action'; cancel.textContent = 'Cancel'; cancel.onclick = () => { editingMessageId = null; editingDraft = ''; renderMessages(); };
-      const submit = iconButton('send', 'Save and send edited message'); submit.classList.add('message-edit-send'); submit.onclick = () => submitUserMessageEdit(message.id, editingDraft);
-      footer.append(cancel, submit);
+      const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'message-inline-action'; cancel.textContent = 'Cancel'; cancel.onclick = cancelUserMessageEdit;
+      const submit = iconButton('send', 'Save and send edited message'); submit.classList.add('message-edit-send'); submit.disabled = !editingDraft.trim(); submit.onclick = () => submitUserMessageEdit(message.id, editingDraft);
+      footer.append(copy, cancel, submit);
     } else {
       const retentionValue = message.memoryRetention ?? 'conversation';
       const retentionLabels = { temporary: 'Temporary', conversation: 'Conversation', durable: 'Durable', 'never-save': 'Never save' } as const;
@@ -1030,11 +1057,11 @@ function renderMessage(active: Conversation, message: Message) {
         retentionMenu.append(option);
       }
       retention.append(retentionMenu);
-      const edit = iconButton('edit', 'Edit message'); edit.onclick = async () => { await stopGenerationForMessageEdit(); if (current?.id === active.id) editUserMessage(message.id, message.content); };
-      const rollback = iconButton('rollback', 'Roll back to this message'); rollback.onclick = () => { void rollbackUserMessage(message.id); };
-      footer.append(retention, edit, rollback);
+      const edit = iconButton('edit', 'Edit this message and regenerate from here'); edit.disabled = streaming && active.id !== current?.id; edit.onclick = () => { void beginUserMessageEdit(active, message); };
+      const rollback = iconButton('rollback', 'Remove replies and later messages after this message'); rollback.disabled = rollbackPending; rollback.onclick = () => { void rollbackUserMessage(message.id); };
+      footer.append(retention, copy, edit, rollback);
     }
-  }
+  } else footer.append(copy);
   if(message.role==='assistant'){const html=message.content.match(/```(?:html|htm)\s*([\s\S]*?)```/i),md=message.content.match(/```(?:markdown|md)\s*([\s\S]*?)```/i),plainDoc=!html&&!md&&message.content.trim().startsWith('# ')&&message.content.length>250;if(html||md||plainDoc){const open=document.createElement('button');open.type='button';open.className='message-copy';open.textContent='Open in Canvas';open.onclick=()=>showCanvas({id:crypto.randomUUID(),name:html?'Generated page.html':'Generated document.md',format:html?'html':'markdown',content:html?html[1]!.trim():md?md[1]!.trim():message.content,conversationId:active.id,source:'response'});footer.append(open);}}
   if (message.role === 'assistant' && message.generationMs !== undefined) { const elapsed = document.createElement('span'); elapsed.className = 'message-metric'; elapsed.textContent = `${(message.generationMs / 1000).toFixed(1)}s`; footer.append(elapsed); }
   if (message.role === 'assistant' && message.tokensPerSecond !== undefined) { const rate = document.createElement('span'); rate.className = 'message-metric'; rate.textContent = `${message.tokensPerSecond.toFixed(1)} tokens/s`; footer.append(rate); }
@@ -1096,15 +1123,49 @@ const conversationMapResizeObserver = new ResizeObserver(() => {
 const mainPanel = document.querySelector<HTMLElement>('.main');
 if (mainPanel) conversationMapResizeObserver.observe(mainPanel);
 conversationMapResizeObserver.observe(chatScroller);
+let swarmItems: SwarmRecord[] = [], swarmUiBusy = false;
+function swarmButton(label:string,action:()=>void|Promise<void>,kind='secondary'){const button=document.createElement('button');button.type='button';button.className=kind;button.textContent=label;button.onclick=()=>{void Promise.resolve(action()).catch(error=>showNotice(error instanceof Error?error.message:String(error),'Swarm'));};return button;}
+function renderSwarmView(){
+  document.body.classList.remove('models-view','create-view');document.body.classList.add('swarm-view');
+  $('composer').hidden=true;$('create-composer-wrap').hidden=true;$('conversation-map').hidden=true;
+  const page=document.createElement('section');page.className='swarm-page';
+  const intro=document.createElement('header');intro.className='swarm-intro';
+  const mesh=document.createElement('div');mesh.className='swarm-mesh';mesh.setAttribute('aria-hidden','true');
+  const title=document.createElement('div');title.className='swarm-intro-copy';const eyebrow=document.createElement('span');eyebrow.className='swarm-eyebrow';eyebrow.textContent='PRIVATE LOCAL WORKSPACE';const heading=document.createElement('h1');heading.textContent='Swarm';const description=document.createElement('p');description.textContent='A persistent local team that works toward a goal while Orion is idle. Its files, history, and OrionFS memory stay in its own workspace.';title.append(eyebrow,heading,description);intro.append(mesh,title);
+  const top=document.createElement('div');top.className='swarm-page-top';const status=document.createElement('span');status.className='swarm-privacy';status.textContent=swarmItems.some(item=>item.status==='running')?'One swarm active · model yields to chat':'Local only · one swarm can run at a time';top.append(status);
+  const create=document.createElement('form');create.className='swarm-create';const createTitle=document.createElement('h2');createTitle.textContent='Start a swarm';const createHint=document.createElement('p');createHint.textContent='Set a concrete goal and define exactly when the work is complete.';const name=document.createElement('input');name.maxLength=80;name.placeholder='Name this swarm';name.required=true;const objective=document.createElement('textarea');objective.rows=3;objective.maxLength=8000;objective.placeholder='What should the swarm accomplish?';objective.required=true;const rules=document.createElement('textarea');rules.rows=2;rules.maxLength=4000;rules.placeholder='Completion rules (required)';rules.required=true;const initial=document.createElement('div');initial.className='swarm-initial-priority';initial.textContent='Initial goal is always highest priority';const createButton=document.createElement('button');createButton.className='primary';createButton.type='submit';createButton.textContent='Create private swarm';create.append(createTitle,createHint,name,objective,rules,initial,createButton);
+  create.addEventListener('submit',async event=>{event.preventDefault();if(swarmUiBusy)return;swarmUiBusy=true;createButton.disabled=true;try{if(create.dataset.editId){await window.orion.editSwarm(create.dataset.editId,{name:name.value,objective:objective.value,completionRules:rules.value});delete create.dataset.editId;createButton.textContent='Create private swarm';}else await window.orion.createSwarm({name:name.value,objective:objective.value,completionRules:rules.value});name.value='';objective.value='';rules.value='';swarmItems=await window.orion.listSwarms();renderMessages();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not save swarm');}finally{swarmUiBusy=false;createButton.disabled=false;}});
+  const list=document.createElement('div');list.className='swarm-list';
+  if(!swarmItems.length){const empty=document.createElement('div');empty.className='swarm-empty';empty.textContent='No swarms yet. Create one when you have a goal that benefits from ongoing local work.';list.append(empty);}
+  for(const item of swarmItems){
+    const card=document.createElement('article');card.className=`swarm-card status-${item.status}`;const head=document.createElement('div');head.className='swarm-card-head';const identity=document.createElement('div');identity.className='swarm-card-identity';const h=document.createElement('h2');h.textContent=item.name;const badge=document.createElement('span');badge.className='swarm-status';badge.textContent=item.status;const meta=document.createElement('span');meta.className='swarm-iteration';meta.textContent=`Iteration ${item.iteration}`;identity.append(h,badge,meta);const actions=document.createElement('div');actions.className='swarm-actions';
+    if(item.status==='draft'||item.status==='paused'||item.status==='warning')actions.append(swarmButton(item.status==='draft'?'Start':'Resume',()=>window.orion.startSwarm(item.id),'primary'));
+    if(item.status==='running')actions.append(swarmButton('Pause',()=>window.orion.pauseSwarm(item.id)));
+    if(['running','paused','warning'].includes(item.status))actions.append(swarmButton('Stop',async()=>{if(await askConfirm('Stop this swarm now? Its current response will be discarded.','Stop swarm'))await window.orion.killSwarm(item.id)},'danger'));
+    actions.append(swarmButton('Open folder',()=>window.orion.openSwarmFolder(item.id)));
+    actions.append(swarmButton('Velo history',async()=>showNotice((await window.orion.getSwarmVeloHistory(item.id)).slice(0,10000),'Private Velo history')));
+    if(['draft','paused','warning'].includes(item.status))actions.append(swarmButton('Edit',()=>{name.value=item.name;objective.value=item.objective;rules.value=item.completionRules;createTitle.scrollIntoView({behavior:'smooth',block:'center'});name.focus();create.dataset.editId=item.id;createButton.textContent='Save swarm changes';},'secondary'));
+    if(item.status!=='running')actions.append(swarmButton('Delete',async()=>{if(await askConfirm(`Delete “${item.name}” and its isolated files, OrionFS, and Velo history? This cannot be undone.`,'Delete swarm')){await window.orion.deleteSwarm(item.id);swarmItems=await window.orion.listSwarms();renderMessages();}},'danger'));
+    head.append(identity,actions);
+    const goal=document.createElement('p');goal.className='swarm-goal';goal.textContent=item.objective;const rulesText=document.createElement('p');rulesText.className='swarm-rules';rulesText.textContent=`Complete when: ${item.completionRules}`;
+    const steer=document.createElement('form');steer.className='swarm-steer';const steerText=document.createElement('textarea');steerText.rows=2;steerText.maxLength=4000;steerText.placeholder='Steer the swarm toward something…';steerText.required=true;const steerRules=document.createElement('input');steerRules.maxLength=2000;steerRules.placeholder='Completion rules for this steer (required)';steerRules.required=true;const steerRow=document.createElement('div');steerRow.className='swarm-steer-row';const priority=document.createElement('select');priority.setAttribute('aria-label','Steer importance');for(let i=1;i<=5;i++){const option=document.createElement('option');option.value=String(i);option.textContent=`Importance ${i}${i===5?' · highest':''}`;priority.append(option);}const sendSteer=document.createElement('button');sendSteer.type='submit';sendSteer.className='secondary';sendSteer.textContent='Add steer';steerRow.append(priority,sendSteer);steer.append(steerText,steerRules,steerRow);steer.addEventListener('submit',async event=>{event.preventDefault();await window.orion.steerSwarm(item.id,{text:steerText.value,completionRules:steerRules.value,importance:Number(priority.value) as 1|2|3|4|5});swarmItems=await window.orion.listSwarms();renderMessages();});
+    const log=document.createElement('details');log.className='swarm-log';const summary=document.createElement('summary');summary.textContent=`Activity log · ${item.logs.length}`;const entries=document.createElement('div');entries.className='swarm-log-entries';for(const row of [...item.logs].reverse().slice(0,100)){const entry=document.createElement('div');entry.className=`swarm-log-entry${row.warning?' warning':''}`;const line=document.createElement('div');line.className='swarm-log-line';const role=document.createElement('strong');role.textContent=row.role;const message=document.createElement('span');message.textContent=row.summary;line.append(role,message);entry.append(line);if(row.detail){const detail=document.createElement('p');detail.textContent=row.detail;entry.append(detail);}entries.append(entry);}log.append(summary,entries);
+    card.append(head,goal,rulesText,steer,log);if(item.warning){const warning=document.createElement('p');warning.className='swarm-warning';warning.textContent=item.warning;card.append(warning);}list.append(card);
+  }
+  page.append(intro,top,create,list);chatBox.replaceChildren(page);chatScroller.scrollTop=0;
+}
+window.orion.onSwarmUpdate(item=>{const index=swarmItems.findIndex(value=>value.id===item.id);if(index<0)swarmItems.unshift(item);else swarmItems[index]=item;if(activeView==='Swarm')renderMessages();});
 function renderMessages(forceScroll = false) {
+  setModels();
   memoryControls.syncVisibility();
   if (memoryControlsConversation !== current?.id) { memoryControlsConversation = current?.id; void memoryControls.refresh().then(() => { if (!streaming) renderMessages(); }); }
-  document.body.classList.remove('models-view','create-view');
+  document.body.classList.remove('models-view','create-view','swarm-view');$('composer').hidden=false;
   document.body.classList.toggle('chat-empty', activeView === 'Chat' && !current?.messages.length);
   renderMessageQueue();
   $('model-selector-wrap').hidden = false; $('create-composer-wrap').hidden = true;
   const active = current;
   renderConversationMap(current);
+  if (activeView === 'Swarm') { renderSwarmView(); return; }
   if (activeView === 'Create') { renderCreateView(); return; }
   if (activeView === 'Models') { renderModelsView(); return; }
   const shouldFollow = forceScroll || followsLatestMessage;
@@ -1127,10 +1188,31 @@ function renderMessages(forceScroll = false) {
 function isEmbeddingModel(model: { name: string; capabilities?: string[] }) { return model.capabilities?.includes('embedding') === true || /nomic-embed|mxbai-embed|all-minilm|snowflake-arctic-embed|bge-|embeddinggemma|granite-embedding/i.test(model.name); }
 function isChatCapableModel(model: { name: string; capabilities?: string[] }) { return model.capabilities?.length ? model.capabilities.includes('completion') : !isEmbeddingModel(model); }
 function chatModels() { return models.filter(isChatCapableModel); }
-function orionModelLabel(familyName: string, fileName: string) { const family = familyName.split('/').at(-1)!.replace(/[-_.]?gguf$/i, ''); const quant = fileName.match(/I?Q\d(?:_[A-Z0-9]+)*/i)?.[0] ?? (/^\d+(?:\.\d+)?bpw$/i.test(fileName) ? `${fileName} EXL2` : undefined); const shortFamily = family.length > 34 ? `${family.slice(0, 33)}…` : family; return `${shortFamily}${quant ? ` · ${quant}` : ''}`; }
-function modelSelectorLabel(model: (typeof models)[number]) { if (model.source === 'api') return String(model.details?.label ?? model.name); if (model.source !== 'orion') return model.name; return orionModelLabel(String(model.details?.family ?? model.name), String(model.details?.parameter_size ?? '')); }
-function assistantModelLabel(name: string) { const model = models.find(candidate => candidate.name === name); if (model) return modelSelectorLabel(model); const prefix = name.startsWith('orion-exl2:') ? 'orion-exl2:' : name.startsWith('orion-gguf:') ? 'orion-gguf:' : ''; const installed = prefix ? installedModels.find(candidate => candidate.id === name.slice(prefix.length)) : undefined; if (installed) return orionModelLabel(installed.repo, installed.file); return prefix ? 'Local managed model' : name || 'Orion'; }
-function setModels() { const select = $('model') as HTMLSelectElement; const choices = chatModels(); select.replaceChildren(); if (!models.length) { select.add(new Option(ollamaConnected ? 'No models installed' : 'Ollama unavailable · Settings', '')); return; } if (!choices.length) { select.add(new Option('No chat models installed', '')); return; } for (const model of choices) { const label = modelSelectorLabel(model); const option = new Option(`${label}  ·  ${model.source === 'api' ? 'API' : `${(model.size/1e9).toFixed(1)} GB`}`, model.name); option.title = label; select.add(option); } select.value = settings.selectedModel && choices.some(model => model.name === settings.selectedModel) ? settings.selectedModel : choices[0]!.name; select.title = modelSelectorLabel(choices.find(model => model.name === select.value) ?? choices[0]!); settings.selectedModel = select.value; }
+function orionModelLabel(familyName: string, fileName: string) { const family = familyName.split('/').at(-1)!.replace(/[-_.]?gguf$/i, ''); const quant = fileName.match(/\b(gptq|awq)\b/i)?.[1]?.toUpperCase() ?? fileName.match(/I?Q\d(?:_[A-Z0-9]+)*/i)?.[0]; const shortFamily = family.length > 34 ? `${family.slice(0, 33)}…` : family; return `${shortFamily}${quant ? ` · ${quant}` : ''}`; }
+function modelSelectorLabel(model: (typeof models)[number]) { if (model.source === 'api') return String(model.details?.label ?? model.name); if (model.source !== 'orion') return model.name; return orionModelLabel(String(model.details?.family ?? model.name), String(model.details?.format ?? model.details?.parameter_size ?? '')); }
+function assistantModelLabel(name: string) { const model = models.find(candidate => candidate.name === name); if (model) return modelSelectorLabel(model); const prefix = name.startsWith('orion-gguf:') ? 'orion-gguf:' : ''; const installed = prefix ? installedModels.find(candidate => candidate.id === name.slice(prefix.length)) : undefined; if (installed) return orionModelLabel(installed.repo, installed.file); return prefix ? 'Local managed model' : name || 'Orion'; }
+function modelsForEngine(engine: InferenceEngine) { return chatModels().filter(model => engine === 'orion' ? model.source === 'orion' : engine === 'llama.cpp' ? model.source === 'orion' && model.details?.format !== 'gptq' && model.details?.format !== 'awq' : engine === 'ollama' ? model.source === 'ollama' : model.source === 'api'); }
+function setModels() {
+  const select = $('model') as HTMLSelectElement, engineSelect = $('engine') as HTMLSelectElement;
+  const options: Array<[InferenceEngine,string,boolean]> = [
+    ['orion','Orion',managedOrionInstalled], ['llama.cpp','llama.cpp',managedLlamaInstalled],
+    ['ollama','Ollama',ollamaConnected && models.some(model => model.source === 'ollama')],
+    ['provider','API provider',models.some(model => model.source === 'api')]
+  ];
+  const requested = current?.engine ?? settings.selectedEngine ?? 'orion';
+  const engine = options.some(([value,,available]) => value === requested && available) ? requested : (options.find(([value,,available]) => value === 'orion' && available)?.[0] ?? options.find(([, ,available]) => available)?.[0] ?? 'orion');
+  engineSelect.replaceChildren(...options.filter(([, ,available]) => available).map(([value,label]) => new Option(label,value)));
+  if (!engineSelect.options.length) engineSelect.add(new Option('Orion','orion'));
+  engineSelect.value = engine;
+  if (current) current.engine = engine; settings.selectedEngine = engine;
+  const choices = modelsForEngine(engine); select.replaceChildren();
+  if (!choices.length) { select.add(new Option(engine === 'orion' ? 'No downloaded Orion models' : engine === 'llama.cpp' ? 'No downloaded GGUF models' : engine === 'ollama' ? 'No Ollama models available' : 'No provider models configured','')); select.value=''; return; }
+  for (const model of choices) { const label=modelSelectorLabel(model); const option=new Option(`${label}  ·  ${model.source==='api'?'API':`${(model.size/1e9).toFixed(1)} GB`}`,model.name);option.title=label;select.add(option); }
+  const wanted = current?.model || settings.selectedModel;
+  select.value = choices.some(model => model.name === wanted) ? wanted : choices[0]!.name;
+  select.title = modelSelectorLabel(choices.find(model=>model.name===select.value) ?? choices[0]!);
+  if(current){current.model=select.value;current.engine=engine;}settings.selectedModel=select.value;
+}
 async function refreshModelControls(){
  const select=$('context-window') as HTMLSelectElement;
  const model=settings.selectedModel;
@@ -1155,8 +1237,8 @@ async function refreshModels(refreshProviders = false) {
   if(activeView === 'Models' && (modelTab !== 'providers' || refreshProviders))renderModelsView();
 }
 const gigabytes = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
-async function refreshLlamaStatus() { const previous = managedLlamaInstalled; try { managedLlamaInstalled = await window.orion.llamaStatus(); $('llama-state').textContent = managedLlamaInstalled ? 'Installed' : 'Not Installed'; } catch { managedLlamaInstalled = false; $('llama-state').textContent = 'Unknown'; } if (previous !== managedLlamaInstalled && activeView === 'Models' && modelTab === 'manage') renderModelsView(); }
-async function refreshExl2Status() { const previous = managedExl2Installed; try { managedExl2Installed = await window.orion.exl2Status(); $('exl2-state').textContent = managedExl2Installed ? 'Installed' : 'Not Installed'; } catch { managedExl2Installed = false; $('exl2-state').textContent = 'Unknown'; } if (previous !== managedExl2Installed && activeView === 'Models' && modelTab === 'manage') renderModelsView(); }
+async function refreshLlamaStatus() { const previous = managedLlamaInstalled; try { managedLlamaInstalled = await window.orion.llamaStatus(); $('llama-state').textContent = managedLlamaInstalled ? 'Installed' : 'Not Installed'; } catch { managedLlamaInstalled = false; $('llama-state').textContent = 'Unknown'; } if (previous !== managedLlamaInstalled) { setModels(); if(activeView === 'Models' && modelTab === 'manage') renderModelsView(); } }
+async function refreshOrionStatus() { const previous = managedOrionInstalled; try { managedOrionInstalled = await window.orion.orionEngineStatus(); $('orion-state').textContent = managedOrionInstalled ? 'Bundled' : 'Missing'; } catch { managedOrionInstalled = false; $('orion-state').textContent = 'Unknown'; } if (previous !== managedOrionInstalled) { setModels(); if(activeView === 'Models' && modelTab === 'manage') renderModelsView(); } }
 async function refreshCreateEngineStatus() { try { createState = await window.orion.getCreateEngineState(); } catch (error) { createState = { installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown' }; } }
 let systemResourcesPending=false;
 async function refreshSystemResources() { if(systemResourcesPending)return;systemResourcesPending=true;try { const info = await window.orion.getSystemInfo(); ollamaConnected=info.ollama;ollamaDetected=info.ollamaInstalled||info.ollama;syncModelServerStatus(); $('cpu-label').textContent=info.cpuUsagePercent===null?'—':`${info.cpuUsagePercent}%`; $('ram-label').textContent = `${gigabytes(info.usedRamMB)} / ${gigabytes(info.totalRamMB)}`; $('gpu-label').textContent=info.gpuUsagePercent===null?'—':`${info.gpuUsagePercent}%`; $('vram-label').textContent = info.totalVramMB > 0 ? `${info.usedVramMB === null ? '—' : gigabytes(info.usedVramMB)} / ${gigabytes(info.totalVramMB)}` : 'Not detected'; ($('gpu-label') as HTMLElement).title=info.gpuUsagePercent===null?'GPU utilization is not reported by this driver.':'Current overall GPU utilization'; ($('vram-label') as HTMLElement).title = info.totalVramMB > 0 && info.usedVramMB === null ? 'GPU memory capacity is available, but current usage is not reported by this driver.' : ''; } catch { syncModelServerStatus(); } finally{systemResourcesPending=false;} }
@@ -1211,7 +1293,7 @@ async function sendQueuedNow(messageId: string) {
     if (streaming) await window.orion.cancelStream();
     if (pending) await pending.catch(() => undefined); else if (streaming) await idle;
     const entry = messageQueue.remove(messageId); if (!entry) return;
-    if (current?.id === entry.conversationId) entry.model = ($('model') as HTMLSelectElement).value || entry.model;
+    if (current?.id === entry.conversationId) { entry.model = ($('model') as HTMLSelectElement).value || entry.model; entry.engine = ($('engine') as HTMLSelectElement).value as InferenceEngine || entry.engine; }
     queueAutoPaused = false; queueInterruptPending = false; renderMessageQueue();
     void launchSubmission(entry);
   } catch (error) { showNotice(error instanceof Error ? error.message : String(error), 'Could not send queued message'); }
@@ -1223,7 +1305,7 @@ async function sendMessage() {
   if(selectedVoiceModel.startsWith('api:') && (voiceInput || current?.privateVoice || current?.messages.some(message=>message.voiceInput))){showNotice('Voice conversations stay on this computer. Select a local Ollama or Orion-managed model before sending.', 'Local voice privacy'); return;}
   const content = promptBox.value.trim(); if (!content) return;
   if (!current) newConversation(); if (!current) return;
-  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment, voiceInput, replaceMessageId: rollbackDraftMessageId ?? undefined };
+  const entry: QueuedMessage = { id: id(), conversationId: current.id, content, model: ($('model') as HTMLSelectElement).value || current.model, engine: ($('engine') as HTMLSelectElement).value as InferenceEngine || current.engine || settings.selectedEngine || 'orion', attachments: attachments.map(file => ({ ...file })), canvasAttachment: canvasReviewAttachment, voiceInput, replaceMessageId: rollbackDraftMessageId ?? undefined };
   rollbackDraftMessageId = null;
   voiceControls.submitted(); attachments = []; canvasReviewAttachment = undefined; $('attachments').replaceChildren(); promptBox.value = ''; promptBox.dispatchEvent(new Event('input', { bubbles: true }));
   if (streaming || activeChatTask || queueInterruptPending) { messageQueue.push(entry); renderMessageQueue(); promptBox.focus(); return; }
@@ -1233,9 +1315,9 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   if (!commandPalette.hidden) closeCommandPalette();
   const content = entry.content;
   const target = conversations.find(conversation => conversation.id === entry.conversationId); if (!target) return 'failed';
-  await workspaceSettingsWrite;
-  if (!chatModels().length) { await refreshModels(); if (!chatModels().length) { showNotice(models.length ? 'No chat-capable Ollama model is installed. Install a completion model, then refresh the model list.' : 'Add an API provider in Model browser → Providers, or install a local model.', 'Ollama unavailable'); return 'unavailable'; } }
-  if (!chatModels().some(model => model.name === entry.model)) { showNotice('The selected model is no longer available. Choose an installed model before sending this message.', 'Model unavailable'); return 'unavailable'; }
+  if (!modelsForEngine(entry.engine).length) { await refreshModels(); if (!modelsForEngine(entry.engine).length) { showNotice(`No models are available for ${entry.engine}. Install or configure that engine, then try again.`, 'Engine unavailable'); return 'unavailable'; } }
+  if (!modelsForEngine(entry.engine).some(model => model.name === entry.model)) { showNotice('The selected model is not available on this engine. Choose an available engine and model before sending.', 'Model unavailable'); return 'unavailable'; }
+  target.engine = entry.engine; target.model = entry.model;
   const imageRefs=[...entry.attachments.map(file=>file.attachment??{id:id(),name:file.name,mimeType:file.mimeType,kind:'document' as const}),...(entry.canvasAttachment?[entry.canvasAttachment]:[])];
   const userText = content + (entry.attachments.length ? `\n\nAttached files:\n${entry.attachments.map(f => `### ${f.name}${f.kind==='image'?' (image attached for visual analysis)':''}${f.content?`\n\n${f.content}`:''}`).join('\n\n')}` : '');
   if(entry.voiceInput)target.privateVoice=true;
@@ -1245,11 +1327,13 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     Object.assign(target, rolled);
     const existing = target.messages.find(item => item.id === entry.editMessageId && item.role === 'user');
     if (!existing) return 'failed';
+    await window.orion.memoryHistory.prepareMessageEdit(target.id, entry.editMessageId);
     userMessage = existing; userMessage.content = userText; userMessage.createdAt = now();
     if (imageRefs.length) userMessage.attachments = imageRefs;
   } else if (entry.replaceMessageId) {
     const existing = target.messages.find(item => item.id === entry.replaceMessageId && item.role === 'user');
     if (!existing) return 'failed';
+    await window.orion.memoryHistory.prepareMessageEdit(target.id, entry.replaceMessageId);
     userMessage = existing; userMessage.content = userText; userMessage.createdAt = now();
     if (imageRefs.length) userMessage.attachments = imageRefs;
     target.messages.splice(target.messages.indexOf(existing) + 1);
@@ -1263,7 +1347,11 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
   let outcome: SendOutcome = 'complete';
   let off: () => void = () => undefined;
   try {
-  await save(target, true); if (current?.id === target.id) renderMessages(true);
+  // Paint the submitted turn before waiting on encrypted persistence. The
+  // message and loading state should appear as soon as the user sends it.
+  if (current?.id === target.id) renderMessages(true);
+  await workspaceSettingsWrite;
+  await save(target, true);
   off = window.orion.onStream(e => {
     if (e.conversationId !== target.id) return;
     if(e.type === 'memory_context') { const reply=target.messages.at(-1)!;reply.memoryUsed = e.memories;reply.sourceFiles=e.sourceFiles; return; }
@@ -1337,7 +1425,7 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
     if (e.type === 'cancelled') { outcome = 'cancelled'; if (!assistant.content) assistant.content = '_Generation stopped._'; }
     if (current?.id === target.id) scheduleRender();
   });
-  const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: true, mode: chatMode });
+  const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, engine: target.engine ?? settings.selectedEngine ?? 'orion', messages: target.messages.slice(0, -1), agent: true, mode: chatMode });
   const completedAssistant = target.messages.at(-1); if (completedAssistant) { const memoryContext = await window.orion.memoryHistory.context(target.id); completedAssistant.assumptionIds = [...new Set([...(completedAssistant.assumptionIds??[]),...memoryContext.assumptions.filter(item=>item.status!=='dismissed').map(item=>item.id)])]; completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (e) {
     outcome = 'failed';
@@ -1355,6 +1443,23 @@ async function sendMessageNow(entry: QueuedMessage): Promise<SendOutcome> {
 
 $('send').addEventListener('click', () => { if (streaming) { queueAutoPaused = true; void window.orion.cancelStream(); } else void sendMessage(); });
 // Orion is intentionally conversation-first: there is no Chat/Code mode switch.
+let dreamDebounce: ReturnType<typeof setTimeout> | undefined, dreamRequest = 0;
+promptBox.addEventListener('input', () => {
+  const status = $('dream-status');
+  if (dreamDebounce) clearTimeout(dreamDebounce);
+  const draft = promptBox.value.trim(), conversationId = current?.id ?? '', model = ($('model') as HTMLSelectElement).value, engine = ($('engine') as HTMLSelectElement).value as InferenceEngine;
+  const request = ++dreamRequest;
+  status.hidden = true;
+  if (!settings?.composerDreaming || !conversationId || draft.length < 12 || !['orion','llama.cpp','ollama'].includes(engine) || model.startsWith('api:')) return;
+  status.textContent = 'Preparing relevant local context…'; status.hidden = false;
+  dreamDebounce = setTimeout(() => {
+    void window.orion.prepareDraft(conversationId, model, engine, draft).then(result => {
+      if (request !== dreamRequest || current?.id !== conversationId || promptBox.value.trim() !== draft) return;
+      status.textContent = result.ready ? (result.memories ? `Context ready · ${result.memories} relevant memories` : 'Context ready') : '';
+      status.hidden = !result.ready;
+    }).catch(() => { if (request === dreamRequest) status.hidden = true; });
+  }, 420);
+});
 promptBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void sendMessage(); } }); $('command-close').onclick = closeCommandPalette; $('new-chat').onclick = () => newConversation();
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'p') { event.preventDefault(); event.stopPropagation(); void openCommandPalette(); return; }
@@ -1384,16 +1489,18 @@ sidebar.addEventListener('pointerleave', scheduleSidebarPeekHide);
 $('collapse').onclick = () => { cancelSidebarPeekHide(); document.body.classList.remove('sidebar-peek-open'); document.body.classList.add('sidebar-collapsed'); ($('collapse') as HTMLButtonElement).blur(); };
 $('expand').onclick = () => { cancelSidebarPeekHide(); document.body.classList.remove('sidebar-peek-open', 'sidebar-collapsed'); };
 for (const [id, action] of [['win-minimize', 'minimize'], ['win-maximize', 'toggle-maximize'], ['win-close', 'close']] as const) $(id).addEventListener('click', () => { void window.orion.windowAction(action); });
-$('model').addEventListener('change', async () => { settings.selectedModel = ($('model') as HTMLSelectElement).value; syncModelServerStatus(); const selected = chatModels().find(model => model.name === settings.selectedModel); ($('model') as HTMLSelectElement).title = selected ? modelSelectorLabel(selected) : settings.selectedModel; await window.orion.saveSettings(settings); await refreshModelControls(); if (activeView === 'Models') renderModelsView(); });
+$('engine').addEventListener('change', async () => { settings.selectedEngine = ($('engine') as HTMLSelectElement).value as InferenceEngine; if(current)current.engine=settings.selectedEngine; setModels(); settings.selectedModel=($('model') as HTMLSelectElement).value; if(current)current.model=settings.selectedModel; syncModelServerStatus(); await window.orion.saveSettings(settings); if(current)await save(); await refreshModelControls(); });
+$('model').addEventListener('change', async () => { settings.selectedModel = ($('model') as HTMLSelectElement).value; if(current)current.model=settings.selectedModel; syncModelServerStatus(); const selected = chatModels().find(model => model.name === settings.selectedModel); ($('model') as HTMLSelectElement).title = selected ? modelSelectorLabel(selected) : settings.selectedModel; await window.orion.saveSettings(settings); if(current)await save(); await refreshModelControls(); if (activeView === 'Models') renderModelsView(); });
 document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => button.onclick = async () => {
   const view = button.dataset.view;
   if (view === 'Schedules') { if(activeView==='Create')clearCreatePageSession(); activeView = 'Chat'; updateActiveNav('Schedules'); renderMessages(true); await openSchedules(); return; }
-  if (view !== 'Chat' && view !== 'Models' && view !== 'Create') return;
+  if (view !== 'Chat' && view !== 'Models' && view !== 'Create' && view !== 'Swarm') return;
   if(activeView==='Create'&&view!=='Create')clearCreatePageSession();
   if (view === 'Models') { modelTab='conversational';creativeCategory='image';modelQuery='';hubModels=popularHubCache.get('conversational')?.models??[];hubNextUrl=popularHubCache.get('conversational')?.nextUrl??null;popularHubError='';activeHubRepo='';activeHubFiles=[]; }
   activeView = view; updateActiveNav(view); renderMessages(true);
   if (view === 'Models') { await refreshLlamaStatus(); installedModels=await window.orion.listInstalledModels(); await refreshModels(); void loadPopularHubModels('conversational'); }
   if (view === 'Create') { try { const entered=await window.orion.enterCreate(); createState=entered.state; installedModels=await window.orion.listInstalledModels(); await refreshGeneratedGallery(); renderMessages(true); if(entered.showInstallPrompt) ($('engine-install-dialog') as HTMLDialogElement).showModal(); } catch(error) { createState={installed:false,running:false,firstEntrySeen:true,phase:'error',detail:error instanceof Error?error.message:String(error),gpu:'Unknown'};renderCreateView(); } }
+  if (view === 'Swarm') { try { swarmItems=await window.orion.listSwarms(); renderMessages(true); } catch(error) { showNotice(error instanceof Error?error.message:String(error),'Swarm unavailable'); } }
 });
   $('canvas-body').addEventListener('pointerup',()=>{const editor=$('canvas-editor') as HTMLTextAreaElement;const selection=window.getSelection();canvasSelectedQuote=!editor.hidden?editor.value.slice(editor.selectionStart,editor.selectionEnd):(selection?.anchorNode&&$('canvas-body').contains(selection.anchorNode)?selection.toString():'');});
   $('canvas-note').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('canvas-give').click();}});
@@ -1471,7 +1578,7 @@ async function refreshMemoryInspector() {
     more.hidden = memoryInspectorOffset + page.items.length >= page.total;
   } catch (error) { if (request === memoryInspectorRequest) status.textContent = `Could not load memory: ${error instanceof Error ? error.message : String(error)}`; }
 }
-type ManagedEngineKey = 'llama'|'exllama'|'diffusion'|'ollama';
+type ManagedEngineKey = 'llama'|'orion'|'diffusion'|'ollama';
 let engineManagementPanel: HTMLElement | null = null;
 const engineInstallBusy = new Set<ManagedEngineKey>();
 function updateEngineCard(key: ManagedEngineKey, status: string, detail?: string, progress?: number) {
@@ -1486,21 +1593,21 @@ function updateEngineCard(key: ManagedEngineKey, status: string, detail?: string
   if (statusNode) statusNode.textContent = status;
   if (detailNode && detail !== undefined) detailNode.textContent = detail;
   if (bar) { bar.hidden = progress === undefined; if (progress !== undefined) { bar.max = 100; bar.value = Math.min(100, Math.max(0, progress)); } }
-  const installed = ['Installed','Running','Installer running','Downloading…','Checking and repairing…'].includes(status);
+  const installed = ['Installed','Bundled','Running','Installer running','Downloading…','Checking and repairing…'].includes(status);
   if (button) { button.hidden = installed; button.disabled = engineInstallBusy.has(key); }
-  if (repair) { repair.hidden = !['Installed','Running'].includes(status); repair.disabled = engineInstallBusy.has(key) || status === 'Running'; }
-  if (remove) { remove.hidden = !['Installed','Running'].includes(status); remove.disabled = engineInstallBusy.has(key) || status === 'Running'; }
+  if (repair) { repair.hidden = !['Installed','Bundled','Running'].includes(status); repair.disabled = engineInstallBusy.has(key) || status === 'Running'; }
+  if (remove) { remove.hidden = key === 'orion' || !['Installed','Running'].includes(status); remove.disabled = engineInstallBusy.has(key) || status === 'Running'; }
 }
 async function refreshEngineManagement() {
   if (!engineManagementPanel) return;
-  for (const key of ['llama','exllama','diffusion','ollama'] as const) if (!engineInstallBusy.has(key)) updateEngineCard(key, 'Checking…', 'Reading local installation status.');
-  const values = await Promise.allSettled([window.orion.llamaStatus(), window.orion.exl2Status(), window.orion.getCreateEngineState(), window.orion.getSystemInfo()]);
+  for (const key of ['llama','orion','diffusion','ollama'] as const) if (!engineInstallBusy.has(key)) updateEngineCard(key, 'Checking…', 'Reading local installation status.');
+  const values = await Promise.allSettled([window.orion.llamaStatus(), window.orion.orionEngineStatus(), window.orion.getCreateEngineState(), window.orion.getSystemInfo()]);
   if (!engineManagementPanel) return;
-  const llama = values[0], exllama = values[1], diffusion = values[2], system = values[3];
+  const llama = values[0], orion = values[1], diffusion = values[2], system = values[3];
   if (llama.status === 'fulfilled') updateEngineCard('llama', llama.value ? 'Installed' : 'Not installed', llama.value ? 'Orion managed GGUF inference runtime is ready.' : 'Install the managed llama.cpp runtime to run GGUF models locally.');
   else updateEngineCard('llama', 'Status unavailable', llama.reason instanceof Error ? llama.reason.message : String(llama.reason));
-  if (exllama.status === 'fulfilled') updateEngineCard('exllama', exllama.value ? 'Installed' : 'Not installed', exllama.value ? 'Orion managed EXL2 inference runtime is ready.' : 'Install ExLlamaV2 for supported EXL2 models. Requires NVIDIA CUDA.');
-  else updateEngineCard('exllama', 'Status unavailable', exllama.reason instanceof Error ? exllama.reason.message : String(exllama.reason));
+  if (orion.status === 'fulfilled') updateEngineCard('orion', orion.value ? 'Bundled' : 'Not installed', orion.value ? 'The app-bundled Orion GGUF runtime is ready. It is the default engine for downloaded chat models.' : 'The bundled runtime is missing. Repair or reinstall Orion.');
+  else updateEngineCard('orion', 'Status unavailable', orion.reason instanceof Error ? orion.reason.message : String(orion.reason));
   if (diffusion.status === 'fulfilled') updateEngineCard('diffusion', diffusion.value.installed ? 'Installed' : 'Not installed', diffusion.value.detail || 'Orion managed stable-diffusion.cpp engine for local image and video generation.');
   else updateEngineCard('diffusion', 'Status unavailable', diffusion.reason instanceof Error ? diffusion.reason.message : String(diffusion.reason));
   if (system.status === 'fulfilled') updateEngineCard('ollama', system.value.ollamaInstalled ? 'Installed' : system.value.ollama ? 'Running' : 'Not installed', system.value.ollama ? 'Ollama is installed and responding on the configured local endpoint.' : system.value.ollamaInstalled ? 'Ollama is installed. Start its local service to use Ollama models.' : 'Download and run the official Ollama installer.');
@@ -1510,7 +1617,7 @@ function createEngineManagementPanel() {
   const panel = document.createElement('div'); panel.className = 'engine-manager-list'; engineManagementPanel = panel;
   const entries: Array<{ key: ManagedEngineKey; title: string; description: string; action: string }> = [
     { key: 'llama', title: 'Orion managed · llama.cpp', description: 'Local GGUF chat inference. Installs on first use or from here.', action: 'Install llama.cpp' },
-    { key: 'exllama', title: 'Orion managed · ExLlamaV2', description: 'Local EXL2 chat inference through NVIDIA CUDA.', action: 'Install ExLlamaV2' },
+    { key: 'orion', title: 'Orion inference', description: 'Orion-managed local GGUF, GPTQ, and AWQ inference, bundled with CUDA support on Windows.', action: 'Verify bundled runtime' },
     { key: 'diffusion', title: 'Orion managed · stable-diffusion.cpp', description: 'Local image and video inference with the Vulkan backend.', action: 'Install stable-diffusion.cpp' },
     { key: 'ollama', title: 'Ollama', description: 'Use Ollama as an external local model server. Installer comes from ollama.com.', action: 'Download official installer' }
   ];
@@ -1533,7 +1640,8 @@ function createEngineManagementPanel() {
 }
 async function manageEngine(key: ManagedEngineKey, action: 'repair'|'uninstall') {
   if (engineInstallBusy.has(key)) return;
-  if (action === 'uninstall' && !await askConfirm(key === 'ollama' ? 'Open system app management to remove Ollama? Orion will not remove models installed by Ollama.' : `Remove the Orion-managed ${key === 'llama' ? 'llama.cpp' : key === 'exllama' ? 'ExLlamaV2' : 'stable-diffusion.cpp'} runtime? Downloaded models and generated media will be kept.`, 'Uninstall engine')) return;
+  if (key === 'orion' && action === 'uninstall') return;
+  if (action === 'uninstall' && !await askConfirm(key === 'ollama' ? 'Open system app management to remove Ollama? Orion will not remove models installed by Ollama.' : `Remove the Orion-managed ${key === 'llama' ? 'llama.cpp' : 'stable-diffusion.cpp'} runtime? Downloaded models and generated media will be kept.`, 'Uninstall engine')) return;
   engineInstallBusy.add(key);updateEngineCard(key,action==='repair'?'Checking and repairing…':'Uninstalling…',action==='repair'?'Checking the installed runtime and applying the latest supported repair or update.':'Removing engine files. Models and generated media are preserved.');
   try {
     const detail=action==='repair'?await window.orion.updateRepairEngine(key):await window.orion.uninstallEngine(key);
@@ -1548,7 +1656,7 @@ async function installManagedEngine(key: ManagedEngineKey) {
   engineInstallBusy.add(key); updateEngineCard(key, 'Installing…', 'Preparing the installer.');
   try {
     if (key === 'llama') await window.orion.installLlama();
-    else if (key === 'exllama') await window.orion.installExl2();
+    else if (key === 'orion') await window.orion.updateRepairEngine('orion');
     else if (key === 'diffusion') await window.orion.installCreateEngine();
     else {
       const result = await window.orion.installOllama();
@@ -1556,11 +1664,11 @@ async function installManagedEngine(key: ManagedEngineKey) {
       return;
     }
     await refreshEngineManagement();
-    showNotice(`${key === 'llama' ? 'llama.cpp' : key === 'exllama' ? 'ExLlamaV2' : 'stable-diffusion.cpp'} setup completed.`, 'Engine ready');
+    showNotice(`${key === 'llama' ? 'llama.cpp' : key === 'orion' ? 'Orion inference' : 'stable-diffusion.cpp'} setup completed.`, 'Engine ready');
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     updateEngineCard(key, 'Setup failed', detail); showNotice(detail, 'Engine setup failed');
-  } finally { engineInstallBusy.delete(key); const statusNode = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`); if (statusNode?.textContent === 'Installing…') updateEngineCard(key, 'Setup interrupted', 'Open Settings → Engines to retry.'); else { const button = statusNode?.closest<HTMLElement>('[data-engine]')?.querySelector<HTMLButtonElement>('.engine-install-action'); if (button) button.disabled = ['Installed','Running','Installer running'].includes(statusNode?.textContent ?? ''); } void refreshEngineManagement(); }
+  } finally { engineInstallBusy.delete(key); const statusNode = engineManagementPanel?.querySelector<HTMLElement>(`[data-engine="${key}"] .engine-manager-status`); if (statusNode?.textContent === 'Installing…') updateEngineCard(key, 'Setup interrupted', 'Open Settings → Engines to retry.'); else { const button = statusNode?.closest<HTMLElement>('[data-engine]')?.querySelector<HTMLButtonElement>('.engine-install-action'); if (button) button.disabled = ['Installed','Bundled','Running','Installer running'].includes(statusNode?.textContent ?? ''); } void refreshEngineManagement(); }
 }
 window.orion.onEngineInstallProgress(progress => {
   if (progress.engine !== 'ollama') return;
@@ -1569,11 +1677,31 @@ window.orion.onEngineInstallProgress(progress => {
   if(progress.phase==='complete')window.setTimeout(()=>void refreshEngineManagement(),2500);
 });
 window.orion.onDownloadProgress(progress => {
-  const key = progress.repo === 'Orion llama.cpp' ? 'llama' : progress.repo === 'Orion ExLlamaV2' ? 'exllama' : null;
+  const key = progress.repo === 'Orion llama.cpp' ? 'llama' : progress.repo === 'Orion Orion inference' ? 'orion' : null;
   if (!key || !engineInstallBusy.has(key)) return;
   const percent = progress.total ? progress.received / progress.total * 100 : undefined;
   updateEngineCard(key, progress.phase === 'error' ? 'Setup failed' : progress.phase === 'complete' ? 'Finalizing…' : 'Downloading…', `${progress.file} · ${Math.round(progress.received / 1048576)} MB`, percent);
 });
+function createToolWorkshopPanel(){
+  const panel=document.createElement('section');panel.className='tool-workshop-panel';const heading=document.createElement('h4');heading.textContent='Personal tools';const description=document.createElement('p');description.className='muted';description.textContent='When enabled, Orion can propose reusable data tools. They use a small, fixed transformation language with no file, process, or network access. Every proposal must pass its sample tests and receive your approval before it is installed.';const toggle=document.createElement('label');toggle.className='job-check';toggle.innerHTML='<input id="evolving-tools-enabled" type="checkbox"><span>Allow Orion to propose reusable tools</span>';const list=document.createElement('div');list.id='evolved-tool-list';list.className='evolved-tool-list';panel.append(heading,description,toggle,list);return panel;
+}
+function createSwarmSettingsPanel(){const panel=document.createElement('section');panel.className='swarm-settings-panel';const heading=document.createElement('h4');heading.textContent='Personal Swarm';const description=document.createElement('p');description.className='muted';description.textContent='A swarm uses the selected local model sequentially while Orion is idle. Only one swarm runs at a time. Network providers are never used.';const toggle=document.createElement('label');toggle.className='job-check';toggle.innerHTML='<input id="swarm-enabled" type="checkbox"><span>Enable the Personal Swarm</span>';const idleLabel=document.createElement('label');idleLabel.textContent='Wait until Orion has been idle for';const idle=document.createElement('select');idle.id='swarm-idle-minutes';for(const [value,label] of [[5,'5 minutes'],[10,'10 minutes'],[20,'20 minutes'],[30,'30 minutes'],[60,'1 hour']] as const)idle.add(new Option(label,String(value)));idleLabel.append(idle);panel.append(heading,description,toggle,idleLabel);return panel;}
+async function refreshEvolvedToolList(){const list=document.getElementById('evolved-tool-list');if(!list)return;try{const items=await window.orion.listEvolvedTools();list.replaceChildren();if(!items.length){const empty=document.createElement('p');empty.className='muted';empty.textContent='No reusable tools installed.';list.append(empty);return;}for(const item of items){const row=document.createElement('div');row.className='evolved-tool-row';const label=document.createElement('div');label.className='evolved-tool-copy';const name=document.createElement('strong');name.textContent=item.name;const detail=document.createElement('span');detail.textContent=`${item.description} · ${item.useCount} uses`;label.append(name,detail);const enabled=document.createElement('input');enabled.type='checkbox';enabled.checked=item.enabled;enabled.setAttribute('aria-label',`${item.enabled?'Disable':'Enable'} ${item.name}`);enabled.onchange=async()=>{enabled.disabled=true;try{await window.orion.setEvolvedToolEnabled(item.id,enabled.checked);}catch(error){enabled.checked=!enabled.checked;showNotice(error instanceof Error?error.message:String(error),'Tool update failed');}finally{enabled.disabled=false;}};row.append(label,enabled);list.append(row);}}catch(error){list.textContent=error instanceof Error?error.message:String(error);}}
+function createMemoryCarePanel() {
+  const panel=document.createElement('section');panel.className='memory-care-panel';
+  const heading=document.createElement('h4');heading.textContent='Idle-time OrionFS care';
+  const copy=document.createElement('p');copy.className='muted';copy.textContent='OrionFS already consolidates memories as conversations are saved. When enabled, idle care reindexes saved conversations and removes expired or long-superseded entries only after saving an encrypted, undoable snapshot. It uses no model and sends no data over the network.';
+  const toggle=document.createElement('label');toggle.className='job-check';toggle.innerHTML='<input id="idle-consolidation-enabled" type="checkbox"><span>Run maintenance automatically</span>';
+  const row=document.createElement('div');row.className='memory-care-options';
+  const idleLabel=document.createElement('label');idleLabel.textContent='Idle for';const idle=document.createElement('select');idle.id='idle-consolidation-minutes';for(const [value,label] of [[5,'5 minutes'],[10,'10 minutes'],[20,'20 minutes'],[30,'30 minutes'],[60,'1 hour']] as const)idle.add(new Option(label,String(value)));idleLabel.append(idle);
+  const intervalLabel=document.createElement('label');intervalLabel.textContent='Run every';const interval=document.createElement('select');interval.id='idle-consolidation-hours';for(const [value,label] of [[12,'12 hours'],[24,'24 hours'],[48,'2 days'],[168,'7 days']] as const)interval.add(new Option(label,String(value)));intervalLabel.append(interval);row.append(idleLabel,intervalLabel);
+  const charge=document.createElement('label');charge.className='job-check';charge.innerHTML='<input id="idle-consolidation-charging" type="checkbox"><span>Require power connection</span>';
+  const report=document.createElement('label');report.className='job-check';report.innerHTML='<input id="idle-overnight-report" type="checkbox"><span>Show a brief report after maintenance</span>';
+  const actions=document.createElement('div');actions.className='memory-care-actions';const run=document.createElement('button');run.type='button';run.className='secondary';run.textContent='Review and run now';const undo=document.createElement('button');undo.type='button';undo.className='secondary';undo.textContent='Undo last run';const status=document.createElement('span');status.className='muted';status.id='memory-care-status';actions.append(run,undo,status);
+  run.onclick=async()=>{run.disabled=true;try{const preview=await window.orion.previewMemoryCare();const accepted=await askConfirm(`Orion will reindex saved conversations and remove ${preview.expired} expired and ${preview.superseded} long-superseded memories. It will first save an encrypted snapshot (${(preview.databaseBytes/1048576).toFixed(1)} MB database). You can undo this run from here. Continue?`,'Review OrionFS maintenance');if(!accepted)return;status.textContent='Saving an undo point and caring for OrionFS…';const result=await window.orion.runMemoryCare();status.textContent=`Finished · ${result.expiredRemoved} expired and ${result.supersededRemoved} superseded memories removed${result.snapshotAvailable?' · undo available':''}`;if(settings.idleOvernightReport)showNotice(status.textContent,'OrionFS care report');void renderMemoryUsage();}catch(error){showNotice(error instanceof Error?error.message:String(error),'OrionFS maintenance failed');}finally{run.disabled=false;}};
+  undo.onclick=async()=>{undo.disabled=true;try{const restored=await window.orion.undoMemoryCare();status.textContent=restored?'OrionFS was restored to its encrypted pre-maintenance snapshot.':'There is no memory-care snapshot to restore.';void renderMemoryUsage();}catch(error){showNotice(error instanceof Error?error.message:String(error),'Could not undo memory maintenance');}finally{undo.disabled=false;}};
+  panel.append(heading,copy,toggle,row,charge,report,actions);return panel;
+}
 function organizeSettingsPanel() {
   const form = $('settings-form');
   if (form.dataset.organized) return;
@@ -1599,9 +1727,11 @@ function organizeSettingsPanel() {
   const subagentHelp = all.find(node => node.matches('.muted') && node.textContent?.startsWith('The first subagent'));
   const systemPrompt = all.find(node => node.matches('#settings-system-prompt') || node.querySelector('#settings-system-prompt'));
   const groups: Array<{ name: string; ids: string[]; extras: HTMLElement[]; description: string }> = [
-    { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel','auto-collapse-thinking'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
+    { name: 'Model', ids: ['ollama-url', 'context-size', 'temperature', 'subagent-max-parallel','auto-collapse-thinking','composer-dreaming'], extras: subagentHelp ? [subagentHelp] : [], description: 'Set the local model endpoint and response defaults.' },
     { name: 'Engines', ids: [], extras: [createEngineManagementPanel()], description: 'Install and manage Orion’s local inference engines and Ollama.' },
-    { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
+    { name: 'Tool Workshop', ids: [], extras: [createToolWorkshopPanel()], description: 'Review the tightly sandboxed reusable tools Orion has learned to create.' },
+    { name: 'Background intelligence', ids: [], extras: [createSwarmSettingsPanel()], description: 'Control idle-time processing and private swarm work.' },
+    { name: 'Memory & privacy', ids: ['inter-conversation-memory'], extras: [inspector, memory, createMemoryCarePanel(), ofsDescription, privacy].filter(Boolean) as HTMLElement[], description: 'Review OrionFS memories and manage local conversation privacy.' },
     { name: 'Voice', ids: [], extras: [voiceControls.settingsSection()], description: 'Private local dictation and natural neural read aloud. Nothing installs until first use.' },
     { name: 'Startup', ids: ['keep-in-tray', 'start-new-conversation'], extras: [], description: 'Choose what Orion does when its window closes or opens.' },
     { name: 'System prompt', ids: [], extras: systemPrompt ? [systemPrompt] : [], description: 'Current instructions sent to the selected model.' }
@@ -1621,7 +1751,7 @@ function organizeSettingsPanel() {
     for (const id of group.ids) { const field = byId(id); if (field) section.append(field); }
     for (const extra of group.extras) section.append(extra);
     const button = document.createElement('button'); button.type = 'button'; button.className = `settings-nav-item${index === 0 ? ' active' : ''}`; button.textContent = group.name; button.setAttribute('aria-current', index === 0 ? 'page' : 'false');
-    button.onclick = () => { nav.querySelectorAll('.settings-nav-item').forEach(item => { item.classList.remove('active'); item.setAttribute('aria-current', 'false'); }); content.querySelectorAll('.settings-section').forEach(item => { item.classList.remove('active'); (item as HTMLElement).hidden = true; }); button.classList.add('active'); button.setAttribute('aria-current', 'page'); section.hidden = false; section.classList.add('active'); if (group.name === 'System prompt') void loadSettingsSystemPrompt(); if (group.name === 'Memory & privacy') { memoryInspectorOffset = 0; void refreshMemoryInspector(); } if (group.name === 'Engines') void refreshEngineManagement(); };
+    button.onclick = () => { nav.querySelectorAll('.settings-nav-item').forEach(item => { item.classList.remove('active'); item.setAttribute('aria-current', 'false'); }); content.querySelectorAll('.settings-section').forEach(item => { item.classList.remove('active'); (item as HTMLElement).hidden = true; }); button.classList.add('active'); button.setAttribute('aria-current', 'page'); section.hidden = false; section.classList.add('active'); if (group.name === 'System prompt') void loadSettingsSystemPrompt(); if (group.name === 'Memory & privacy') { memoryInspectorOffset = 0; void refreshMemoryInspector(); } if (group.name === 'Engines') void refreshEngineManagement(); if(group.name==='Tool Workshop')void refreshEvolvedToolList(); };
     nav.append(button); content.append(section);
   });
   if (actions) form.append(actions);
@@ -1634,17 +1764,18 @@ async function loadSettingsSystemPrompt() {
   try { output.textContent = await window.orion.getSystemPrompt(($('model') as HTMLSelectElement).value, chatMode); }
   catch (error) { output.textContent = `Could not load the system prompt: ${error instanceof Error ? error.message : String(error)}`; }
 }
-$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); await voiceControls.refreshSettings(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('auto-collapse-thinking') as HTMLInputElement).checked = settings.autoCollapseThinking; ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Engines") void refreshEngineManagement(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
+$('settings-open').addEventListener('click', async () => { const button = $('settings-open') as HTMLButtonElement; if (button.disabled || settingsDialog.open) return; button.disabled = true; try { ensureStartupPreferenceControl(); organizeSettingsPanel(); await voiceControls.refreshSettings(); settings = await window.orion.settings(); await refreshStorageWarning(); ($('ollama-url') as HTMLInputElement).value = settings.ollamaUrl; ($('context-size') as HTMLInputElement).value = String(settings.contextWindow); ($('temperature') as HTMLInputElement).value = String(settings.temperature); ($('auto-collapse-thinking') as HTMLInputElement).checked = settings.autoCollapseThinking; ($('composer-dreaming') as HTMLInputElement).checked = settings.composerDreaming; ($('idle-consolidation-enabled') as HTMLInputElement).checked = settings.idleConsolidationEnabled; ($('idle-consolidation-minutes') as HTMLSelectElement).value = String(settings.idleConsolidationMinutes); ($('idle-consolidation-hours') as HTMLSelectElement).value = String(settings.idleConsolidationHours); ($('idle-consolidation-charging') as HTMLInputElement).checked = settings.idleConsolidationChargingOnly; ($('idle-overnight-report') as HTMLInputElement).checked = settings.idleOvernightReport; ($('evolving-tools-enabled') as HTMLInputElement).checked = settings.evolvingToolsEnabled; ($('swarm-enabled') as HTMLInputElement).checked = settings.swarmEnabled; ($('swarm-idle-minutes') as HTMLSelectElement).value = String(settings.swarmIdleMinutes); ($('workspace-path') as HTMLInputElement).value = settings.workspacePath || ''; ($('keep-in-tray') as HTMLInputElement).checked = settings.keepInTray; ($('inter-conversation-memory') as HTMLInputElement).checked = settings.interConversationMemory; ($('experimental-ofs-memory') as HTMLInputElement).checked = settings.experimentalOfsMemory; ($('subagent-max-parallel') as HTMLSelectElement).value = String(settings.subagentMaxParallel); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation;  settingsDialog.showModal(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Memory & privacy") void refreshMemoryInspector(); if (document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Engines") void refreshEngineManagement(); if(document.querySelector(".settings-nav-item[aria-current=page]")?.textContent === "Tool Workshop") void refreshEvolvedToolList(); if (document.querySelector(".settings-nav-item[aria-current=\"page\"]")?.textContent === "System prompt") void loadSettingsSystemPrompt(); } catch (cause) { showNotice(cause instanceof Error ? cause.message : String(cause), 'Could not open settings'); } finally { button.disabled = false; } });
 settingsDialog.addEventListener('close', () => applyTheme());
 $('workspace-browse').onclick = async () => { const selected = await window.orion.selectWorkspace(); if (selected) ($('workspace-path') as HTMLInputElement).value = selected; };
 $('rebuild-memory').onclick = () => { $('memory-progress').textContent = 'Re-indexing saved conversations…'; void window.orion.rebuildMemory(); };
 const embeddingButton = $('install-memory-embedding') as HTMLButtonElement;
 embeddingButton.onclick = async () => { embeddingButton.disabled = true; $('memory-progress').textContent = 'Preparing semantic memory…'; try { await window.orion.installMemoryEmbedding(); await refreshModels(); } catch (cause) { $('memory-progress').textContent = `Semantic memory failed: ${cause instanceof Error ? cause.message : String(cause)}`; } finally { embeddingButton.disabled = false; void renderMemoryUsage(); } };
 window.orion.onMemoryProgress(progress => { $('memory-progress').textContent = progress.error ? `Memory re-index failed: ${progress.error}` : progress.status ?? (progress.completed >= progress.total ? `Memory index ready · ${progress.total} conversations indexed.` : `Indexing conversations · ${progress.completed} / ${progress.total}`); void renderMemoryUsage(); });
+window.orion.onMemoryCareReport(report => { const status=document.getElementById('memory-care-status');if(status)status.textContent=`Finished · ${report.expiredRemoved} expired and ${report.supersededRemoved} superseded memories removed${report.snapshotAvailable?' · undo available':''}`;if(settings?.idleOvernightReport)showNotice(`Memory updated · ${report.expiredRemoved+report.supersededRemoved} obsolete memories removed. The encrypted snapshot can be restored from Settings → Memory & privacy.`,'OrionFS overnight report');void renderMemoryUsage(); });
 $('settings-close').addEventListener('click', () => settingsDialog.close());
 $('settings-cancel').addEventListener('click', () => settingsDialog.close());
-$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.autoCollapseThinking = ($('auto-collapse-thinking') as HTMLInputElement).checked; settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
-window.orion.onDownloadProgress(progress=>{downloadProgress.set(progress.id,progress);if(progress.phase!=='downloading')cancellingModelDownloads.delete(progress.id);renderDownloadActivity();if(progress.repo==='Orion llama.cpp'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshLlamaStatus(),2500);if(progress.repo==='Orion ExLlamaV2'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshExl2Status(),2500);if(progress.phase!=='downloading')window.setTimeout(()=>{downloadProgress.delete(progress.id);renderDownloadActivity();},progress.phase==='complete'?6000:progress.phase==='cancelled'?3500:12000);});
+$('settings-form').addEventListener('submit', async e => { e.preventDefault(); const error = $('settings-error'); error.hidden = true; try { settings.ollamaUrl = ($('ollama-url') as HTMLInputElement).value.trim().replace(/\/$/, ''); settings.contextWindow = Math.min(131072, Math.max(1024, Number(($('context-size') as HTMLInputElement).value))); settings.temperature = Math.min(2, Math.max(0, Number(($('temperature') as HTMLInputElement).value))); settings.workspacePath = ''; if (current) current.workspacePath = undefined; settings.autoCollapseThinking = ($('auto-collapse-thinking') as HTMLInputElement).checked; settings.composerDreaming = ($('composer-dreaming') as HTMLInputElement).checked; settings.idleConsolidationEnabled = ($('idle-consolidation-enabled') as HTMLInputElement).checked; settings.idleConsolidationMinutes = Number(($('idle-consolidation-minutes') as HTMLSelectElement).value); settings.idleConsolidationHours = Number(($('idle-consolidation-hours') as HTMLSelectElement).value); settings.idleConsolidationChargingOnly = ($('idle-consolidation-charging') as HTMLInputElement).checked; settings.idleOvernightReport = ($('idle-overnight-report') as HTMLInputElement).checked; settings.evolvingToolsEnabled = ($('evolving-tools-enabled') as HTMLInputElement).checked; settings.swarmEnabled = ($('swarm-enabled') as HTMLInputElement).checked; settings.swarmIdleMinutes = Number(($('swarm-idle-minutes') as HTMLSelectElement).value); settings.keepInTray = ($('keep-in-tray') as HTMLInputElement).checked; settings.interConversationMemory = ($('inter-conversation-memory') as HTMLInputElement).checked; settings.experimentalOfsMemory = true; settings.startNewConversation = ($('start-new-conversation') as HTMLInputElement).checked; settings.subagentMaxParallel = Number(($('subagent-max-parallel') as HTMLSelectElement).value) as 0|1|2; await window.orion.saveSettings(settings); if (!settings.swarmEnabled) { for (const swarm of await window.orion.listSwarms()) if (swarm.status === "running") await window.orion.pauseSwarm(swarm.id); } if (current) await window.orion.saveConversation(current, false); updateChatModeUi(); applyTheme(); settingsDialog.close(); await refreshModels(); void renderMemoryUsage(); } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; } });
+window.orion.onDownloadProgress(progress=>{downloadProgress.set(progress.id,progress);if(progress.phase!=='downloading')cancellingModelDownloads.delete(progress.id);renderDownloadActivity();if(progress.repo==='Orion llama.cpp'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshLlamaStatus(),2500);if(progress.repo==='Orion Orion inference'&&progress.phase!=='downloading')window.setTimeout(()=>void refreshOrionStatus(),2500);if(progress.phase!=='downloading')window.setTimeout(()=>{downloadProgress.delete(progress.id);renderDownloadActivity();},progress.phase==='complete'?6000:progress.phase==='cancelled'?3500:12000);});
 const invokeDialog=$('engine-install-dialog') as HTMLDialogElement;
 async function startEngineInstall() {
   if(engineInstallPending)return;
@@ -1684,7 +1815,6 @@ const llamaIntroDialog=$('llama-intro-dialog') as HTMLDialogElement;
 llamaIntroDialog.addEventListener('close',()=>{void window.orion.dismissLlamaIntro();});
 $('llama-intro-later').addEventListener('click',()=>{void window.orion.dismissLlamaIntro();});
 $('llama-intro-install').addEventListener('click',async()=>{llamaIntroDialog.close();try{await window.orion.installLlama();await refreshLlamaStatus();showNotice('The managed llama.cpp runtime is ready. Download a GGUF model from Models to get started.','Setup complete');}catch(error){await refreshLlamaStatus();showNotice(error instanceof Error?error.message:String(error),'llama.cpp setup failed');}});
-$('exl2-intro-install').addEventListener('click',async()=>{llamaIntroDialog.close();try{await window.orion.installExl2();await refreshExl2Status();showNotice('The managed ExLlamaV2 runtime is ready. Download an EXL2 model from Models to get started.','Setup complete');}catch(error){await refreshExl2Status();showNotice(error instanceof Error?error.message:String(error),'ExLlamaV2 setup failed');}});
 chatBox.addEventListener('click', async e => { const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-copy]'); if (b) { await navigator.clipboard.writeText(decodeURIComponent(b.dataset.copy ?? '')); b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1300); } });
 const pendingApprovals = new Map<string, ToolRequest>();
 const approvalStrip = $('tool-approval');
@@ -1881,7 +2011,7 @@ async function runScheduledJob(job: ScheduledJob) {
       if (e.type === 'cancelled') { failed = true; if (!assistant.content) assistant.content = '_Scheduled run was stopped._'; }
       scheduleSave(target);
     });
-    const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, messages: target.messages.slice(0, -1), agent: job.agent });
+    const result = await window.orion.streamChat({ conversationId: target.id, model: target.model, engine: target.engine ?? settings.selectedEngine ?? 'orion', messages: target.messages.slice(0, -1), agent: job.agent });
     const completedAssistant = target.messages.at(-1); if (completedAssistant) { const memoryContext = await window.orion.memoryHistory.context(target.id); completedAssistant.assumptionIds = [...new Set([...(completedAssistant.assumptionIds??[]),...memoryContext.assumptions.filter(item=>item.status!=='dismissed').map(item=>item.id)])]; completedAssistant.generationMs = performance.now() - generationStarted; if (result.tokensPerSecond !== undefined) completedAssistant.tokensPerSecond = result.tokensPerSecond; }
   } catch (error) {
     failed = true; const assistant = target.messages.at(-1);
@@ -1993,7 +2123,7 @@ $('job-form').addEventListener('submit', async e => {
   } catch (cause) { error.textContent = cause instanceof Error ? cause.message : String(cause); error.hidden = false; }
 });
 function ensureStartupPreferenceControl() { if (document.getElementById('start-new-conversation')) return; const label = document.createElement('label'); label.className = 'job-check';const input=document.createElement('input');input.id='start-new-conversation';input.type='checkbox';const description=document.createElement('span');description.textContent='Open an empty chat when Orion starts, reusing an existing Untitled chat when available (otherwise restore the last chat).';label.append(input,description);$('keep-in-tray').closest('label')?.before(label); }
-async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(); conversations = await window.orion.listConversations(); for(const conversation of conversations) { if(isReusableUntitledConversation(conversation) && conversation.title !== 'Untitled') { conversation.title='Untitled'; await window.orion.saveConversation(conversation,false); } } await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(true); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshExl2Status(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();void refreshExl2Status();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
+async function init() { setupUpdaterUi(); settings = await window.orion.settings();  ensureStartupPreferenceControl(); ($('start-new-conversation') as HTMLInputElement).checked = settings.startNewConversation; applyTheme(); conversations = await window.orion.listConversations(); for(const conversation of conversations) { if(isReusableUntitledConversation(conversation) && conversation.title !== 'Untitled') { conversation.title='Untitled'; await window.orion.saveConversation(conversation,false); } } await refreshStorageWarning(); if (settings.startNewConversation) { current = null; } else if (conversations.length) current = conversations[0]!; else { current = null; } await refreshModels(); if (settings.startNewConversation) newConversation(true); else switchCanvasConversation(current?.id); if(await window.orion.shouldShowLlamaIntro())llamaIntroDialog.showModal(); await Promise.all([refreshSystemResources(),refreshLlamaStatus(),refreshOrionStatus(),refreshCreateEngineStatus()]); chatMode = 'chat'; updateChatModeUi(); renderHistory(); renderMessages(true);  void renderMemoryUsage(); window.setInterval(() => { void renderMemoryUsage(); }, 3000); window.setInterval(() => { void refreshSystemResources(); }, 1000);window.setInterval(() => {void refreshLlamaStatus();void refreshOrionStatus();},15000); appInitialized = true; const next = waitingScheduledJobs.shift(); if (next) void runScheduledJob(next); }
 ensureStartupPreferenceControl();
 window.history.scrollRestoration = 'manual';
 void init();

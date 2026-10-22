@@ -13,9 +13,9 @@ This nightly is the Tauri v2 edition of Orion, developed alongside the stable El
 
 ### Local engines and model browsing
 
-- Add an Engines settings tab to install, update and repair, or uninstall Orion-managed llama.cpp, ExLlamaV2 and stable-diffusion.cpp engines. Ollama can be installed by opening its official installer.
-- Add managed ExLlamaV2 for EXL2 models alongside llama.cpp for GGUF. Setup uses Orion's managed uv runtime, detects the available NVIDIA/CUDA combination and verifies the installed runtime.
-- Browse EXL2 quantization branches as complete model bundles, verify downloaded files, and route installed models through the ExLlamaV2 server. EXL2 supports text chat and Orion's tool protocol; image attachments use GGUF-capable engines.
+- Add an Engines settings tab to install, update and repair, or uninstall Orion-managed llama.cpp and stable-diffusion.cpp engines. Ollama can be installed by opening its official installer.
+- Bundle Orion Inference for local chat models in GGUF, GPTQ, and AWQ formats, with CUDA support on Windows. The model browser searches these formats for Orion Inference and limits llama.cpp results to GGUF.
+- Add an engine selector in the chat composer. Use Orion inference by default, or choose installed llama.cpp for GGUFs, Ollama for Ollama models, or a configured API provider.
 - Show estimated RAM and VRAM fit for conversational model variants, with filters for models that fit the PC, GPU fit, CPU or partial GPU fit, and models that may exceed available memory. Sort by best fit.
 - Keep model cards in place while quantization choices load and separate conversational models from image and video models in Manage.
 
@@ -32,7 +32,7 @@ This nightly is the Tauri v2 edition of Orion, developed alongside the stable El
 - Anchor populated conversations at the latest messages so new chats begin near the composer and flow upward naturally.
 - Recover the OrionFS worker after an unexpected failure and reconnect through the normal status refresh.
 - Normalize Windows resource paths in the bundled service so native Canvas modules load correctly in both installed and portable packages.
-- Route managed EXL2 chats through the right server, resolve older model indexes from each model's `config.json`, and keep model loads from starting automatically on app launch.
+- Resolve older model indexes from each model's `config.json`, and keep model loads from starting automatically on app launch.
 
 All stable 0.2.0 conversation history, memory checkpoints, branching and comparison, source receipts, local handoff, voice, Canvas, chat tools, web search and image/video creation remain part of this nightly.
 
@@ -42,4 +42,4 @@ All stable 0.2.0 conversation history, memory checkpoints, branching and compari
 - Linux x64: AppImage, DEB and RPM.
 - macOS is not currently supported.
 
-This is a prerelease for testing. Linux desktop and legacy Linux keyring migration need further runtime validation, and full Wan video generation may vary with model and hardware. EXL2 requires a supported NVIDIA GPU; GGUF through llama.cpp remains available on other systems. The original Electron source and stable release remain unchanged.
+This is a prerelease for testing. Linux desktop and legacy Linux keyring migration need further runtime validation, and full Wan video generation may vary with model and hardware. Orion inference uses CUDA on Windows and a CPU backend on other supported builds; llama.cpp remains available as an alternate GGUF engine. The original Electron source and stable release remain unchanged.

@@ -3,25 +3,25 @@ import './composerSelect.css';
 /** Keep the existing selects as the source of truth for model/runtime handlers. */
 export function installComposerSelects() {
   let dismiss: (() => void) | undefined;
-  for (const id of ['model', 'context-window']) {
+  for (const id of ['engine', 'model', 'context-window']) {
     const select = document.getElementById(id) as HTMLSelectElement;
     select.classList.add('composer-native-select'); select.tabIndex = -1; select.setAttribute('aria-hidden', 'true');
     const trigger = document.createElement('button');
-    trigger.type = 'button'; trigger.className = `composer-select ${id === 'model' ? 'composer-model-select' : 'composer-context-select'}`;
+    trigger.type = 'button'; trigger.className = `composer-select ${id === 'model' ? 'composer-model-select' : id === 'engine' ? 'composer-engine-select' : 'composer-context-select'}`;
     trigger.setAttribute('role', 'combobox'); trigger.setAttribute('aria-haspopup', 'listbox'); trigger.setAttribute('aria-expanded', 'false');
     const label = document.createElement('span'); label.className = 'composer-select-label';
     const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); arrow.setAttribute('viewBox', '0 0 12 12'); arrow.setAttribute('aria-hidden', 'true');
     const path = document.createElementNS(arrow.namespaceURI, 'path'); path.setAttribute('d', 'm3 4.5 3 3 3-3'); arrow.append(path); trigger.append(label, arrow);
     select.after(trigger);
     const menu = document.createElement('div'); menu.id = `${id}-composer-menu`; menu.className = 'composer-select-menu'; menu.hidden = true; menu.tabIndex = -1;
-    menu.setAttribute('role', 'listbox'); menu.setAttribute('aria-label', id === 'model' ? 'Chat model' : 'Context length');
+    menu.setAttribute('role', 'listbox'); menu.setAttribute('aria-label', id === 'model' ? 'Chat model' : id === 'engine' ? 'Inference engine' : 'Context length');
     trigger.setAttribute('aria-controls', menu.id); document.body.append(menu);
     let active = -1, options: HTMLOptionElement[] = [], rows: HTMLElement[] = [], search = '', searchAt = 0;
     const position = () => {
       if (menu.hidden) return;
       const rect = trigger.getBoundingClientRect();
       if (!rect.width || !rect.height) { close(false); return; }
-      const width = Math.min(innerWidth - 24, id === 'model' ? Math.max(rect.width, 320) : 150);
+      const width = Math.min(innerWidth - 24, id === 'model' ? Math.max(rect.width, 320) : id === 'engine' ? Math.max(rect.width, 170) : 150);
       menu.style.width = `${width}px`;
       menu.style.left = `${Math.max(12, Math.min(rect.left, innerWidth - width - 12))}px`;
       menu.style.bottom = `${innerHeight - rect.top + 8}px`;
@@ -51,9 +51,9 @@ export function installComposerSelects() {
       highlight(Math.max(0, options.findIndex(option => option.selected && !option.disabled)));
     };
     const sync = () => {
-      label.textContent = select.selectedOptions[0]?.label ?? (id === 'model' ? 'Choose model' : 'Context');
+      label.textContent = select.selectedOptions[0]?.label ?? (id === 'model' ? 'Choose model' : id === 'engine' ? 'Engine' : 'Context');
       trigger.title = label.textContent; trigger.disabled = select.disabled || !select.options.length;
-      trigger.setAttribute('aria-label', `${id === 'model' ? 'Model' : 'Context length'}: ${label.textContent}`);
+      trigger.setAttribute('aria-label', `${id === 'model' ? 'Model' : id === 'engine' ? 'Inference engine' : 'Context length'}: ${label.textContent}`);
       if (!menu.hidden) { populate(); position(); }
     };
     const open = () => { if (trigger.disabled) return; dismiss?.(); dismiss = dismissThis; menu.hidden = false; trigger.setAttribute('aria-expanded', 'true'); populate(); position(); menu.focus(); };
