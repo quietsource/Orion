@@ -7,3 +7,10 @@ src-tauri/binaries/orion-service-*
 !.migration/source-baseline.json
 *.log
 training/orion-agent-v1/
+
+.build/
+.containerize/
+node_modules/
+dist/
+src-tauri/target/
+build/inference-runtime/
