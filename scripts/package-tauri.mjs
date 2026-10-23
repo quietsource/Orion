@@ -1,17 +1,18 @@
-import {mkdir,copyFile,readdir,readFile,writeFile,cp,access} from 'node:fs/promises';
+import {mkdir,copyFile,readdir,readFile,writeFile,cp,access,rm} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dir,'..');process.chdir(root);
 const version=JSON.parse(await readFile('package.json','utf8')).version;
+const cargoTarget=path.resolve(process.env.CARGO_TARGET_DIR||path.join(root,'src-tauri','target'));
 const bundles=process.platform==='win32'?'nsis':'deb,rpm,appimage';
 const child=Bun.spawn(['bun','node_modules/@tauri-apps/cli/tauri.js','build','--bundles',bundles],{stdout:'inherit',stderr:'inherit'});
 if(await child.exited!==0)throw Error('Native package build failed');
 const destination=path.join(root,'release',version);await mkdir(destination,{recursive:true});
 async function collect(directory){for(const entry of await readdir(directory,{withFileTypes:true})){const file=path.join(directory,entry.name);if(entry.isDirectory())await collect(file);else if(entry.name.includes(version)&&/\.(exe|deb|rpm|AppImage)$/.test(entry.name)){const name='Orion-Tauri_'+entry.name.replace(/^Orion[_-]/,'');await copyFile(file,path.join(destination,name));}}}
-await collect('src-tauri/target/release/bundle');
+await collect(path.join(cargoTarget,'release','bundle'));
 if(process.platform==='win32'){
- const portable=path.join(root,'.migration','portable');await mkdir(portable,{recursive:true});
- for(const name of ['orion-tauri.exe','orion-service.exe'])await copyFile(path.join(root,'src-tauri/target/release',name),path.join(portable,name));
+ const portable=path.join(root,'.migration','portable');await rm(portable,{recursive:true,force:true});await mkdir(portable,{recursive:true});
+ for(const name of ['orion-tauri.exe','orion-service.exe'])await copyFile(path.join(cargoTarget,'release',name),path.join(portable,name));
  await cp(path.join(root,'dist/main'),path.join(portable,'dist/main'),{recursive:true});
  await cp(path.join(root,'dist/ocr'),path.join(portable,'dist/ocr'),{recursive:true});
  await cp(path.join(root,'dist/native-canvas'),path.join(portable,'dist/native-canvas'),{recursive:true});

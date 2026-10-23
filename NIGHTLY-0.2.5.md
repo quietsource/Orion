@@ -2,6 +2,16 @@
 
 This nightly is the Tauri v2 edition of Orion, developed alongside the stable Electron release. It carries forward the stable 0.2.0 conversation history, checkpoint and branch tools, source receipts, local voice, OrionFS memory and creation features, and adds the changes below. It uses the existing Orion per-user data directory so conversations, encrypted settings and API keys, memories, installed models, engines and voice setup remain available.
 
+This prerelease is updated in place on the `nightly` line. The Tauri edition is being tested alongside the stable Electron release while it approaches feature parity and release readiness.
+
+### Interface refinements
+
+- Use Orion-styled right-click menus throughout the app, including text selection, editable fields, links, media and code. The embedded browser also uses a matching private menu; native WebView context menus are suppressed.
+- Replace native select popups and browser validation bubbles with rounded Orion menus and validation messages, including in Settings dialogs.
+- Keep Chat, Create, Swarm and Model Browser inside the same continuous application frame. Model browsing now scrolls from its heading and clips result cards within the frame.
+- Match the Create and Swarm composer framing and focus treatment to Chat, and refine the Swarm workspace and model selection layout.
+- Add in-app creative iteration history and improve Swarm progress, prioritization and workspace activity tracking.
+
 ## New since stable Orion 0.2.0
 
 ### Tauri desktop runtime

@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir } from 'node:fs/promises';
+import { cp, mkdir, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 const root = path.resolve(import.meta.dir, '..');
 process.chdir(root);
@@ -6,6 +6,7 @@ async function run(command, args) { const child = Bun.spawn([command, ...args], 
 await run('bun', ['scripts/generate-highlight-languages.mjs']);
 await run('bun', ['run', 'typecheck']);
 await run('bun', ['scripts/build-inference-runtime.mjs']);
+for (const directory of ['dist/main', 'dist/ocr', 'dist/native-canvas']) await rm(directory, { recursive: true, force: true });
 await mkdir('dist/main', { recursive: true });
 await mkdir('dist/ocr', { recursive: true });
 await mkdir('dist/native-canvas', { recursive: true });

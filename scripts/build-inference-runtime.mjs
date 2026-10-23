@@ -5,7 +5,7 @@ const root = path.resolve(import.meta.dir, '..');
 const source = path.join(root, 'vendor', 'orion-inference-runtime');
 const output = path.join(root, 'build', 'inference-runtime');
 const windows = process.platform === 'win32';
-const targetDir = process.env.CARGO_TARGET_DIR || path.join(root, '.build', 'orion-inference-target');
+const targetDir = process.env.ORION_INFERENCE_TARGET_DIR || process.env.CARGO_TARGET_DIR || path.join(root, '.build', 'orion-inference-target');
 const fail = message => { throw new Error(message); };
 
 async function run(command, args, options = {}) {
@@ -51,6 +51,7 @@ const cargo = windows ? path.join(process.env.USERPROFILE || '', '.cargo', 'bin'
 await run(cargo, args, { env });
 const binary = path.join(targetDir, 'release', `orion-inference${windows ? '.exe' : ''}`);
 await access(binary).then(() => true, () => fail(`The inference build finished without producing ${binary}.`));
+await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await copyFile(binary, path.join(output, `orion-inference${windows ? '.exe' : ''}`));
 

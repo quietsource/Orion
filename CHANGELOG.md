@@ -12,6 +12,11 @@
 - Compact encrypted OrionFS snapshots into a versioned `.ofs` container using Orion's existing encryption. Reclaim unused SQLite pages, prune obsolete chunks and versions, retain only the current snapshot, and keep warmed retrieval free of per-query console logging unless `ORION_OFS_PROFILE=1` is set.
 - Improve the Create page layout and make the creations panel independently scrollable.
 - Clarify that the Tauri nightly carries forward stable 0.2.0 conversation history, checkpoints, branches, source receipts, local voice, Canvas tools and media creation while using a separate Tauri v2 shell and bundled Bun service.
+- Suppress native WebView context menus and provide Orion-styled right-click menus for editable text, links, selected text, code and media, including in the embedded browser.
+- Replace native select popups and browser validation bubbles with keyboard-accessible Orion-styled popups, including controls inside Settings dialogs.
+- Use the shared application frame across Chat, Create, Swarm and the Model Browser. Correct Model Browser top spacing and keep results behind the lower frame edge.
+- Match Create and Swarm composer framing and focus treatment to Chat; refine Swarm layout and progress activity.
+- Track creative iteration runs in a browsable local history.
 
 - Replace Electron with Tauri v2 and a standalone Bun backend while retaining the Orion interface and application features.
 - Reuse the existing Orion data directory, installed engines, models and encrypted data. Unlock the original Windows encryption key without replacing it.
