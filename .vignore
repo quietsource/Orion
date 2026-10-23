@@ -6,3 +6,4 @@ src-tauri/binaries/orion-service-*
 .migration/*
 !.migration/source-baseline.json
 *.log
+training/orion-agent-v1/

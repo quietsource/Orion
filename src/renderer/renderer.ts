@@ -1233,11 +1233,12 @@ function renderMessages(forceScroll = false) {
 function isEmbeddingModel(model: { name: string; capabilities?: string[] }) { return model.capabilities?.includes('embedding') === true || /nomic-embed|mxbai-embed|all-minilm|snowflake-arctic-embed|bge-|embeddinggemma|granite-embedding/i.test(model.name); }
 function isChatCapableModel(model: { name: string; capabilities?: string[] }) { return model.capabilities?.length ? model.capabilities.includes('completion') : !isEmbeddingModel(model); }
 function chatModels() { return models.filter(isChatCapableModel); }
+function modelSupportsOrion(model:(typeof models)[number]) { const supported=model.details?.supported_engines; if(Array.isArray(supported))return supported.includes('orion'); return !/flint/i.test(String(model.details?.family??model.name)); }
 function swarmModelChoices():Array<{engine:'orion'|'llama.cpp'|'ollama';model:string;label:string}>{
   const choices:Array<{engine:'orion'|'llama.cpp'|'ollama';model:string;label:string}>=[];
   for(const candidate of chatModels()){
     if(candidate.source==='orion'){
-      if(managedOrionInstalled)choices.push({engine:'orion',model:candidate.name,label:`${modelSelectorLabel(candidate)} · Orion Inference`});
+      if(managedOrionInstalled&&modelSupportsOrion(candidate))choices.push({engine:'orion',model:candidate.name,label:`${modelSelectorLabel(candidate)} · Orion Inference`});
       if(managedLlamaInstalled&&String(candidate.details?.format??'gguf').toLowerCase()==='gguf')choices.push({engine:'llama.cpp',model:candidate.name,label:`${modelSelectorLabel(candidate)} · llama.cpp`});
     }else if(candidate.source==='ollama')choices.push({engine:'ollama',model:candidate.name,label:`${modelSelectorLabel(candidate)} · Ollama`});
   }
@@ -1246,7 +1247,7 @@ function swarmModelChoices():Array<{engine:'orion'|'llama.cpp'|'ollama';model:st
 function orionModelLabel(familyName: string, fileName: string) { const family = familyName.split('/').at(-1)!.replace(/[-_.]?gguf$/i, ''); const quant = fileName.match(/\b(gptq|awq)\b/i)?.[1]?.toUpperCase() ?? fileName.match(/I?Q\d(?:_[A-Z0-9]+)*/i)?.[0]; const shortFamily = family.length > 34 ? `${family.slice(0, 33)}…` : family; return `${shortFamily}${quant ? ` · ${quant}` : ''}`; }
 function modelSelectorLabel(model: (typeof models)[number]) { if (model.source === 'api') return String(model.details?.label ?? model.name); if (model.source !== 'orion') return model.name; return orionModelLabel(String(model.details?.family ?? model.name), String(model.details?.format ?? model.details?.parameter_size ?? '')); }
 function assistantModelLabel(name: string) { const model = models.find(candidate => candidate.name === name); if (model) return modelSelectorLabel(model); const prefix = name.startsWith('orion-gguf:') ? 'orion-gguf:' : ''; const installed = prefix ? installedModels.find(candidate => candidate.id === name.slice(prefix.length)) : undefined; if (installed) return orionModelLabel(installed.repo, installed.file); return prefix ? 'Local managed model' : name || 'Orion'; }
-function modelsForEngine(engine: InferenceEngine) { return chatModels().filter(model => engine === 'orion' ? model.source === 'orion' : engine === 'llama.cpp' ? model.source === 'orion' && model.details?.format !== 'gptq' && model.details?.format !== 'awq' : engine === 'ollama' ? model.source === 'ollama' : model.source === 'api'); }
+function modelsForEngine(engine: InferenceEngine) { return chatModels().filter(model => engine === 'orion' ? model.source === 'orion' && modelSupportsOrion(model) : engine === 'llama.cpp' ? model.source === 'orion' && model.details?.format !== 'gptq' && model.details?.format !== 'awq' : engine === 'ollama' ? model.source === 'ollama' : model.source === 'api'); }
 function setModels() {
   const select = $('model') as HTMLSelectElement, engineSelect = $('engine') as HTMLSelectElement;
   const options: Array<[InferenceEngine,string,boolean]> = [

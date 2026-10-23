@@ -205,7 +205,7 @@ async function swarmInferenceEndpoint(settings:AppSettings,selectedEngine:AppSet
   if(selectedEngine==='llama.cpp'&&format!=='gguf')throw Error('llama.cpp can only run GGUF models for this swarm. Choose Orion Inference or another model.');
   if(selectedEngine==='llama.cpp'&&!await llamaManager.isInstalled())throw Error('Install llama.cpp from Settings → Engines before running this swarm.');
   if(selectedEngine==='orion'&&!await orionInferenceRuntime.isInstalled())throw Error('Orion Inference is not available for the selected swarm model.');
-  const base=selectedEngine==='orion'?await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf'):await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));return{url:`${base}/v1/chat/completions`,model:'orion-local'};
+  const base=selectedEngine==='orion'?await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf'):await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));return{url:`${base}/v1/chat/completions`,model:selectedEngine==='orion'?'default':'orion-local'};
 }
 async function swarmModelTurn(settings:AppSettings,selectedEngine:AppSettings['selectedEngine'],selectedModel:string,system:string,user:string,signal:AbortSignal){
   const endpoint=await swarmInferenceEndpoint(settings,selectedEngine,selectedModel),response=await fetch(endpoint.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:endpoint.model,messages:[{role:'system',content:system},{role:'user',content:user}],temperature:.2,max_tokens:1000,stream:false}),signal:AbortSignal.any([signal,AbortSignal.timeout(8*60_000)])});
@@ -348,7 +348,7 @@ async function evaluateCreativeImage(imagePath:string,model:string,engine:Infere
   if(engine==='provider')throw Error('Select a local evaluation model.');
   let endpoint=`${settings.ollamaUrl}/v1/chat/completions`,modelName=model;
   const installed=(await readInstalledModels()).find(item=>item.category==='conversational'&&(model===item.id||model===item.repo||model===`orion-gguf:${item.id}`));
-  if(installed){const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The local evaluation model path is invalid.');const selectedEngine=engine==='llama.cpp'&&(installed.format??'gguf')==='gguf'?'llama.cpp':'orion';endpoint=selectedEngine==='llama.cpp'?`${await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root))}/v1/chat/completions`:`${await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf')}/v1/chat/completions`;modelName='orion-local';}
+  if(installed){const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The local evaluation model path is invalid.');const selectedEngine=engine==='llama.cpp'&&(installed.format??'gguf')==='gguf'?'llama.cpp':'orion';endpoint=selectedEngine==='llama.cpp'?`${await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root))}/v1/chat/completions`:`${await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf')}/v1/chat/completions`;modelName=selectedEngine==='orion'?'default':'orion-local';}
   else {if(engine!=='ollama')throw Error('Choose a local installed Orion or Ollama evaluation model.');if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(model))throw Error('Cloud-backed Ollama models cannot evaluate private creative iterations.');const check=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model}),signal:AbortSignal.timeout(10000)});if(!check.ok)throw Error('Could not verify that the evaluation model is installed locally.');const metadata=await check.json() as {remote_host?:string;remote_model?:string};if(metadata.remote_host||metadata.remote_model)throw Error('Cloud-backed Ollama models cannot evaluate private creative iterations.');}
   const root=path.resolve(creationsDir()),file=path.resolve(imagePath);if(!file.startsWith(`${root}${path.sep}`))throw Error('Creative evaluation image is outside Orion’s private creations folder.');const bytes=await fs.readFile(file);if(bytes.length>32*1024*1024)throw Error('Creative evaluation images are limited to 32 MB.');const ext=path.extname(file).toLowerCase(),mime=ext==='.jpg'||ext==='.jpeg'?'image/jpeg':'image/png';
   const response=await fetchWithLocalReconnect(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:modelName,stream:false,temperature:.2,max_tokens:450,messages:[{role:'system',content:'You are a strict local quality evaluator for a private creative iteration. Judge only the attached image against the user goal and success criteria. Do not claim that a visual feature exists unless you can see it. Return only JSON: {"score":0,"meetsCriteria":false,"critique":"brief evidence-based critique","nextPrompt":"a concise concrete improvement to the original prompt"}. score is an integer 0-10. Do not rewrite the entire prompt.'},{role:'user',content:[{type:'text',text:`Goal: ${goal.slice(0,3000)}\nSuccess criteria: ${criteria.slice(0,2000)}\nIteration: ${iteration}`},{type:'image_url',image_url:{url:`data:${mime};base64,${bytes.toString('base64')}`}}]}]}),signal:AbortSignal.any([signal,AbortSignal.timeout(180000)])},'local creative evaluator');
@@ -1171,7 +1171,7 @@ ipcMain.handle('ollama:models', async () => {
     }
   } catch { /* Keep Orion-downloaded GGUFs available when Ollama is offline. */ }
   const managed = (await readInstalledModels()).filter(model => model.category === 'conversational').map(model =>
-    ({ name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file), format:model.format??'gguf' }, source: 'orion' as const }));
+    ({ name: `orion-gguf:${model.id}`, size: model.size, details: { family: model.repo, parameter_size: path.basename(model.file), format:model.format??'gguf', ...(model.engines?{supported_engines:model.engines}:{}) }, source: 'orion' as const }));
   const remote = (await readProviders()).flatMap(provider => provider.models.map(model => ({ name: providerModelKey(provider.id, model), size: 0, source: 'api' as const, capabilities: ['completion'], details: { label: `${provider.name} · ${model}` } })));
   return [...ollama, ...managed, ...remote];
 });
@@ -1210,6 +1210,30 @@ ipcMain.handle('ollama:delete-model', async (_, name: string) => {
   if (!response.ok) throw new Error(`Ollama could not delete ${name} (${response.status}).`);
   if(settings.selectedModel===name){settings.selectedModel='';await writeEncryptedText(settingsFile(),JSON.stringify(settings,null,2));}
 });
+const orionSupportedModelTypes=new Set(['llama','mpt','gptneox','gptj','gpt2','bloom','falcon','mamba','rwkv','phi2','phi3','starcoder2','qwen2','qwen3','qwen3moe','mistral','mistral3','gemma','gemma2','phimoe','qwen3next','qwen35','qwen35moe','deepseek2','glm4','glm4moe','smollm3','granite','granitemoe','granitehybrid','gptoss','huyuandense','hunyuanmoe','lfm2','lfm2moe','gemma3','gemma4']);
+const hubArchitectureCache=new Map<string,Promise<boolean>>();
+function architectureNamesSupported(config:unknown){
+  if(!config||typeof config!=='object')return false;
+  const value=config as {model_type?:unknown;architectures?:unknown};
+  const names=[...(typeof value.model_type==='string'?[value.model_type]:[]),...(Array.isArray(value.architectures)?value.architectures.filter((item):item is string=>typeof item==='string'):[])];
+  if(!names.length)return false;
+  const normalized=names.map(name=>name.toLowerCase().replace(/[^a-z0-9]/g,'').replace(/for(causallm|conditionalgeneration|maskedlm|seq2seqlm|lm|textgeneration)$/,''));
+  const aliases:Record<string,string>={llamaforcausallm:'llama',mistral:'mistral3',mistralforcausallm:'mistral3',qwen3moeforcausallm:'qwen3moe',qwen35moeforcausallm:'qwen35moe',deepseekv2:'deepseek2',deepseekv3:'deepseek2',glm4moeforcausallm:'glm4moe',gptossforcausallm:'gptoss',hunyuanv1moeforcausallm:'hunyuanmoe',hunyuanv1forcausallm:'hunyuan-dense'};
+  return normalized.every(name=>orionSupportedModelTypes.has(aliases[name]??name));
+}
+async function hubRepoArchitectureSupported(repo:string,config?:unknown,tags:string[]=[]):Promise<boolean>{
+  if(architectureNamesSupported(config))return true;
+  if(config&&typeof config==='object'&&((config as {model_type?:unknown}).model_type||Array.isArray((config as {architectures?:unknown}).architectures)))return false;
+  const baseTag=tags.find(tag=>tag.startsWith('base_model:')&&!tag.startsWith('base_model:quantized:'));
+  const baseRepo=baseTag?.slice('base_model:'.length);
+  if(!baseRepo||baseRepo===repo||!/^[-\w.]+\/[-\w.]+$/.test(baseRepo))return false;
+  let check=hubArchitectureCache.get(baseRepo);
+  if(!check){
+    check=(async()=>{try{const encoded=baseRepo.split('/').map(encodeURIComponent).join('/');const response=await fetch('https://huggingface.co/api/models/'+encoded,{headers:await huggingFaceHeaders({'user-agent':'Orion-Local-AI/0.1'}),signal:AbortSignal.timeout(8000)});if(!response.ok)return false;const model=await response.json() as {config?:unknown};return architectureNamesSupported(model.config);}catch{return false;}})();
+    hubArchitectureCache.set(baseRepo,check);
+  }
+  return check;
+}
 ipcMain.handle('models:search', async (_, query: string, category: ModelCategory, nextUrl?: string|null, engine?: string) => {
   if (!['conversational','image','video'].includes(category)) throw new Error('Unknown Hugging Face model category.');
   const validPage=(value:string)=>{const url=new URL(value);if(url.protocol!=='https:'||url.hostname!=='huggingface.co'||url.pathname!=='/api/models')throw new Error('Invalid Hugging Face pagination link.');return url;};
@@ -1228,9 +1252,12 @@ ipcMain.handle('models:search', async (_, query: string, category: ModelCategory
   const rowArrays=await Promise.all(responses.map(response=>response.json() as Promise<Array<{ id: string; author?: string; downloads?: number; likes?: number; pipeline_tag?: string; tags?: string[]; config?: { architectures?: string[]; model_type?: string }; cardData?: { description?: string; license?: string } }>>));
   const rowMap=new Map(rowArrays.flat().map(row=>[row.id,row]));const rows=[...rowMap.values()].sort((a,b)=>(b.downloads??0)-(a.downloads??0));
   const modelFormats = (row: typeof rows[number]) => { const tags = row.tags ?? [], formats: ('gguf'|'gptq'|'awq')[] = []; if(tags.some(tag=>/gguf/i.test(tag))||/[-_.]gguf$/i.test(row.id))formats.push('gguf'); if(tags.some(tag=>/gptq/i.test(tag))||/gptq/i.test(row.id))formats.push('gptq'); if(tags.some(tag=>/awq/i.test(tag))||/awq/i.test(row.id))formats.push('awq'); return formats; };
-  const modelEngines = (formats: ('gguf'|'gptq'|'awq')[]) => formats.includes('gguf') ? ['orion','llama.cpp'] as ('orion'|'llama.cpp')[] : formats.length ? ['orion'] as ('orion'|'llama.cpp')[] : [];
+  const modelEngines = (formats: ('gguf'|'gptq'|'awq')[],orionCompatible:boolean) => [...(orionCompatible&&formats.length?['orion' as const]:[]),...(formats.includes('gguf')?['llama.cpp' as const]:[])];
   const supportsStableDiffusion=(row:typeof rows[number])=>{const tags=row.tags??[];return tags.some(tag=>/^stable-diffusion(?:$|-|\.)/i.test(tag)||/^diffusers:StableDiffusion(?:XL)?Pipeline$/i.test(tag)||/^diffusers:StableDiffusionXL/i.test(tag)||/^base_model:.*stable-diffusion/i.test(tag))||/(?:stable[-_ ]?diffusion|sdxl|sd[_-]?1[._]?5|sd[_-]?2[._]?1|dreamshaper|juggernaut.?xl|realvisxl|pony.?diffusion|animagine.?xl)/i.test(row.id);};
-   const found=rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':modelFormats(row).some(format=>engine==='llama.cpp'?format==='gguf':true)).map(row => {const formats=modelFormats(row),visibleFormats=engine==='llama.cpp'?formats.filter(format=>format==='gguf'):formats;return { id: row.id, author: row.author, downloads: row.downloads, likes: row.likes, pipelineTag: row.pipeline_tag, description: row.cardData?.description, license: row.cardData?.license, formats:category==='conversational'?visibleFormats:undefined, engines: category==='conversational'?modelEngines(formats):undefined };});
+   const eligible=category==='conversational'?await Promise.all(rows.map(async row=>({row,formats:modelFormats(row),orionCompatible:await hubRepoArchitectureSupported(row.id,row.config,row.tags??[])}))):[];
+   const found:HubModel[]=category==='conversational'
+     ?eligible.filter(item=>(engine!=='orion'||item.orionCompatible)&&item.formats.some(format=>engine==='llama.cpp'?format==='gguf':true)).map(({row,formats,orionCompatible})=>{const visibleFormats=engine==='llama.cpp'?formats.filter(format=>format==='gguf'):formats;return{id:row.id,author:row.author,downloads:row.downloads,likes:row.likes,pipelineTag:row.pipeline_tag,description:row.cardData?.description,license:row.cardData?.license,formats:visibleFormats,engines:modelEngines(formats,orionCompatible)};})
+     :rows.filter(row=>category==='image'?supportsStableDiffusion(row):category==='video'?row.id==='QuantStack/Wan2.2-TI2V-5B-GGUF':false).map(row=>({id:row.id,author:row.author,downloads:row.downloads,likes:row.likes,pipelineTag:row.pipeline_tag,description:row.cardData?.description,license:row.cardData?.license}));
   if(category==='video'&&!nextUrl){const repo='QuantStack/Wan2.2-TI2V-5B-GGUF';if(!query||repo.toLowerCase().includes(String(query).toLowerCase())||String(query).toLowerCase().includes('wan')){if(!found.some(model=>model.id===repo))found.unshift({id:repo,author:'QuantStack',downloads:0,likes:0,pipelineTag:'text-to-video',description:'Wan 2.2 TI2V 5B · Vulkan-ready GGUF bundle',license:'apache-2.0',formats:undefined,engines:undefined});}}
   const pages=responses.map(response=>response.headers.get('link')?.match(/<([^>]+)>\s*;\s*rel="?next"?/i)?.[1]??null);
   const next=pages.some(Boolean)?urls.length>1?`orion-formats:${encodeURIComponent(JSON.stringify(pages))}`:pages.find(Boolean)??null:null;
@@ -1249,7 +1276,7 @@ async function getHubFiles(repo: string, category?: ModelCategory, engine?: stri
   const encoded = repo.split('/').map(encodeURIComponent).join('/');
   const response = await fetch(`https://huggingface.co/api/models/${encoded}?blobs=true`, { headers: await huggingFaceHeaders({ 'user-agent': 'Orion-Local-AI/0.1' }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Could not read model files (${response.status}).`);
-  const model = await response.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }>; tags?: string[] };
+  const model = await response.json() as { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number; sha256?: string } }>; tags?: string[]; config?: {model_type?:string;architectures?:string[]} };
   const files = (model.siblings ?? []).map(file => ({ name: file.rfilename, size: file.lfs?.size ?? file.size ?? 0, sha256: file.lfs?.sha256 })).filter(file => /\.(gguf|safetensors|ckpt)$/i.test(file.name));
   const companions = files.filter(file => /(?:mmproj|projector|vision[_-]?encoder|text[_-]?encoder|clip[_-]?vision)/i.test(path.basename(file.name)));
   const primaryFiles = files.filter(file => !companions.includes(file));
@@ -1363,7 +1390,11 @@ ipcMain.handle('models:download', async (_, repo: string, file: string, category
       if(await fs.access(target.target).then(()=>true,()=>false)){await fs.rename(target.target,backup);backups.push({target:target.target,backup});}
       await fs.rename(target.temporary,target.target);finalized.push(target.target);
     }
-    const installed: InstalledModel = { id: selectionId, repo, file, format:selected.format, category, path: targets[names.indexOf(file)]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now() };
+    const modelMetaResponse=category==='conversational'?await fetch('https://huggingface.co/api/models/'+repo.split('/').map(encodeURIComponent).join('/'),{headers:await huggingFaceHeaders({'user-agent':'Orion-Local-AI/0.1'}),signal:AbortSignal.timeout(12000)}):null;
+    const modelMeta=modelMetaResponse?.ok?await modelMetaResponse.json() as {config?:unknown;tags?:string[]}:null;
+    const compatibleWithOrion=category==='conversational'?await hubRepoArchitectureSupported(repo,modelMeta?.config,modelMeta?.tags??[]):false;
+    const engines:InstalledModel['engines']=category==='conversational'?[...(compatibleWithOrion?['orion' as const]:[]),...(selected.format==='gguf'?['llama.cpp' as const]:[])]:undefined;
+    const installed: InstalledModel = { id: selectionId, repo, file, format:selected.format, category, engines, path: targets[names.indexOf(file)]!.relative, files: targets.map(target => target.relative), fileSha256, size: receivedTotal, downloadedAt: Date.now() };
     await fs.mkdir(root, { recursive: true });
     await serializeMutation('models', async () => {
       const all = await readInstalledModels(), previous = all.find(item => item.id === installed.id);
@@ -2592,7 +2623,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         reportContextUsage();
         const began = Date.now();
         const apiTools = !ogsRepairPrompt && nativeToolCalling ? webSearchRequired && !webSearchAttempted ? webSearchTools : availableTools : [];
-        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, ogsRepairPrompt?0.2:settings.temperature, ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens,ogsRepairPrompt?false:modelInformation.supportsThinking) : { url: '', body: { model: 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: ogsRepairPrompt?0.2:settings.temperature, max_tokens: ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens, ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
+        const providerRequest = remote ? createProviderChatRequest(remote.provider, remote.model, requestMessages, apiTools, ogsRepairPrompt?0.2:settings.temperature, ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens,ogsRepairPrompt?false:modelInformation.supportsThinking) : { url: '', body: { model: routedEngine === 'orion' ? 'default' : 'orion-local', messages: openAiVisionMessages(requestMessages), stream: true, stream_options: { include_usage: true }, cache_prompt: false, temperature: ogsRepairPrompt?0.2:settings.temperature, max_tokens: ogsRepairPrompt?Math.min(outputReserveTokens,Math.max(128,contextBudget-estimatedContextTokens-256)):outputReserveTokens, ...(apiTools.length ? { tools: apiTools, tool_choice: 'auto' } : {}) } };
         const providerInit: RequestInit = { method: 'POST', redirect: 'error', headers: remote ? providerHeaders(remote.provider) : { 'content-type': 'application/json' }, body: JSON.stringify(providerRequest.body), signal: requestAbort.signal };
         let response = remote ? await fetch(providerRequest.url, providerInit) : await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
         if (!remote && !response.ok) {
@@ -2602,7 +2633,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
             response = await fetchWithLocalReconnect(managedEndpoint, providerInit, 'the local chat model');
           }
         }
-        if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : 'llama.cpp'} returned HTTP ${response.status}. ${(await response.text()).slice(0,1800) || "The server returned no error details."}`);
+        if (!response.ok || !response.body) throw new Error(`${remote ? remote.provider.name : (routedEngine === 'orion' ? 'Orion Inference' : 'llama.cpp')} returned HTTP ${response.status}. ${(await response.text()).slice(0,1800) || "The server returned no error details."}`);
         const reader = response.body.getReader(), decoder = new TextDecoder(); let turnContent = ''; let buffer = '', calls = new Map<number, { id: string; name: string; arguments: string; uiId: string }>(), finishReason = '', completionTokens = 0;
         const publishToolUpdate = (call: { id: string; name: string; arguments: string; uiId: string }, phase: 'started'|'updated') => {
           if (!call.name) return;
