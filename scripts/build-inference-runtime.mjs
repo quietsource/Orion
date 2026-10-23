@@ -56,7 +56,11 @@ await copyFile(binary, path.join(output, `orion-inference${windows ? '.exe' : ''
 
 if (windows) {
   const cuda = env.CUDA_PATH;
-  const bin = path.join(cuda, 'bin');
+  // CUDA's Windows x64 redistributable DLLs live in bin/x64 on current
+  // toolkits; nvcc remains in bin. Fall back to bin for older layouts.
+  const cudaBin = path.join(cuda, 'bin');
+  const x64Bin = path.join(cudaBin, 'x64');
+  const bin = await access(x64Bin).then(() => x64Bin, () => cudaBin);
   const dlls = (await readdir(bin)).filter(name => /^(cudart64_|cublas64_|cublasLt64_|curand64_|nvrtc64_|nvrtc-builtins64_|nvJitLink_|nvptxcompiler_|nvfatbin_).*\.dll$/i.test(name));
   for (const required of ['cudart64_13.dll', 'cublas64_13.dll', 'cublasLt64_13.dll', 'curand64_10.dll']) {
     if (!dlls.some(name => name.toLowerCase() === required.toLowerCase())) fail(`CUDA runtime dependency ${required} was not found under ${bin}.`);

@@ -159,7 +159,7 @@ export const shell = {
 };
 export class NativeTray {
   readonly ready = nativeCall('tray-enable');
-  setSwarmState(state: { running: boolean; name: string; iteration: number; idleMinutes: number }) { return nativeCall('tray-swarm-state', state); }
+  setSwarmState(state: { running: boolean; name: string; iteration: number; idleMinutes: number; cycleMinutes: number }) { return nativeCall('tray-swarm-state', state); }
   destroy() { void nativeCall('tray-disable'); }
 }
 setEventReceiver(value => {

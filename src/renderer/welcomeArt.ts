@@ -21,7 +21,7 @@ vec3 surface(vec2 st) {
   p.z += 0.29*sin(2.0*u+time*0.57) + 0.10*cos(3.0*u-time*0.39);
   p.x *= 1.07;
   p.y *= 0.91 + 0.055*sin(time*0.44);
-  // Fixed camera orientation keeps the object grounded while its material flows.
+  // Fixed view orientation keeps the object grounded while its material flows.
   float ax=0.78, az=-0.41;
   p.yz = mat2(cos(ax),-sin(ax),sin(ax),cos(ax))*p.yz;
   p.xy = mat2(cos(az),-sin(az),sin(az),cos(az))*p.xy;

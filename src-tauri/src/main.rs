@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, LogicalPosition, LogicalSize,
   menu::{Menu, MenuItem, PredefinedMenuItem, Submenu}, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
-  webview::{WebviewBuilder, NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse}};
+  webview::{WebviewBuilder, NewWindowResponse, PageLoadEvent, PermissionResponse}};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin, Command}, sync::{Mutex as AsyncMutex, oneshot}};
 
 type Reply = oneshot::Sender<Result<Value, String>>;
@@ -135,6 +135,7 @@ async fn native_operation(app: AppHandle, method: String, args: Value) -> Result
       let navigation_app = app.clone(); let popup_app = app.clone(); let popup_label = label.clone();
       let load_app = app.clone(); let title_app = app.clone();
       let builder = WebviewBuilder::new(&label, WebviewUrl::External("about:blank".parse().unwrap()))
+        .initialization_script(include_str!("browser-ui.js"))
         .initialization_script("document.addEventListener('keydown',e=>{if(!(e.ctrlKey||e.metaKey))return;const k=e.key.toLowerCase(),action=k==='l'?'address':k==='t'?'new':k==='w'?'close':e.key==='Tab'?(e.shiftKey?'previous':'next'):null;if(action){e.preventDefault();window.__TAURI_INTERNALS__.invoke('browser_shortcut',{action}).catch(()=>{});}},true);")
         .on_navigation(move |url| {
           let allowed = url.scheme() == "https" || url.as_str() == "about:blank";
@@ -246,11 +247,13 @@ async fn native_operation(app: AppHandle, method: String, args: Value) -> Result
           let name=args["name"].as_str().unwrap_or("Private swarm");
           let iteration=args["iteration"].as_u64().unwrap_or(0);
           let idle=args["idleMinutes"].as_u64().unwrap_or(10);
+          let cadence=args["cycleMinutes"].as_u64().unwrap_or(5);
           let status=MenuItem::with_id(&app,"swarm-status",format!("Running · {name}"),false,None::<&str>).map_err(|error|error.to_string())?;
           let progress=MenuItem::with_id(&app,"swarm-iteration",format!("Iteration {iteration}"),false,None::<&str>).map_err(|error|error.to_string())?;
           let schedule=MenuItem::with_id(&app,"swarm-idle",format!("Runs after {idle} min idle"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let cadence=MenuItem::with_id(&app,"swarm-cadence",format!("Work cycle every {cadence} min"),false,None::<&str>).map_err(|error|error.to_string())?;
           let pause=MenuItem::with_id(&app,"swarm-pause","Pause now",true,None::<&str>).map_err(|error|error.to_string())?;
-          let swarm=Submenu::with_items(&app,"Pause Swarm",true,&[&status,&progress,&schedule,&pause]).map_err(|error|error.to_string())?;
+          let swarm=Submenu::with_items(&app,"Pause Swarm",true,&[&status,&progress,&schedule,&cadence,&pause]).map_err(|error|error.to_string())?;
           let second_separator=PredefinedMenuItem::separator(&app).map_err(|error|error.to_string())?;
           Menu::with_items(&app,&[&show,&separator,&swarm,&second_separator,&quit]).map_err(|error|error.to_string())?
         }else{Menu::with_items(&app,&[&show,&separator,&quit]).map_err(|error|error.to_string())?};
@@ -346,7 +349,6 @@ fn main() {
   tauri::Builder::default()
     .manage(backend)
     .plugin(tauri_plugin_single_instance::init(|app, args, _| host_event(app, json!({"type":"host-event","event":if args.iter().any(|arg|arg=="--quit") {"tray-quit"}else{"second-instance"}}))))
-    .on_permission_request(|view, kind| if view.label() == "main" && matches!(kind, PermissionKind::Microphone | PermissionKind::ClipboardRead) { PermissionResponse::Allow } else { PermissionResponse::Deny })
     .invoke_handler(tauri::generate_handler![orion_invoke, browser_result, browser_shortcut])
     .on_window_event(|window, event| match event {
       tauri::WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); host_event(window.app_handle(), json!({"type":"host-event","event":"window-close","window":window.label()})); },
@@ -356,6 +358,7 @@ fn main() {
     .setup(|app| {
       let configuration = app.config().app.windows.iter().find(|window| window.label == "main").ok_or("Missing main window configuration")?.clone();
       WebviewWindowBuilder::from_config(app, &configuration)?
+        .initialization_script("document.addEventListener('contextmenu',event=>event.preventDefault(),true);")
         .on_navigation(|url| {
           let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost")) || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"));
           let dev_port = std::env::var("ORION_DEV_PORT").ok().and_then(|port| port.parse::<u16>().ok()).unwrap_or(4173);

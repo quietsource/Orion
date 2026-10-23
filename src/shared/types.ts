@@ -15,11 +15,12 @@ export interface CanvasEvent { conversationId: string; document: CanvasDocument;
 export type ToolMode = 'chat' | 'code';
 export interface Conversation { localOnly?: boolean; privateVoice?: boolean; id: string; title: string; model: string; engine?: InferenceEngine; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
 export type OrionTheme = 'graphite' | 'midnight' | 'ocean' | 'forest' | 'rose' | 'ember' | 'light' | 'paper';
-export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; selectedEngine: InferenceEngine; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; composerDreaming: boolean; idleConsolidationEnabled: boolean; idleConsolidationHours: number; idleConsolidationMinutes: number; idleConsolidationChargingOnly: boolean; idleOvernightReport: boolean; evolvingToolsEnabled: boolean; cameraPerceptionEnabled: boolean; creativeIterationEnabled: boolean; creativeIterationLimit: number; aiChangeHistoryEnabled: boolean; swarmEnabled: boolean; swarmIdleMinutes: number; }
+export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; selectedEngine: InferenceEngine; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; composerDreaming: boolean; idleConsolidationEnabled: boolean; idleConsolidationHours: number; idleConsolidationMinutes: number; idleConsolidationChargingOnly: boolean; idleOvernightReport: boolean; evolvingToolsEnabled: boolean; creativeIterationEnabled: boolean; creativeIterationLimit: number; aiChangeHistoryEnabled: boolean; swarmEnabled: boolean; swarmIdleMinutes: number; swarmCycleMinutes: number; }
 export interface WorkspaceChange { path: string; status: 'added'|'modified'|'deleted'; additions: number; deletions: number; diff: string; }
 export interface WorkspaceReview { conversationId: string; root: string; changes: WorkspaceChange[]; additions: number; deletions: number; }
-export interface GitCheckpoint { id: string; label: string; ref: string; createdAt: number; }
-export interface WorkspaceStatus { root: string; git: boolean; branch: string|null; changedFiles: number; additions: number; deletions: number; checkpoints: GitCheckpoint[]; }
+export interface VeloCheckpoint { id: string; label: string; ref: string; createdAt: number; }
+export interface WorkspaceVeloHistory { sessionId: string; createdAt: number; checkpoints: VeloCheckpoint[]; }
+export interface WorkspaceStatus { root: string; velo: boolean; line: string|null; changedFiles: number; additions: number; deletions: number; checkpoints: VeloCheckpoint[]; }
 export interface ToolRequest { id: string; name: string; description: string; input: Record<string, unknown>; requiresApproval: boolean; conversationId?: string; }
 export interface UserQuestionRequest { id: string; conversationId: string; questions: Array<{ question: string; options: string[] }>; }
 export type ScheduledJobStatus = 'scheduled'|'queued'|'running'|'completed'|'error';
@@ -36,11 +37,13 @@ export interface DownloadProgress { id: string; repo: string; file: string; rece
 export interface BackendState { installed: boolean; running: boolean; firstEntrySeen: boolean; phase: string; detail: string; gpu: string; port?: number; }
 export interface CreateProgress { id: string; phase: string; detail: string; percent?: number; imagePath?: string; mediaType?: 'image'|'video'; error?: string; download?: { repo: string; file: string; received: number; total: number; phase: DownloadProgress['phase'] }; }
 export interface GeneratedMedia { id: string; prompt: string; modelId: string; path: string; mediaType: 'image'|'video'; createdAt: number; }
+export interface CreativeIterationRound { id:string; imagePath:string; score:number; critique:string; }
+export interface CreativeIterationRun { id:string; prompt:string; criteria:string; modelId:string; evaluatorModel:string; createdAt:number; best:CreativeIterationRound; rounds:CreativeIterationRound[]; }
 export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'installing'|'error'; version?: string; notes?: string; received?: number; total?: number; detail?: string; }
 export interface MemoryCarePreview { expired: number; superseded: number; total: number; activeMemories: number; databaseBytes: number; }
 export interface MemoryCareReport { ranAt: number; expiredRemoved: number; supersededRemoved: number; indexedConversations: number; snapshotAvailable: boolean; }
 export interface EvolvedToolSummary { id: string; name: string; description: string; enabled: boolean; createdAt: number; useCount: number; }
-export type { SwarmCreateInput, SwarmLogEntry, SwarmRecord, SwarmSteerInput, SwarmStatus } from './swarm';
+export type { SwarmCreateInput, SwarmInferenceEngine, SwarmLogEntry, SwarmRecord, SwarmSteerInput, SwarmStatus } from './swarm';
 export interface EngineInstallProgress { id: string; engine: 'ollama'; phase: 'downloading'|'launched'|'complete'|'error'; received?: number; total?: number; detail: string; }
 export interface OrionAPI {
   voice: import('./voice').VoiceAPI;
@@ -71,7 +74,7 @@ export interface OrionAPI {
   setEvolvedToolEnabled(id: string, enabled: boolean): Promise<void>;
   listSwarms(): Promise<import('./swarm').SwarmRecord[]>;
   createSwarm(input: import('./swarm').SwarmCreateInput): Promise<import('./swarm').SwarmRecord>;
-  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string }): Promise<void>;
+  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string; engine?: import('./swarm').SwarmInferenceEngine; model?: string }): Promise<void>;
   startSwarm(id: string): Promise<void>;
   pauseSwarm(id: string): Promise<void>;
   resumeSwarm(id: string): Promise<void>;
@@ -94,10 +97,13 @@ export interface OrionAPI {
   createWorkspace(name: string): Promise<string>;
   getWorkspaceStatus(): Promise<WorkspaceStatus>;
   getWorkspaceReview(conversationId: string): Promise<WorkspaceReview|null>;
+  getWorkspaceVeloHistory(conversationId: string): Promise<WorkspaceVeloHistory[]>;
+  listPrivateConfigHistory(name: 'settings'|'tools'): Promise<VeloCheckpoint[]>;
+  restorePrivateConfig(name: 'settings'|'tools', checkpointId: string): Promise<void>;
   resolveWorkspaceReview(conversationId: string, approve: boolean): Promise<{ success: boolean; message: string }>;
-  createGitCheckpoint(label?: string): Promise<GitCheckpoint>;
-  previewGitRollback(checkpointId: string): Promise<string>;
-  rollbackGitCheckpoint(checkpointId: string): Promise<void>;
+  createVeloCheckpoint(label?: string): Promise<VeloCheckpoint>;
+  previewVeloRollback(checkpointId: string): Promise<string>;
+  rollbackVeloCheckpoint(checkpointId: string): Promise<void>;
   respondToTool(id: string, decision: 'allow-once'|'allow-always'|'decline'): Promise<boolean>;
   onToolRequest(callback: (tool: ToolRequest) => void): () => void;
   respondToQuestion(id: string, answer: string): Promise<void>;
@@ -118,6 +124,9 @@ export interface OrionAPI {
   listGeneratedMedia(): Promise<GeneratedMedia[]>;
   openGeneratedFolder(): Promise<void>;
   generateImage(prompt: string, modelId?: string, kind?: 'image'|'video', requestId?: string): Promise<{ id: string; imagePath: string; mediaType: 'image'|'video' }>;
+  iterateCreative(input: { prompt:string; criteria:string; modelId:string; evaluatorModel:string; evaluatorEngine:InferenceEngine; maxIterations:number; requestId:string }): Promise<CreativeIterationRun>;
+  listCreativeIterations(): Promise<CreativeIterationRun[]>;
+  cancelCreativeIteration(requestId:string): Promise<void>;
   readGeneratedMedia(imagePath: string): Promise<string>; onCreateProgress(callback: (progress: CreateProgress) => void): () => void;
   getAppUpdateState(): Promise<AppUpdateState>; startAppUpdate(): Promise<void>; consumeUpdateChangelog(): Promise<{ version: string; notes: string }|null>; onAppUpdateState(callback: (state: AppUpdateState) => void): () => void;
 }

@@ -7,6 +7,8 @@ import type { Conversation } from '../shared/types';
 
 type Ref = { messageId: string; revision: string; textHash: string };
 type State = { refs: Ref[] };
+type ConfigRef = { ref: string; label: string; createdAt: number; hash: string };
+type PrivateConfigState = { refs: ConfigRef[] };
 const uuid = /^[a-f0-9-]{36}$/i;
 
 function rootFor(id: string) {
@@ -96,4 +98,44 @@ export async function removeConversationRollback(conversationId: string) {
     fs.rm(path.join(profile, 'rollback-state', `${conversationId}.json.enc`), { force: true }),
     fs.rm(path.join(profile, 'rollback-snapshots', conversationId), { recursive: true, force: true }),
   ]);
+}
+
+const configNames = new Set(['settings', 'tools']);
+function configRoot(name: string) {
+  if (!configNames.has(name)) throw Error('Unsupported private configuration history.');
+  return path.join(app.getPath('userData'), 'orion', 'configuration-history', name);
+}
+function privateConfigStatePath(name:'settings'|'tools'){return path.join(app.getPath('userData'),'orion','rollback-state',`${name}-config.json.enc`);}
+function privateConfigSnapshots(name:'settings'|'tools'){return path.join(app.getPath('userData'),'orion','rollback-snapshots',`${name}-config`);}
+async function readPrivateConfigState(name:'settings'|'tools'):Promise<PrivateConfigState>{try{const state=JSON.parse(await readEncryptedText(privateConfigStatePath(name))) as PrivateConfigState;return Array.isArray(state.refs)?state:{refs:[]};}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return{refs:[]};throw error;}}
+async function writePrivateConfigState(name:'settings'|'tools',state:PrivateConfigState){await writeEncryptedText(privateConfigStatePath(name),JSON.stringify(state));}
+
+/** Velo receives only an already-encrypted configuration snapshot. */
+export async function checkpointPrivateConfig(name: 'settings'|'tools', text: string) {
+  const root=configRoot(name),dataFile=path.join(root,'snapshot.enc'),hash=createHash('sha256').update(text).digest('hex');
+  if(!(await hasManagedVelo())){const state=await readPrivateConfigState(name);if(state.refs.at(-1)?.hash===hash)return;const ref=`local-${randomUUID()}`,createdAt=Date.now(),snapshots=privateConfigSnapshots(name);await fs.mkdir(snapshots,{recursive:true});await writeEncryptedText(path.join(snapshots,`${ref}.enc`),text);state.refs.push({ref,label:`${name==='settings'?'Settings':'Tool registry'} updated`,createdAt,hash});if(state.refs.length>100)state.refs.splice(0,state.refs.length-100);await writePrivateConfigState(name,state);return;}
+  const prior=await readEncryptedText(dataFile).catch(()=>null);
+  if(prior!==null&&prior!==undefined&&createHash('sha256').update(prior).digest('hex')===hash)return;
+  await fs.mkdir(root,{recursive:true});
+  if(!(await fs.access(path.join(root,'.velo')).then(()=>true,()=>false)))await run(['init','--local'],root);
+  await writeEncryptedText(dataFile,text);
+  await run(['seal','--local',`${name==='settings'?'Settings':'Tool registry'} updated`],root);
+}
+
+export async function listPrivateConfigHistory(name: 'settings'|'tools') {
+  if(!(await hasManagedVelo()))return(await readPrivateConfigState(name)).refs.map(item=>({id:item.ref,ref:item.ref,label:item.label,createdAt:item.createdAt}));
+  const root=configRoot(name);
+  try {
+    const state=JSON.parse(await fs.readFile(path.join(root,'.velo','state.json'),'utf8')) as {oplog?:Array<{action?:string;new_ref?:string;ref?:string;message?:string;created_at?:number;timestamp?:number}>};
+    return (state.oplog??[]).filter(row=>row.action==='seal'&&/^[a-f0-9]{40}$/i.test(row.new_ref??row.ref??'')).map(row=>{const ref=row.new_ref??row.ref!;return{id:ref,ref,label:String(row.message??`${name} checkpoint`).slice(0,100),createdAt:Number(row.created_at??row.timestamp)||Date.now()};}).slice(-100);
+  } catch(error) { if((error as NodeJS.ErrnoException).code==='ENOENT')return[];throw error; }
+}
+
+export async function restorePrivateConfig(name: 'settings'|'tools', revision: string) {
+  if(revision.startsWith('local-')){const state=await readPrivateConfigState(name);if(!state.refs.some(item=>item.ref===revision))throw Error('Configuration checkpoint not found.');return readEncryptedText(path.join(privateConfigSnapshots(name),`${revision}.enc`));}
+  if(!/^[a-f0-9]{40}$/i.test(revision))throw Error('Invalid Velo configuration revision.');
+  const root=configRoot(name),history=await listPrivateConfigHistory(name);
+  if(!history.some(item=>item.ref===revision))throw Error('Configuration checkpoint not found.');
+  await run(['restore',revision,'--local'],root);
+  return readEncryptedText(path.join(root,'snapshot.enc'));
 }

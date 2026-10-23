@@ -14,7 +14,7 @@ import { createCanvas, DOMMatrix } from '@napi-rs/canvas';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, ToolMode, WebResearchEvent, AppUpdateState, EngineInstallProgress, InferenceEngine, MemoryCarePreview, MemoryCareReport } from '../shared/types';
+import type { AppSettings, Conversation, Message, MessageAttachment, CanvasDocument, ScheduledJob, ToolRequest, UserQuestionRequest, ModelCategory, HubModel, HubFile, InstalledModel, DownloadProgress, CreateProgress, GeneratedMedia, CreativeIterationRun, ToolMode, WebResearchEvent, AppUpdateState, EngineInstallProgress, InferenceEngine, MemoryCarePreview, MemoryCareReport } from '../shared/types';
 import { AgentRunMemory } from './agentRunMemory';
 import { OFSClient } from './ofsClient';
 import { VoiceManager } from './voice';
@@ -29,6 +29,7 @@ import { OrionInferenceRuntime } from './orionInferenceRuntime';
 import { OGS_PROMPT, validateOgsResponse, ogsCorrectionPrompt, validOgsGraphCount } from '../shared/ogs';
 import { buildModelPrompt, addModelTextToolProtocol, isReasoningModelName } from './modelPrompt';
 import { WorkspaceManager } from './workspace';
+import { checkpointPrivateConfig, listPrivateConfigHistory, restorePrivateConfig as restoreVeloPrivateConfig } from './veloRollback';
 import { nativeWorkspaceTools, parseTextToolCalls, runNativeWorkspaceTool } from './native-tools';
 import { createFocusCadence } from './focusCadence';
 import { ORION_SUBAGENT_MODEL, SubagentCapacity, type OrionSubagentRole } from './subagents';
@@ -123,6 +124,7 @@ let activeScheduledJobId: string | null = null;
 let scheduleTickBusy = false;
 const installedToolSupport = new Map<string, boolean>();
 const modelDownloadControllers = new Map<string, AbortController>();
+const creativeIterationRuns = new Map<string,{cancelled:boolean;done:Promise<void>;finish:()=>void;abort:AbortController}>();
 const dataDir = () => path.join(app.getPath('userData'), 'orion');
 const dbFile = () => path.join(dataDir(), 'conversations.json');
 const settingsFile = () => path.join(dataDir(), 'settings.json');
@@ -131,6 +133,7 @@ const modelsRoot = () => path.join(dataDir(), 'models');
 const modelIndexFile = () => path.join(modelsRoot(), 'installed.json');
 const creationsDir = () => path.join(dataDir(), 'creations');
 const creationsIndexFile = () => path.join(creationsDir(), 'index.json');
+const creativeIterationsFile = () => path.join(creationsDir(), 'iterations.json');
 const attachmentsDir = () => path.join(dataDir(), 'attachments');
 const chatTokenCalibrationFile = () => path.join(dataDir(), 'chat-token-calibration.json');
 const huggingFaceTokenFile = () => path.join(dataDir(), 'huggingface-token');
@@ -141,7 +144,7 @@ async function readEvolvedTools(): Promise<EvolvedTool[]> {
   try { const value: unknown = JSON.parse(await readEncryptedText(evolvedToolsFile())); return Array.isArray(value) ? value.filter((item): item is EvolvedTool => Boolean(item && typeof item === 'object' && typeof (item as EvolvedTool).id === 'string' && typeof (item as EvolvedTool).name === 'string' && Array.isArray((item as EvolvedTool).steps))) : []; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
 }
-async function writeEvolvedTools(items: EvolvedTool[]) { await serializeMutation('evolved-tools', () => writeEncryptedText(evolvedToolsFile(), JSON.stringify(items))); }
+async function writeEvolvedTools(items: EvolvedTool[]) { const value=JSON.stringify(items); await serializeMutation('evolved-tools', () => writeEncryptedText(evolvedToolsFile(), value)); if((await getSettings()).aiChangeHistoryEnabled)await checkpointPrivateConfig('tools',value); }
 function runEvolvedSteps(steps: EvolvedToolStep[], input: Record<string, unknown>) {
   const value: Record<string, unknown> = structuredClone(input);
   const safeField=(name:string)=>{if(!/^[a-zA-Z][\w.-]{0,63}$/.test(name)||['__proto__','constructor','prototype'].includes(name))throw Error('The tool contains an invalid field name.');return name;};
@@ -189,16 +192,23 @@ async function executeEvolvedTool(name:string, input:Record<string,unknown>) {
   return{output:JSON.stringify(result,null,2).slice(0,12000),success:true};
 }
 
-async function swarmInferenceEndpoint(settings:AppSettings){
-  if(settings.selectedEngine==='provider'||settings.selectedModel.startsWith('api:'))throw Error('Swarm work is local-only. Select a local Ollama or Orion-managed model in the composer.');
-  const installed=(await readInstalledModels()).find(item=>item.category==='conversational'&&(`orion-gguf:${item.id}`===settings.selectedModel||item.id===settings.selectedModel||item.repo===settings.selectedModel));
-  if(installed){const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The selected swarm model path is invalid.');const engine=settings.selectedEngine==='llama.cpp'&&(installed.format??'gguf')==='gguf'?'llama.cpp':'orion';if(engine==='llama.cpp'&&!await llamaManager.isInstalled())throw Error('Install llama.cpp from Settings → Engines before running this swarm.');if(engine==='orion'&&!await orionInferenceRuntime.isInstalled())throw Error('Orion Inference is not available for the selected swarm model.');const base=engine==='orion'?await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf'):await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));return{url:`${base}/v1/chat/completions`,model:'orion-local'};}
-  if(settings.selectedEngine!=='ollama')throw Error('Choose a downloaded Orion model or a local Ollama model before starting the swarm.');
-  if(!settings.selectedModel)throw Error('Select a local Ollama model before starting the swarm.');
-  return{url:`${settings.ollamaUrl}/v1/chat/completions`,model:settings.selectedModel};
+async function swarmInferenceEndpoint(settings:AppSettings,selectedEngine:AppSettings['selectedEngine'],selectedModel:string){
+  if(selectedEngine==='provider'||selectedModel.startsWith('api:'))throw Error('Swarm work is local-only. Select a local Ollama or Orion-managed model.');
+  if(selectedEngine==='ollama'){
+    if(!selectedModel)throw Error('Select a local Ollama model before starting the swarm.');
+    return{url:`${settings.ollamaUrl}/v1/chat/completions`,model:selectedModel};
+  }
+  const installed=(await readInstalledModels()).find(item=>item.category==='conversational'&&(`orion-gguf:${item.id}`===selectedModel||item.id===selectedModel||item.repo===selectedModel));
+  if(!installed)throw Error('The swarm’s selected local model is no longer installed. Edit the swarm and choose another model.');
+  const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The selected swarm model path is invalid.');
+  const format=(installed.format??'gguf').toLowerCase();
+  if(selectedEngine==='llama.cpp'&&format!=='gguf')throw Error('llama.cpp can only run GGUF models for this swarm. Choose Orion Inference or another model.');
+  if(selectedEngine==='llama.cpp'&&!await llamaManager.isInstalled())throw Error('Install llama.cpp from Settings → Engines before running this swarm.');
+  if(selectedEngine==='orion'&&!await orionInferenceRuntime.isInstalled())throw Error('Orion Inference is not available for the selected swarm model.');
+  const base=selectedEngine==='orion'?await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf'):await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));return{url:`${base}/v1/chat/completions`,model:'orion-local'};
 }
-async function swarmModelTurn(settings:AppSettings,system:string,user:string,signal:AbortSignal){
-  const endpoint=await swarmInferenceEndpoint(settings),response=await fetch(endpoint.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:endpoint.model,messages:[{role:'system',content:system},{role:'user',content:user}],temperature:.2,max_tokens:1000,stream:false}),signal:AbortSignal.any([signal,AbortSignal.timeout(8*60_000)])});
+async function swarmModelTurn(settings:AppSettings,selectedEngine:AppSettings['selectedEngine'],selectedModel:string,system:string,user:string,signal:AbortSignal){
+  const endpoint=await swarmInferenceEndpoint(settings,selectedEngine,selectedModel),response=await fetch(endpoint.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:endpoint.model,messages:[{role:'system',content:system},{role:'user',content:user}],temperature:.2,max_tokens:1000,stream:false}),signal:AbortSignal.any([signal,AbortSignal.timeout(8*60_000)])});
   if(!response.ok)throw Error(`Local swarm inference failed (${response.status}): ${(await response.text()).slice(0,600)}`);
   const payload=await response.json() as {choices?:Array<{message?:{content?:unknown}}>} ,content=payload.choices?.[0]?.message?.content;
   if(typeof content!=='string'||!content.trim())throw Error('The local model returned no swarm response.');
@@ -207,32 +217,35 @@ async function swarmModelTurn(settings:AppSettings,system:string,user:string,sig
 function parseSwarmJson<T>(text:string):T{const clean=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const start=clean.indexOf('{'),end=clean.lastIndexOf('}');if(start<0||end<=start)throw Error('The swarm model did not return the required JSON action.');return JSON.parse(clean.slice(start,end+1)) as T;}
 async function runSwarmCycle(swarm:SwarmRecord,signal:AbortSignal){
   if(!swarmManager)throw Error('The isolated Orion Swarm service is unavailable.');
-  const settings=await getSettings(),active=swarm.steers.filter(item=>item.status==='active').sort((a,b)=>b.importance-a.importance).slice(0,6),focus=active[0]??{text:swarm.objective,completionRules:swarm.completionRules,importance:5};
-  const recalled=await swarmManager.recall(swarm.id,`${swarm.objective}\n${active.map(item=>item.text).join('\n')}`,2200),files=await swarmManager.listFiles(swarm.id),snippets:string[]=[];
-  for(const file of files.slice(-6)){if(signal.aborted)throw Error('Swarm model turn cancelled.');try{snippets.push(`--- ${file} ---\n${(await swarmManager.readFile(swarm.id,file)).slice(0,1600)}`);}catch{}}
-  const memoryText=recalled.slice(0,8).map(item=>`- ${item.content}`).join('\n'),state=`Goal: ${swarm.objective}\nCompletion rules: ${swarm.completionRules}\nHighest active steer (${focus.importance}/5): ${focus.text}\nSteer completion rules: ${focus.completionRules}\nIteration: ${swarm.iteration}\nFiles: ${files.join(', ')||'(empty)'}\nOFS context:\n${memoryText||'(no recalled memory yet)'}\nWorkspace excerpts:\n${snippets.join('\n')||'(empty)'}`;
-  const base='You are one role in a private Orion swarm. You can only use the exact files and OFS excerpts supplied here. You have no web, shell, operating-system, or outside-folder access. Never claim to have verified anything you did not inspect. Follow the initial goal and completion rules; the initial goal is maximum priority. Higher-importance steers take precedence over lower ones. Return only one valid JSON object, no markdown.';
-  const planRaw=await swarmModelTurn(settings,`${base}\nRole: Planner. Decide one small, useful next action that advances the goal without repeating completed work.`,`${state}\nReturn {"summary":"...","action":"research|write|review|complete","target":"..."}.`,signal),plan=parseSwarmJson<{summary?:string;action?:string;target?:string}>(planRaw);
+  const settings=await getSettings(),selectedEngine=swarm.engine??settings.selectedEngine,selectedModel=swarm.model??settings.selectedModel,active=swarm.steers.filter(item=>item.status==='active').sort((a,b)=>b.importance-a.importance).slice(0,20),steerContext=active.map(item=>`[${item.id}] ${item.importance}/5 · ${item.text.slice(0,500)}\nCompletion rules: ${item.completionRules.slice(0,400)}`).join('\n').slice(0,6000);
+  const recalled=await swarmManager.recall(swarm.id,`${swarm.objective}\n${active.map(item=>item.text).join('\n')}`,2200),files=await swarmManager.listFiles(swarm.id),focusFiles=await swarmManager.prioritizeFiles(swarm.id,6),snippets:string[]=[];
+  for(const file of focusFiles){if(signal.aborted)throw Error('Swarm model turn cancelled.');try{snippets.push(`--- ${file} ---\n${(await swarmManager.readFile(swarm.id,file)).slice(0,1600)}`);}catch{}}
+  await swarmManager.refreshUsageView(swarm.id);
+  const currentSwarm=swarmManager.list().find(item=>item.id===swarm.id)??swarm,memoryText=recalled.slice(0,8).map(item=>`- ${item.content}`).join('\n'),virtualViews=(currentSwarm.virtualViews??[]).map(view=>`- ${view.name}: ${view.purpose} (${view.paths.length} files)`).join('\n'),fileUsage=Object.entries(currentSwarm.fileActivity??{}).sort((a,b)=>(b[1].reads+b[1].writes*3+b[1].moves)-(a[1].reads+a[1].writes*3+a[1].moves)).slice(0,12).map(([file,usage])=>`${file}: read ${usage.reads}, changed ${usage.writes+usage.moves}`).join('\n'),state=`Goal: ${swarm.objective}\nCompletion rules: ${swarm.completionRules}\nActive steers in priority order:\n${steerContext||'(none)'}\nIteration: ${swarm.iteration}\nFiles (${files.length}): ${files.slice(0,100).join(', ')||'(empty)'}\nExisting virtual views:\n${virtualViews||'(none)'}\nRecent use patterns:\n${fileUsage||'(not enough activity yet)'}\nOFS context:\n${memoryText||'(no recalled memory yet)'}\nWorkspace excerpts:\n${snippets.join('\n')||'(empty)'}`;
+  const base='You are one role in a private Orion swarm. You can only use the exact files and OFS excerpts supplied here. You have no web, shell, operating-system, or outside-folder access. Never claim to have verified anything you did not inspect. The initial goal is mandatory and highest priority. Importance 5 steers are strong requirements; 4 are strong direction; 3 are normal direction; 2 are suggestions; 1 is a loose suggestion. Never let a lower priority steer override the initial goal or a higher priority steer. Return only one valid JSON object, no markdown.';
+  const planRaw=await swarmModelTurn(settings,selectedEngine,selectedModel,`${base}\nRole: Planner. Decide one small, useful next action that advances the goal without repeating completed work. You may propose a virtual view when recurring files form a useful workspace lens. Prefer virtual views to moving or renaming source files unless the goal explicitly requires physical organization.`,`${state}\nReturn {"summary":"...","action":"research|write|review|organize|complete","target":"..."}.`,signal),plan=parseSwarmJson<{summary?:string;action?:string;target?:string}>(planRaw);
   if(signal.aborted)return;
   await swarmManager.appendLog(swarm.id,'planner',String(plan.summary??'Planned the next bounded step.'),String(plan.target??''));
   if(signal.aborted)return;
   const workerRole=plan.action==='research'?'researcher':'builder';
-  const workRaw=await swarmModelTurn(settings,`${base}\nRole: ${workerRole==='researcher'?'Researcher':'Builder'}. Use only provided local context. Research means inspect the existing OFS/workspace excerpts and record grounded findings; do not invent sources. If useful, return one safe file operation.`,`${state}\nPlanner direction: ${String(plan.target??plan.summary??'Advance the goal').slice(0,1200)}\nReturn {"summary":"...","action":{"type":"none|write_file|move_file|remember","path":"relative path","content":"complete file content","from":"relative source","to":"relative destination","memory":"grounded note"}}. For write_file provide complete, useful content, not a stub or placeholders.`,signal),work=parseSwarmJson<{summary?:string;action?:{type?:string;path?:string;content?:string;from?:string;to?:string;memory?:string}}>(workRaw),action=work.action??{type:'none'};
+  const workRaw=await swarmModelTurn(settings,selectedEngine,selectedModel,`${base}\nRole: ${workerRole==='researcher'?'Researcher':'Builder'}. Use only provided local context. Research means inspect the existing OFS/workspace excerpts and record grounded findings; do not invent sources. If useful, return one safe file operation or one virtual view.`,`${state}\nPlanner direction: ${String(plan.target??plan.summary??'Advance the goal').slice(0,1200)}\nReturn {"summary":"...","action":{"type":"none|write_file|move_file|remember|create_view","path":"relative path","content":"complete file content","from":"relative source","to":"relative destination","memory":"grounded note","name":"view name","purpose":"why this virtual view is useful","paths":["existing relative file path"]}}. For write_file provide complete, useful content, not a stub or placeholders. A virtual view references existing workspace files without moving or modifying them.`,signal),work=parseSwarmJson<{summary?:string;action?:{type?:string;path?:string;content?:string;from?:string;to?:string;memory?:string;name?:string;purpose?:string;paths?:string[]}}>(workRaw),action=work.action??{type:'none'};
   if(signal.aborted)return;
   let outcome='No file change was required.';
   if(action.type==='write_file'){await swarmManager.writeFile(swarm.id,String(action.path??''),String(action.content??''));outcome=`Wrote ${action.path}.`}
   else if(action.type==='move_file'){await swarmManager.moveFile(swarm.id,String(action.from??''),String(action.to??''));outcome=`Moved ${action.from} to ${action.to}.`}
   else if(action.type==='remember'){const memory=String(action.memory??'').trim();if(memory)await swarmManager.remember(swarm.id,'assistant',memory);outcome='Added a grounded note to the swarm’s OrionFS.'}
+  else if(action.type==='create_view'){const view=await swarmManager.createVirtualView(swarm.id,{name:String(action.name??''),purpose:String(action.purpose??''),paths:Array.isArray(action.paths)?action.paths:[]});outcome=`Created the virtual view “${view.name}” with ${view.paths.length} file references.`}
   else if(action.type!=='none')throw Error(`Rejected unsupported swarm action: ${action.type}`);
   await swarmManager.appendLog(swarm.id,workerRole,String(work.summary??'Completed the assigned step.'),outcome,false,action.type);
   if(signal.aborted)return;
-  const currentFiles=await swarmManager.listFiles(swarm.id),reviewRaw=await swarmModelTurn(settings,`${base}\nRole: Reviewer. Check the actual supplied goal, completion rules, files, and evidence. Report gaps and risks. Set complete=true only when each completion rule is explicitly evidenced; otherwise complete=false.`,`${state}\nFiles after this iteration: ${currentFiles.join(', ')||'(empty)'}\nAction result: ${outcome}\nWork summary: ${String(work.summary??'').slice(0,1200)}\nReturn {"summary":"...","complete":false,"evidence":"...","warning":""}.`,signal),review=parseSwarmJson<{summary?:string;complete?:boolean;evidence?:string;warning?:string}>(reviewRaw);
+  const currentFiles=await swarmManager.listFiles(swarm.id),reviewRaw=await swarmModelTurn(settings,selectedEngine,selectedModel,`${base}\nRole: Reviewer. Check the actual supplied goal, completion rules, files, and evidence. Report gaps and risks. Set complete=true only when every main-goal rule is explicitly evidenced; otherwise complete=false. For every active steer, return its exact ID and complete=true only when its own completion rules are evidenced; otherwise leave it active. Never mark a steer complete because the main goal is complete. Raise a warning for unsupported claims, repeated loops, scope drift, or risks.`,`${state}\nFiles after this iteration: ${currentFiles.join(', ')||'(empty)'}\nVirtual views after this iteration: ${(swarm.virtualViews??[]).map(view=>view.name).join(', ')||'(none)'}\nAction result: ${outcome}\nWork summary: ${String(work.summary??'').slice(0,1200)}\nReturn {"summary":"...","complete":false,"evidence":"...","completedSteers":[{"id":"exact active steer id","evidence":"specific evidence that its completion rules are met"}],"warning":""}. Include each completed steer only when its own rules are proven by supplied evidence.`,signal),review=parseSwarmJson<{summary?:string;complete?:boolean;evidence?:string;completedSteers?:Array<{id:string;evidence:string}>;warning?:string}>(reviewRaw);
   await swarmManager.appendLog(swarm.id,'reviewer',String(review.summary??'Reviewed the current workspace.'),String(review.evidence??''),Boolean(review.warning),undefined);
   if(signal.aborted)return;
+  for(const steer of review.completedSteers??[])if(active.some(value=>value.id===steer.id))await swarmManager.completeSteer(swarm.id,steer.id,String(steer.evidence??''));
   if(review.warning)await swarmManager.appendLog(swarm.id,'reviewer','Review warning',String(review.warning),true);
-  if(review.complete===true)await swarmManager.complete(swarm.id,String(review.evidence??review.summary??'The reviewer marked completion rules satisfied.'));
+  if(review.complete===true){const remaining=swarmManager.list().find(item=>item.id===swarm.id)?.steers.filter(steer=>steer.status==='active')??[];if(remaining.length)await swarmManager.appendLog(swarm.id,'reviewer','Main goal met; active steers remain.',`${remaining.length} steer(s) still need evidence-based completion before this swarm can finish.`,false);else await swarmManager.complete(swarm.id,String(review.evidence??review.summary??'The reviewer marked completion rules satisfied.'));}
 }
-const defaults: AppSettings = { autoCollapseThinking:true, ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', selectedEngine: 'orion', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2, composerDreaming: true, idleConsolidationEnabled: false, idleConsolidationHours: 24, idleConsolidationMinutes: 10, idleConsolidationChargingOnly: false, idleOvernightReport: false, evolvingToolsEnabled: false, cameraPerceptionEnabled: false, creativeIterationEnabled: false, creativeIterationLimit: 20, aiChangeHistoryEnabled: true, swarmEnabled: false, swarmIdleMinutes: 10 };
+const defaults: AppSettings = { autoCollapseThinking:true, ollamaUrl: 'http://127.0.0.1:11434', selectedModel: '', selectedEngine: 'orion', defaultImageModel: '', defaultVideoModel: '', temperature: 0.7, contextWindow: 8192, approvalLevel: 'none', approvedTools: [], workspacePath: '', keepInTray: false, interConversationMemory: false, experimentalOfsMemory: true, startNewConversation: true, theme: 'graphite', disabledTools: [], subagentMaxParallel: 2, composerDreaming: true, idleConsolidationEnabled: false, idleConsolidationHours: 24, idleConsolidationMinutes: 10, idleConsolidationChargingOnly: false, idleOvernightReport: false, evolvingToolsEnabled: false, creativeIterationEnabled: false, creativeIterationLimit: 20, aiChangeHistoryEnabled: true, swarmEnabled: false, swarmIdleMinutes: 10, swarmCycleMinutes: 5 };
 
 let settingsCache: AppSettings = { ...defaults };
 const chatTokenSafetyFactors = new Map<string, number>();
@@ -280,6 +293,7 @@ async function readGeneratedMediaIndex(): Promise<GeneratedMedia[]> {
     return safe.slice(-100);
   } catch { return []; }
 }
+async function readCreativeIterationRuns():Promise<CreativeIterationRun[]>{try{const rows=JSON.parse(await readEncryptedText(creativeIterationsFile())) as unknown;if(!Array.isArray(rows))return[];const root=await fs.realpath(creationsDir()),validPath=async(value:unknown)=>{if(typeof value!=='string')return null;const absolute=path.resolve(value);if(!absolute.startsWith(`${root}${path.sep}`))return null;const actual=await fs.realpath(absolute).catch(()=>null);return actual?.startsWith(`${root}${path.sep}`)?actual:null;},result:CreativeIterationRun[]=[];for(const item of rows){if(!item||typeof item!=='object'||typeof item.id!=='string'||!Array.isArray(item.rounds))continue;const rounds=[];for(const round of item.rounds){const imagePath=await validPath(round?.imagePath);if(imagePath&&typeof round.id==='string'&&Number.isFinite(round.score))rounds.push({...round,imagePath});}const best=rounds.find(round=>round.id===item.best?.id);if(best&&typeof item.prompt==='string'&&typeof item.criteria==='string')result.push({...item,best,rounds} as CreativeIterationRun);}return result.slice(-100);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return[];throw error;}}
 async function ensureCreativeBundle(modelId: string, category: 'image'|'video') {
   const installed=(await readInstalledModels()).find(model=>model.id===modelId&&model.category===category);
   if(!installed)throw new Error(`Choose an installed ${category} model first.`);
@@ -328,6 +342,17 @@ async function generateAndIndexMedia(prompt: string, modelId: string, kind: 'ima
   await fs.mkdir(creationsDir(), { recursive: true });
   await serializeMutation('creations', async () => { const all = await readGeneratedMediaIndex(); if (!all.some(item => item.id === result.id)) all.push({ id: result.id, prompt: prompt.slice(0, 10000), modelId, path: result.imagePath, mediaType: result.mediaType, createdAt: Date.now() }); await writeEncryptedText(creationsIndexFile(), JSON.stringify(all.slice(-100), null, 2)); });
   return result;
+}
+async function evaluateCreativeImage(imagePath:string,model:string,engine:InferenceEngine,goal:string,criteria:string,iteration:number,signal:AbortSignal){
+  const settings=await getSettings(),remote=resolveProviderModel(await readProviders(),model);if(remote)throw Error('Creative evaluation is local-only; hosted providers are never sent generated media.');
+  if(engine==='provider')throw Error('Select a local evaluation model.');
+  let endpoint=`${settings.ollamaUrl}/v1/chat/completions`,modelName=model;
+  const installed=(await readInstalledModels()).find(item=>item.category==='conversational'&&(model===item.id||model===item.repo||model===`orion-gguf:${item.id}`));
+  if(installed){const root=path.resolve(modelsRoot()),modelPath=path.resolve(root,installed.path);if(!modelPath.startsWith(`${root}${path.sep}`))throw Error('The local evaluation model path is invalid.');const selectedEngine=engine==='llama.cpp'&&(installed.format??'gguf')==='gguf'?'llama.cpp':'orion';endpoint=selectedEngine==='llama.cpp'?`${await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root))}/v1/chat/completions`:`${await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf')}/v1/chat/completions`;modelName='orion-local';}
+  else {if(engine!=='ollama')throw Error('Choose a local installed Orion or Ollama evaluation model.');if(/(?:[-_:]cloud)(?:$|[-_:])/i.test(model))throw Error('Cloud-backed Ollama models cannot evaluate private creative iterations.');const check=await fetch(`${settings.ollamaUrl}/api/show`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model}),signal:AbortSignal.timeout(10000)});if(!check.ok)throw Error('Could not verify that the evaluation model is installed locally.');const metadata=await check.json() as {remote_host?:string;remote_model?:string};if(metadata.remote_host||metadata.remote_model)throw Error('Cloud-backed Ollama models cannot evaluate private creative iterations.');}
+  const root=path.resolve(creationsDir()),file=path.resolve(imagePath);if(!file.startsWith(`${root}${path.sep}`))throw Error('Creative evaluation image is outside Orion’s private creations folder.');const bytes=await fs.readFile(file);if(bytes.length>32*1024*1024)throw Error('Creative evaluation images are limited to 32 MB.');const ext=path.extname(file).toLowerCase(),mime=ext==='.jpg'||ext==='.jpeg'?'image/jpeg':'image/png';
+  const response=await fetchWithLocalReconnect(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:modelName,stream:false,temperature:.2,max_tokens:450,messages:[{role:'system',content:'You are a strict local quality evaluator for a private creative iteration. Judge only the attached image against the user goal and success criteria. Do not claim that a visual feature exists unless you can see it. Return only JSON: {"score":0,"meetsCriteria":false,"critique":"brief evidence-based critique","nextPrompt":"a concise concrete improvement to the original prompt"}. score is an integer 0-10. Do not rewrite the entire prompt.'},{role:'user',content:[{type:'text',text:`Goal: ${goal.slice(0,3000)}\nSuccess criteria: ${criteria.slice(0,2000)}\nIteration: ${iteration}`},{type:'image_url',image_url:{url:`data:${mime};base64,${bytes.toString('base64')}`}}]}]}),signal:AbortSignal.any([signal,AbortSignal.timeout(180000)])},'local creative evaluator');
+  if(!response.ok)throw Error(`The local model could not evaluate the image (${response.status}). ${(await response.text()).slice(0,500)}`);const payload=await response.json() as {choices?:Array<{message?:{content?:unknown}}>} ,raw=payload.choices?.[0]?.message?.content;if(typeof raw!=='string')throw Error('The local evaluator did not return a review.');const parsed=parseSwarmJson<{score:number;meetsCriteria:boolean;critique:string;nextPrompt:string}>(raw),score=Math.max(0,Math.min(10,Math.round(Number(parsed.score))));if(!Number.isFinite(score)||typeof parsed.critique!=='string'||typeof parsed.nextPrompt!=='string')throw Error('The evaluator returned an invalid score or refinement.');return{score,meetsCriteria:parsed.meetsCriteria===true,critique:parsed.critique.slice(0,1200),nextPrompt:parsed.nextPrompt.slice(0,1000)};
 }
 function reportModelProgress(progress: DownloadProgress) { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); }
 const cjkCharacter = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
@@ -605,12 +630,12 @@ async function getSettings(): Promise<AppSettings> {
     settings.idleConsolidationChargingOnly = settings.idleConsolidationChargingOnly === true;
     settings.idleOvernightReport = settings.idleOvernightReport === true;
     settings.evolvingToolsEnabled = settings.evolvingToolsEnabled === true;
-    settings.cameraPerceptionEnabled = settings.cameraPerceptionEnabled === true;
     settings.creativeIterationEnabled = settings.creativeIterationEnabled === true;
-    settings.creativeIterationLimit = Math.max(1, Math.min(200, Math.floor(Number(settings.creativeIterationLimit) || 20)));
+    settings.creativeIterationLimit = Math.max(1, Math.min(20, Math.floor(Number(settings.creativeIterationLimit) || 20)));
     settings.aiChangeHistoryEnabled = settings.aiChangeHistoryEnabled !== false;
     settings.swarmEnabled = settings.swarmEnabled === true;
     settings.swarmIdleMinutes = Math.max(2, Math.min(180, Math.floor(Number(settings.swarmIdleMinutes) || 10)));
+    settings.swarmCycleMinutes = [2, 5, 10, 20].includes(Number(settings.swarmCycleMinutes)) ? Number(settings.swarmCycleMinutes) : defaults.swarmCycleMinutes;
     // Workspace editing and the legacy archive are temporarily disabled. The
     // persisted fields stay in the schema so the feature can be restored later.
     settings.workspacePath = '';
@@ -662,6 +687,9 @@ async function runMemoryCare(): Promise<MemoryCareReport> {
     const compressed = gzipSync(Buffer.from(JSON.stringify(before)), { level: 6 });
     await writeEncryptedText(path.join(memoryCareDir(), snapshotName), compressed.toString('base64'));
     await writeEncryptedText(memoryCareLatestFile(), JSON.stringify({ snapshotName, createdAt: Date.now() }));
+    for (const oldName of await fs.readdir(memoryCareDir()).catch(() => [])) {
+      if (oldName !== snapshotName && /^before-\d+\.snapshot\.enc$/.test(oldName)) await fs.rm(path.join(memoryCareDir(), oldName), { force: true });
+    }
     await indexOFSConversationBatch(settings);
     const pruned = await ofs.pruneObsoleteMemories(Date.now(), 30);
     const report: MemoryCareReport = { ranAt: Date.now(), expiredRemoved: pruned.expired, supersededRemoved: pruned.superseded, indexedConversations: (await readConversations()).length, snapshotAvailable: true };
@@ -785,7 +813,7 @@ function quitOrion() {
 
 async function ensureTray() {
   if (tray) return true;
-  try { tray = new NativeTray(); await tray.ready; const running=swarmManager?.list().find(item=>item.status==='running'); if(running){const settings=await getSettings();await tray.setSwarmState({running:true,name:running.name,iteration:running.iteration,idleMinutes:settings.swarmIdleMinutes});} return true; }
+  try { tray = new NativeTray(); await tray.ready; const running=swarmManager?.list().find(item=>item.status==='running'); if(running){const settings=await getSettings();await tray.setSwarmState({running:true,name:running.name,iteration:running.iteration,idleMinutes:settings.swarmIdleMinutes,cycleMinutes:settings.swarmCycleMinutes});} return true; }
   catch (error) { console.error('Could not create Orion tray:', error);tray=null;return false; }
 }
 
@@ -976,13 +1004,13 @@ else {
       return;
     }
     await loadChatTokenCalibrations();
-    workspaceManager = new WorkspaceManager(path.join(app.getPath('userData'), 'orion'));
+    workspaceManager = new WorkspaceManager(path.join(app.getPath('userData'), 'orion'),runManagedVelo);
     // Creating these controllers is inert: stable-diffusion.cpp and llama.cpp are only
     // installed or started in response to their respective user actions.
     diffusionManager = new DiffusionManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) { win.webContents.send('create:progress', progress); if(progress.download)win.webContents.send('models:progress',{id:progress.id,...progress.download}); } });
     llamaManager = new LlamaManager(app.getPath('userData'), progress => { if (win && !win.isDestroyed()) win.webContents.send('models:progress', progress); });
     orionInferenceRuntime = new OrionInferenceRuntime(app.getAppPath());
-    swarmManager=new SwarmManager({root:dataDir(),workerPath:path.join(app.getAppPath(),'dist','main','ofsWorker.js'),emit:swarm=>{if(win&&!win.isDestroyed())win.webContents.send('swarm:update',swarm);if(tray){void getSettings().then(settings=>tray?.setSwarmState({running:swarm.status==='running',name:swarm.name,iteration:swarm.iteration,idleMinutes:settings.swarmIdleMinutes})).catch(()=>undefined);}},canStart:async()=>(await getSettings()).swarmEnabled,canRun:async()=>{const settings=await getSettings();return settings.swarmEnabled&&Date.now()-lastUserActivityAt>=settings.swarmIdleMinutes*60_000&&!activeAbort&&!chatPreparing&&!memoryCareBusy&&!appQuitting;},cycle:runSwarmCycle,runVelo:runManagedVelo});
+    swarmManager=new SwarmManager({root:dataDir(),workerPath:path.join(app.getAppPath(),'dist','main','ofsWorker.js'),emit:swarm=>{if(win&&!win.isDestroyed())win.webContents.send('swarm:update',swarm);if(tray){void getSettings().then(settings=>tray?.setSwarmState({running:swarm.status==='running',name:swarm.name,iteration:swarm.iteration,idleMinutes:settings.swarmIdleMinutes,cycleMinutes:settings.swarmCycleMinutes})).catch(()=>undefined);}},canStart:async()=>(await getSettings()).swarmEnabled,canRun:async()=>{const settings=await getSettings();return settings.swarmEnabled&&Date.now()-lastUserActivityAt>=settings.swarmIdleMinutes*60_000&&!activeAbort&&!chatPreparing&&!memoryCareBusy&&!appQuitting;},cycleIntervalMs:async()=>(await getSettings()).swarmCycleMinutes*60_000,cycle:runSwarmCycle,runVelo:runManagedVelo});
     await swarmManager.init();
     app.on('tray-swarm-pause',()=>{const running=swarmManager?.list().find(item=>item.status==='running');if(running)void swarmManager?.pause(running.id);});
     createWindow();
@@ -1497,6 +1525,7 @@ ipcMain.handle('models:check-compatibility', async (event, id: string) => {
   } finally { modelCompatibilityBusy = false; }
 });
 ipcMain.handle('create:list-media', async () => (await readGeneratedMediaIndex()).slice(-12).reverse());
+ipcMain.handle('create:list-iterations',async()=>[...(await readCreativeIterationRuns())].reverse());
 ipcMain.handle('create:open-folder', async () => {
   const folder = creationsDir(); await fs.mkdir(folder, { recursive: true });
   const error = await shell.openPath(folder); if (error) throw new Error(`Could not open the creations folder: ${error}`);
@@ -1506,6 +1535,32 @@ ipcMain.handle('create:generate', async (_, prompt: string, modelId?: string, ki
   const settings = await getSettings();
   return generateAndIndexMedia(prompt, modelId || (kind === 'video' ? settings.defaultVideoModel : settings.defaultImageModel), kind, requestId);
 });
+ipcMain.handle('create:iterate',async(event,input:{prompt:string;criteria:string;modelId:string;evaluatorModel:string;evaluatorEngine:InferenceEngine;maxIterations:number;requestId:string})=>{
+  const settings=await getSettings(),prompt=String(input?.prompt??'').trim(),criteria=String(input?.criteria??'').trim(),modelId=String(input?.modelId??''),evaluatorModel=String(input?.evaluatorModel??''),requestId=String(input?.requestId??'');
+  if(!settings.creativeIterationEnabled)throw Error('Enable local creative iteration in Settings → Background intelligence first.');
+  if(prompt.length<8||criteria.length<15||!modelId||!evaluatorModel||!/^[-\w]{1,100}$/.test(requestId))throw Error('Provide a clear image goal, success criteria, installed image model, and local evaluation model.');
+  if(modelCompatibilityBusy||activeAbort||chatPreparing||memoryCareBusy)throw Error('Wait until Orion is idle before starting unattended creative iteration.');
+  if(resolveProviderModel(await readProviders(),evaluatorModel)||input.evaluatorEngine==='provider'||evaluatorModel.startsWith('api:'))throw Error('Creative evaluation must use a local model. Hosted providers are not permitted.');
+  const max=Math.max(1,Math.min(20,settings.creativeIterationLimit||20,Math.round(Number(input.maxIterations)||1)));let finish!:()=>void;const run={cancelled:false,done:new Promise<void>(resolve=>{finish=resolve;}),finish:()=>finish(),abort:new AbortController()};if(creativeIterationRuns.has(requestId))throw Error('This creative iteration is already running.');creativeIterationRuns.set(requestId,run);
+  const rounds:Array<{id:string;imagePath:string;score:number;critique:string}>=[];let nextPrompt=prompt;
+  try{for(let index=1;index<=max;index++){
+    if(run.cancelled)break;
+    win.webContents.send('create:progress',{id:requestId,phase:`Creating iteration ${index} of ${max}`,detail:'Generating an image locally…',percent:Math.round((index-1)/max*100),mediaType:'image'});
+    const generated=await withMediaModelHandoff(evaluatorModel,Math.min(settings.contextWindow,8192),()=>generateAndIndexMedia(nextPrompt,modelId,'image',`${requestId}-${index}`),input.evaluatorEngine);
+    if(run.cancelled)break;
+    win.webContents.send('create:progress',{id:requestId,phase:`Evaluating iteration ${index} of ${max}`,detail:'Reviewing the image against your success criteria on this computer…',percent:Math.round((index-.45)/max*100),imagePath:generated.imagePath,mediaType:'image'});
+    const review=await evaluateCreativeImage(generated.imagePath,evaluatorModel,input.evaluatorEngine,prompt,criteria,index,run.abort.signal),round={id:generated.id,imagePath:generated.imagePath,score:review.score,critique:review.critique};rounds.push(round);
+    win.webContents.send('create:progress',{id:requestId,phase:review.meetsCriteria?'Success criteria met':`Iteration ${index} reviewed`,detail:`Score ${review.score}/10 · ${review.critique}`,percent:Math.round(index/max*100),imagePath:generated.imagePath,mediaType:'image'});
+    if(review.meetsCriteria)break;
+    if(index<max)nextPrompt=`${prompt}\n\nApply this focused refinement from the previous local review: ${review.nextPrompt}`;
+  }
+  if(!rounds.length)throw Error('Creative iteration was stopped before the first image was evaluated.');
+  const best=[...rounds].sort((a,b)=>b.score-a.score)[0]!,record:CreativeIterationRun={id:requestId,prompt,criteria,modelId,evaluatorModel,createdAt:Date.now(),best,rounds};await serializeMutation('creative-iterations',async()=>{const all=await readCreativeIterationRuns();all.push(record);await writeEncryptedText(creativeIterationsFile(),JSON.stringify(all.slice(-100)));});
+  win.webContents.send('create:progress',{id:requestId,phase:run.cancelled?'Stopped':'Iteration complete',detail:`Best image · ${best.score}/10 · ${rounds.length} iteration${rounds.length===1?'':'s'} kept in Your creations.`,percent:100,imagePath:best.imagePath,mediaType:'image'});
+  return record;
+  }finally{creativeIterationRuns.delete(requestId);run.finish();}
+});
+ipcMain.handle('create:iterate-cancel',async(_event,requestId:string)=>{const run=creativeIterationRuns.get(String(requestId));if(run){run.cancelled=true;run.abort.abort();await diffusionManager.stop();}});
 ipcMain.handle('create:read-media', async (_, value: string) => {
   const root = path.resolve(creationsDir()), target = path.resolve(String(value));
   if (!target.startsWith(`${root}${path.sep}`)) throw new Error('Invalid generated media path.');
@@ -1561,6 +1616,7 @@ ipcMain.handle('conversation:delete', async (_, id: string) => {
   await serializeMutation('conversations', async () => { await writeConversations((await readConversations()).filter(c => c.id !== id)); });
   await getMemoryHistory().remove(id);
   await removeConversationRollback(id);
+  await workspaceManager.removeConversationHistory(String(id));
 });
 ipcMain.handle('memory:stats', async (_, conversationId?: string) => {
   const settings = await getSettings();
@@ -1681,8 +1737,8 @@ ipcMain.handle('background:activity', event => {
   lastUserActivityAt = Date.now(); return true;
 });
 ipcMain.handle('swarm:list', () => swarmManager?.list() ?? []);
-ipcMain.handle('swarm:create', async (_event,input: {name:string;objective:string;completionRules:string}) => {if(!swarmManager)throw Error('Swarm is still starting.');return swarmManager.create(input);});
-ipcMain.handle('swarm:edit', async (_event,id:string,changes:{name?:string;objective?:string;completionRules?:string}) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.edit(id,changes);});
+ipcMain.handle('swarm:create', async (_event,input: import('../shared/swarm').SwarmCreateInput) => {if(!swarmManager)throw Error('Swarm is still starting.');return swarmManager.create(input);});
+ipcMain.handle('swarm:edit', async (_event,id:string,changes:{name?:string;objective?:string;completionRules?:string;engine?:import('../shared/swarm').SwarmInferenceEngine;model?:string}) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.edit(id,changes);});
 ipcMain.handle('swarm:start', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.start(id);});
 ipcMain.handle('swarm:pause', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.pause(id);});
 ipcMain.handle('swarm:resume', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.resume(id);});
@@ -1690,6 +1746,7 @@ ipcMain.handle('swarm:kill', async (_event,id:string) => {if(!swarmManager)throw
 ipcMain.handle('swarm:delete', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.delete(id);});
 ipcMain.handle('swarm:steer', async (_event,id:string,value:SwarmSteerInput) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.steer(id,value);});
 ipcMain.handle('swarm:open-folder', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return shell.openPath(await swarmManager.openFolder(id));});
+ipcMain.handle('swarm:velo-history', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.veloHistory(id);});
 ipcMain.handle('dream:prepare', async (event, conversationId: string, model: string, engine: InferenceEngine, draft: string) => {
   if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Draft preparation is only available in Orion chat.');
   const settings = await getSettings();
@@ -1738,15 +1795,16 @@ ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
     ,idleConsolidationChargingOnly: value.idleConsolidationChargingOnly === true
     ,idleOvernightReport: value.idleOvernightReport === true
     ,evolvingToolsEnabled: value.evolvingToolsEnabled === true
-    ,cameraPerceptionEnabled: value.cameraPerceptionEnabled === true
     ,creativeIterationEnabled: value.creativeIterationEnabled === true
-    ,creativeIterationLimit: Math.max(1, Math.min(200, Math.floor(Number(value.creativeIterationLimit) || defaults.creativeIterationLimit)))
+    ,creativeIterationLimit: Math.max(1, Math.min(20, Math.floor(Number(value.creativeIterationLimit) || defaults.creativeIterationLimit)))
     ,aiChangeHistoryEnabled: value.aiChangeHistoryEnabled !== false
     ,swarmEnabled: value.swarmEnabled === true
     ,swarmIdleMinutes: Math.max(2, Math.min(180, Math.floor(Number(value.swarmIdleMinutes) || defaults.swarmIdleMinutes)))
+    ,swarmCycleMinutes: [2, 5, 10, 20].includes(Number(value.swarmCycleMinutes)) ? Number(value.swarmCycleMinutes) : defaults.swarmCycleMinutes
   };
-  await serializeMutation('settings', () => writeEncryptedText(settingsFile(), JSON.stringify(settings, null, 2)));
+  const serializedSettings=JSON.stringify(settings,null,2); await serializeMutation('settings', () => writeEncryptedText(settingsFile(), serializedSettings)); if(settings.aiChangeHistoryEnabled)await checkpointPrivateConfig('settings',serializedSettings);
   settingsCache = settings;
+  if(!settings.creativeIterationEnabled&&creativeIterationRuns.size){const runs=[...creativeIterationRuns.values()];for(const run of runs){run.cancelled=true;run.abort.abort();}await diffusionManager.stop();await Promise.all(runs.map(run=>run.done));}
   void indexOFSConversationBatch(settings);
 });
 ipcMain.handle('ollama:cancel', () => { activeAbort?.abort(); activeAbort = null; });
@@ -1821,7 +1879,7 @@ const ollamaTools = [
   { type: 'function', function: { name: 'record_assumption', description: 'Record only a consequential constraint or uncertain assumption that changes the work. Do not use for greetings, simple answers or routine facts. kind is inferred unless directly quoted from a user. Update an existing id to correct it; confirm or dismiss existing assumptions.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['save','confirm','dismiss'] }, id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['stated','inferred'] }, sourceMessageIds: { type: 'array', items: { type: 'string' } } }, required: ['action'] } } },
   { type: 'function', function: { name: 'search_orion_help', description: 'Search Orion help. For OGS, graphs, diagrams, or charts, this returns the complete internal JSON authoring schema and valid examples, not just user-facing guidance. Use when the user asks how Orion works or how to do something in Orion.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The Orion feature or task the user needs help with.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'create_image', description: 'Generate media in Orion Create with the selected default model. Use only when the user explicitly requests image or video generation. Write a clear, detailed visual prompt. Set kind to video only for an explicit video request; otherwise omit it or use image.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, kind: { type: 'string', enum: ['image','video'] } }, required: ['prompt'] } } },
-  { type: 'function', function: { name: 'create_video', description: 'Generate a video locally in Orion Create using the selected default video model. Use only when the user explicitly requests a video or animation. Describe the subject, scene, motion, camera movement, lighting, and style in a detailed visual prompt. Orion displays live generation progress and plays the finished video in chat, then restores the chat model for your final response.', parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'Detailed description of the requested video, including motion.' } }, required: ['prompt'] } } },
+  { type: 'function', function: { name: 'create_video', description: 'Generate a video locally in Orion Create using the selected default video model. Use only when the user explicitly requests a video or animation. Describe the subject, scene, motion, viewpoint movement, lighting, and style in a detailed visual prompt. Orion displays live generation progress and plays the finished video in chat, then restores the chat model for your final response.', parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'Detailed description of the requested video, including motion.' } }, required: ['prompt'] } } },
   { type: 'function', function: { name: 'search_memory', description: 'Search OrionFS memories from saved conversations for facts, decisions, names, dates, or details. Use the returned memories as evidence and search again with a more precise query if needed.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Specific words, names, or question to find in saved conversation memories.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'search_web', description: 'Search the public web using DuckDuckGo.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search phrase' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'open_url', description: 'Open an HTTPS URL in the system browser.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
@@ -1833,7 +1891,7 @@ const ollamaTools = [
   ,{ type: 'function', function: { name: 'research_subagent', description: 'Use a separate, fully local read-only subagent to research a focused question using the conversation context and OrionFS memories. It returns a concise summary with evidence.', parameters: { type: 'object', properties: { task: { type: 'string', description: 'The focused research question and required evidence.' } }, required: ['task'] } } }
   ,{ type: 'function', function: { name: 'quality_control_subagent', description: 'Use a separate, fully local read-only quality-control subagent to inspect the current private workspace diff, read relevant files, and report actionable defects. It cannot edit files or run commands.', parameters: { type: 'object', properties: { task: { type: 'string', description: 'What requirement or risk to check, or a concise review focus.' } }, required: ['task'] } } }
   ,{ type: 'function', function: { name: 'workspace_review', description: 'Inspect the current private workspace proposal and return changed paths, diff hunks, and change counts. Read-only.', parameters: { type: 'object', properties: {} } } }
-  ,{ type: 'function', function: { name: 'workspace_checkpoint', description: 'Create a recoverable local Git checkpoint of the selected private workspace state. This does not push or publish anything.', parameters: { type: 'object', properties: { label: { type: 'string' } } } } }
+  ,{ type: 'function', function: { name: 'workspace_checkpoint', description: 'Create a recoverable local Velo checkpoint of the selected private workspace state. This remains on this device and does not publish anything.', parameters: { type: 'object', properties: { label: { type: 'string' } } } } }
   ,{ type: 'function', function: { name: 'context_inspect', description: 'Inspect Orion context-window and memory usage for the active conversation without exposing unrelated conversations.', parameters: { type: 'object', properties: {} } } }
   ,{ type: 'function', function: { name: 'web_fetch', description: 'Fetch and extract readable text from a public HTTPS page. Does not execute page scripts. Use search_web first when you need to discover a URL.', parameters: { type: 'object', properties: { url: { type: 'string' }, max_characters: { type: 'integer', minimum: 1000, maximum: 20000 } }, required: ['url'] } } }
   ,{ type: 'function', function: { name: 'notebook_edit', description: 'Update the source or markdown of one cell in an existing Jupyter .ipynb file in the private workspace. Other cells and notebook metadata are preserved.', parameters: { type: 'object', properties: { path: { type: 'string' }, cell_index: { type: 'integer', minimum: 0 }, source: { type: 'string' } }, required: ['path','cell_index','source'] } } }
@@ -2180,6 +2238,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   if (chatPreparing || activeAbort) throw Error('A conversation is already generating.');
   chatPreparing = true;
   try {
+  if(creativeIterationRuns.size){const runs=[...creativeIterationRuns.values()];for(const run of runs){run.cancelled=true;run.abort.abort();}await diffusionManager.stop();await Promise.all(runs.map(run=>run.done));}
   await swarmManager?.yieldForChat();
   await getMemoryHistory().settled();
   if (modelCompatibilityBusy) throw new Error('Wait for the compatibility check to finish before starting a chat.');
@@ -2523,7 +2582,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
         trimAgentHistory(agentHistory, continuityTokens);
         const requestMessages: Array<Record<string, unknown>> = [
           { role: 'system', content: `${system}${ogsRepairPrompt}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
-          ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role: role === 'system' ? 'user' : role, content, ...(images.length?{images}:{}) })),
+          ...(await modelInputMessages(recent)).map(({role,content,images}) => ({ role: role === 'system' ? 'user' : role, content, ...(images.length?{images}:{}) })),
           ...agentHistory
         ];
         if(ogsRepairPrompt)requestMessages.splice(0,requestMessages.length,{role:'system',content:OGS_PROMPT+ogsRepairPrompt},{role:'user',content:'Output only the corrected ogs fenced block now. Use the simple line format.'});
@@ -2637,6 +2696,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
             ? { output: `This exact ${call.name} request already ran earlier in this same response batch. Use the result from the first call instead of repeating it.`, success: false }
             : cached
             ? { output: `Orion reused the result from an identical call to ${call.name}. Use this result instead of repeating the same call.\n\n${cached.output}`.slice(0, resultBudget), success: true }
+
             : approved ? await executeAgentTool(tool, recentMessageIds, input.conversationId, routedModel, contextBudget, resultBudget) : { output: 'Approval declined by the user.', success: false };
           if (cached && cached.repeats >= 3) repeatedLoopDetected = true;
           if (!cached) rememberReadResult(call.name, args, result.output, result.success);
@@ -2660,7 +2720,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
       trimAgentHistory(ollamaAgentHistory, continuityTokens);
       const requestMessages: Record<string, unknown>[] = [
         { role: 'system', content: `${system}${ogsRepairPrompt}${continuityContext}\n\nUse recent structured tool results and OrionFS memory checkpoints as authoritative. Do not repeat an identical successful tool call. If a tool call fails, change its arguments based on the returned error instead of retrying unchanged. After gathering sufficient evidence, complete the requested action or give the answer.` },
-        ...(await modelInputMessages(recent,settings)).map(({role,content,images}) => ({ role, content, ...(images.length?{images:images.map(image=>image.slice(image.indexOf(',')+1))}:{}) })),
+        ...(await modelInputMessages(recent)).map(({role,content,images}) => ({ role, content, ...(images.length?{images:images.map(image=>image.slice(image.indexOf(',')+1))}:{}) })),
         ...ollamaAgentHistory
       ];
       if(ogsRepairPrompt)requestMessages.splice(0,requestMessages.length,{role:'system',content:OGS_PROMPT+ogsRepairPrompt},{role:'user',content:'Output only the corrected ogs fenced block now. Use the simple line format.'});
@@ -2751,6 +2811,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
           ? { output: `This exact ${name} request already ran earlier in this same response batch. Use the result from the first call instead of repeating it.`, success: false }
           : cached
           ? { output: `Orion reused the result from an identical call to ${name}. Use this result instead of repeating the same call.\n\n${cached.output}`.slice(0, resultBudget), success: true }
+
           : approved ? await executeAgentTool(tool, recentMessageIds, input.conversationId, routedModel, contextBudget, resultBudget) : { output: 'Approval declined by the user.', success: false };
         if (cached && cached.repeats >= 3) repeatedLoopDetected = true;
         if (!cached) rememberReadResult(name, args, result.output, result.success);
@@ -2830,12 +2891,29 @@ async function runWebResearch(query: string, stepId: string, emit: (event: WebRe
 ipcMain.handle('web:search', async (_, query: string) => searchDuckDuckGo(query));
 ipcMain.handle('workspace:select', async () => { const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] }); return result.canceled ? null : result.filePaths[0] ?? null; });
 ipcMain.handle('workspace:create', async (_, name: string) => workspaceManager.createProject(app.getPath('documents'), String(name ?? '')));
-ipcMain.handle('workspace:status', async () => { const settings = await getSettings(); return settings.workspacePath ? workspaceManager.status(settings.workspacePath) : { root: '', git: false, branch: null, changedFiles: 0, additions: 0, deletions: 0, checkpoints: [] }; });
+ipcMain.handle('workspace:status', async () => { const settings = await getSettings(); return settings.workspacePath ? workspaceManager.status(settings.workspacePath) : { root: '', velo: false, line: null, changedFiles: 0, additions: 0, deletions: 0, checkpoints: [] }; });
 ipcMain.handle('workspace:review', async (_, conversationId: string) => workspaceManager.review(String(conversationId)));
+ipcMain.handle('workspace:velo-session-history', async (_, conversationId: string) => workspaceManager.sessionHistory(String(conversationId)));
+ipcMain.handle('history:config-list', async (_, name: 'settings'|'tools') => listPrivateConfigHistory(name));
+ipcMain.handle('history:config-restore', async (_, name: 'settings'|'tools', checkpointId: string) => {
+  const currentText=await readEncryptedText(name==='settings'?settingsFile():evolvedToolsFile());
+  await checkpointPrivateConfig(name,currentText);
+  const value=await restoreVeloPrivateConfig(name,String(checkpointId));
+  if(name==='settings'){
+    const restored=JSON.parse(value) as AppSettings;
+    if(!restored||typeof restored!=='object'||typeof restored.ollamaUrl!=='string'||typeof restored.contextWindow!=='number')throw Error('The selected settings checkpoint is invalid.');
+    await serializeMutation('settings',()=>writeEncryptedText(settingsFile(),value));settingsCache=restored;
+    if(!restored.creativeIterationEnabled&&creativeIterationRuns.size){const runs=[...creativeIterationRuns.values()];for(const run of runs){run.cancelled=true;run.abort.abort();}await diffusionManager.stop();await Promise.all(runs.map(run=>run.done));}
+  }else{
+    const parsed=JSON.parse(value) as unknown;if(!Array.isArray(parsed)||parsed.some(item=>!item||typeof item.id!=='string'||typeof item.name!=='string'||!Array.isArray(item.steps)))throw Error('The selected tool registry checkpoint is invalid.');
+    await serializeMutation('evolved-tools',()=>writeEncryptedText(evolvedToolsFile(),value));
+  }
+  return true;
+});
 ipcMain.handle('workspace:resolve-review', async (_, conversationId: string, approve: boolean) => workspaceManager.resolve(String(conversationId), approve === true));
-ipcMain.handle('workspace:git-checkpoint', async (_, label?: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose or create a project workspace first.'); return workspaceManager.checkpoint(settings.workspacePath, typeof label === 'string' ? label : undefined); });
-ipcMain.handle('workspace:git-preview-rollback', async (_, checkpointId: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose a project workspace first.'); return workspaceManager.previewRollback(settings.workspacePath, String(checkpointId)); });
-ipcMain.handle('workspace:git-rollback', async (_, checkpointId: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose a project workspace first.'); await workspaceManager.rollback(settings.workspacePath, String(checkpointId)); });
+ipcMain.handle('workspace:velo-checkpoint', async (_, label?: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose or create a project workspace first.'); return workspaceManager.checkpoint(settings.workspacePath, typeof label === 'string' ? label : undefined); });
+ipcMain.handle('workspace:velo-preview-rollback', async (_, checkpointId: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose a project workspace first.'); return workspaceManager.previewRollback(settings.workspacePath, String(checkpointId)); });
+ipcMain.handle('workspace:velo-rollback', async (_, checkpointId: string) => { const settings = await getSettings(); if (!settings.workspacePath) throw new Error('Choose a project workspace first.'); await workspaceManager.rollback(settings.workspacePath, String(checkpointId)); });
 ipcMain.handle('files:select', async () => {
   const textExtensions = ['txt','md','markdown','mdx','rst','csv','tsv','json','xml','html','htm','css','scss','less','js','jsx','mjs','cjs','ts','tsx','vue','svelte','py','rs','go','java','kt','c','h','cpp','hpp','cs','rb','php','swift','sh','ps1','sql','yaml','yml','toml','ini','log','ipynb','tex'];
   const officeExtensions = ['pdf','docx','pptx','xlsx','doc','xls','ppt','odt','ods','odp','rtf','epub','odg'];
@@ -2902,7 +2980,7 @@ async function canvasDocumentForFile(file: string, source: 'workspace'|'local', 
   const content = office ? String((await (await OfficeParser.parseOffice(file)).to('text')).value ?? '') : await fs.readFile(file,'utf8');
   return { id:crypto.randomUUID(), name, format:office?'text':'code', content, path:displayPath, conversationId, source };
 }
-async function modelInputMessages(messages: Message[], settings: AppSettings) {
+async function modelInputMessages(messages: Message[]) {
   return Promise.all(messages.map(async message => {
     const images = await Promise.all((message.attachments ?? []).filter(item => item.kind === 'image').map(async item => {
       if (!/^[0-9a-f-]{36}$/i.test(item.id) || !/^image\/(png|jpeg|webp|gif|bmp)$/.test(item.mimeType)) return null;
