@@ -1,3 +1,4 @@
+// Copyright (c) 2026 quietsource. Licensed under the MIT License; see LICENSE.
 import { Worker } from 'node:worker_threads';
 import type { OrionFS, OFSConfig } from '../../ofs';
 

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 quietsource. Licensed under the MIT License; see LICENSE.
 import type { ExtractedKnowledge, MemoryType } from './ofs';
 
 export const OFS_ENCODING_VERSION = 'distributed-local-v1';

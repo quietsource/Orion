@@ -47,6 +47,24 @@
 .swarm-view .swarm-composer>button { justify-self:end;min-width:140px; }
 .create-view .create-composer-wrap { padding-right:58px;padding-left:58px; }
 @media(max-width:760px) { .create-view .create-composer-wrap,.swarm-view .create-composer-wrap { padding:24px 44px 0; } }
+/* Keep the Belt creator within the dock even when its form grows, and expose six team choices before scrolling. */
+.swarm-view .create-composer-wrap { box-sizing:border-box;min-width:0;overflow:visible;padding-right:0;padding-left:0;display:flex;justify-content:center; }
+.swarm-view .swarm-composer { box-sizing:border-box;width:min(820px,100%);max-width:100%;min-width:0;max-height:min(58vh,560px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;border-radius:20px 20px 0 0!important;background:var(--composer-bg,var(--chrome-bg,var(--surface)))!important; }
+:root[data-theme] .swarm-view .swarm-composer { flex:0 1 820px;margin-inline:auto;border-radius:20px 20px 0 0!important;background:var(--composer-dock,var(--chrome-bg,var(--surface)))!important; }
+:root[data-theme] .swarm-view .swarm-composer:focus-within .composer-frame-outline { opacity:0!important; }
+.swarm-view .swarm-composer>* { box-sizing:border-box;min-width:0;max-width:100%; }
+.swarm-view .swarm-composer input:not([type=checkbox]),.swarm-view .swarm-composer textarea,.swarm-view .swarm-composer select { display:block;width:100%;min-width:0;min-height:40px;padding:9px 11px;border:1px solid var(--border)!important;border-radius:10px!important;background:var(--surface)!important;color:var(--text)!important;font:inherit;line-height:1.45;resize:vertical; }
+.swarm-view .swarm-composer textarea { min-height:74px; }
+.swarm-view .swarm-composer input::placeholder,.swarm-view .swarm-composer textarea::placeholder { color:var(--muted);opacity:1; }
+.swarm-view .swarm-composer input:not([type=checkbox]):focus,.swarm-view .swarm-composer textarea:focus,.swarm-view .swarm-composer select:focus { border-color:color-mix(in srgb,var(--accent) 58%,var(--border))!important;outline:2px solid color-mix(in srgb,var(--accent) 16%,transparent);outline-offset:1px; }
+.swarm-view .belt-model-team { width:100%;min-width:0; }
+.swarm-view .belt-model-options { grid-auto-rows:42px;max-height:136px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable; }
+.swarm-view .belt-model-option { box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr) 126px;align-items:center;gap:8px;min-width:0;max-width:100%;height:42px;overflow:hidden;padding:4px 7px; }
+.swarm-view .belt-model-choice { display:flex;align-items:center;gap:8px;min-width:0;overflow:hidden;cursor:pointer; }
+.swarm-view .belt-model-choice input[type=checkbox] { flex:0 0 14px;width:14px;height:14px;margin:0;padding:0;accent-color:var(--accent); }
+.swarm-view .belt-model-choice span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.swarm-view .belt-model-engine { min-height:30px!important;height:30px;padding:3px 7px!important;border-radius:8px!important;font-size:10px!important; }
+@media(max-width:760px) { .swarm-view .create-composer-wrap { padding-right:18px;padding-left:18px; }.swarm-view .belt-model-options { grid-template-columns:minmax(0,1fr);max-height:calc(6 * 42px + 5 * 5px); } }
 @media(prefers-reduced-motion:reduce) { .create-view .chat-shell-frame,.swarm-view .chat-shell-frame { transition:none; } }
 @media(max-width:760px) { .composer-wrap { background:none; } }
 

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 quietsource. Licensed under the MIT License; see LICENSE.
 // ofs.ts — OrionFS (Holographic Associative Memory Engine for Local LLMs)
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";

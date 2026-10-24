@@ -1,3 +1,4 @@
+// Copyright (c) 2026 quietsource. Licensed under the MIT License; see LICENSE.
 import * as fs from 'node:fs/promises';
 import * as crypto from 'node:crypto';
 import * as zlib from 'node:zlib';

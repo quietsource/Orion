@@ -13,9 +13,11 @@ export type CanvasFormat = 'markdown'|'html'|'pdf'|'text'|'code'|'image';
 export interface CanvasDocument { id: string; name: string; format: CanvasFormat; content: string; textContent?: string; attachment?: MessageAttachment; path?: string; conversationId?: string; source: 'workspace'|'local'|'response'; }
 export interface CanvasEvent { conversationId: string; document: CanvasDocument; }
 export type ToolMode = 'chat' | 'code';
+export type McpTransportKind = 'stdio'|'http';
+export interface McpServerConfig { id:string; name:string; transport:McpTransportKind; enabled:boolean; command?:string; args?:string[]; cwd?:string; env?:Record<string,string>; url?:string; headers?:Record<string,string>; enabledTools?:string[]; }
 export interface Conversation { localOnly?: boolean; privateVoice?: boolean; id: string; title: string; model: string; engine?: InferenceEngine; createdAt: number; updatedAt: number; messages: Message[]; summary?: string; workspacePath?: string; mode?: ToolMode; }
 export type OrionTheme = 'graphite' | 'midnight' | 'ocean' | 'forest' | 'rose' | 'ember' | 'light' | 'paper';
-export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; selectedEngine: InferenceEngine; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; composerDreaming: boolean; idleConsolidationEnabled: boolean; idleConsolidationHours: number; idleConsolidationMinutes: number; idleConsolidationChargingOnly: boolean; idleOvernightReport: boolean; evolvingToolsEnabled: boolean; creativeIterationEnabled: boolean; creativeIterationLimit: number; aiChangeHistoryEnabled: boolean; swarmEnabled: boolean; swarmIdleMinutes: number; swarmCycleMinutes: number; }
+export interface AppSettings { autoCollapseThinking: boolean; ollamaUrl: string; selectedModel: string; selectedEngine: InferenceEngine; defaultImageModel: string; defaultVideoModel: string; temperature: number; contextWindow: number; approvalLevel: 'all' | 'external' | 'none'; approvedTools: string[]; workspacePath: string; keepInTray: boolean; interConversationMemory: boolean; experimentalOfsMemory: boolean; startNewConversation: boolean; theme: OrionTheme; disabledTools: string[]; subagentMaxParallel: 0|1|2; composerDreaming: boolean; idleConsolidationEnabled: boolean; idleConsolidationHours: number; idleConsolidationMinutes: number; idleConsolidationChargingOnly: boolean; idleOvernightReport: boolean; evolvingToolsEnabled: boolean; creativeIterationEnabled: boolean; creativeIterationLimit: number; aiChangeHistoryEnabled: boolean; swarmEnabled: boolean; swarmIdleMinutes: number; swarmCycleMinutes: number; mcpServers: McpServerConfig[]; }
 export interface WorkspaceChange { path: string; status: 'added'|'modified'|'deleted'; additions: number; deletions: number; diff: string; }
 export interface WorkspaceReview { conversationId: string; root: string; changes: WorkspaceChange[]; additions: number; deletions: number; }
 export interface VeloCheckpoint { id: string; label: string; ref: string; createdAt: number; }
@@ -43,7 +45,7 @@ export interface AppUpdateState { phase: 'idle'|'available'|'downloading'|'insta
 export interface MemoryCarePreview { expired: number; superseded: number; total: number; activeMemories: number; databaseBytes: number; }
 export interface MemoryCareReport { ranAt: number; expiredRemoved: number; supersededRemoved: number; indexedConversations: number; snapshotAvailable: boolean; }
 export interface EvolvedToolSummary { id: string; name: string; description: string; enabled: boolean; createdAt: number; useCount: number; }
-export type { SwarmCreateInput, SwarmInferenceEngine, SwarmLogEntry, SwarmRecord, SwarmSteerInput, SwarmStatus } from './swarm';
+export type { SwarmCreateInput, SwarmInferenceEngine, SwarmLogEntry, SwarmModelSelection, SwarmRecord, SwarmSteerInput, SwarmStatus } from './swarm';
 export interface EngineInstallProgress { id: string; engine: 'ollama'; phase: 'downloading'|'launched'|'complete'|'error'; received?: number; total?: number; detail: string; }
 export interface OrionAPI {
   voice: import('./voice').VoiceAPI;
@@ -60,6 +62,7 @@ export interface OrionAPI {
   listConversations(): Promise<Conversation[]>; storageWarning(): Promise<string|null>; getConversation(id: string): Promise<Conversation | null>;
   saveConversation(conversation: Conversation, indexMemory?: boolean): Promise<void>; memoryStats(conversationId?: string): Promise<{ indexedTokens: number; limitTokens: number; chunks: number; embeddedChunks: number; embeddingModel: string|null; semantic: boolean; recoveryWarning: string|null; rebuilding: boolean; engine?: 'orion'|'ofs'; activeMemories?: number; workingTurns?: number; links?: number; databaseBytes?: number }>; rebuildMemory(): Promise<void>; deleteConversation(id: string): Promise<void>;
   settings(): Promise<AppSettings>; saveSettings(settings: AppSettings): Promise<void>; getSystemPrompt(model?: string, mode?: ToolMode): Promise<string>;
+  refreshMcpServers(force?:boolean): Promise<Array<{id:string;state:'connected'|'error'|'disabled';detail:string;tools:Array<{name:string;description:string;enabled:boolean}>}>>;
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
   streamChat(input: { conversationId: string; model: string; engine?: InferenceEngine; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
   cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string;sourceName?:string;sourcePart?:number;sourcePage?:number;reason?:string;score?:number}>; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
@@ -74,13 +77,14 @@ export interface OrionAPI {
   setEvolvedToolEnabled(id: string, enabled: boolean): Promise<void>;
   listSwarms(): Promise<import('./swarm').SwarmRecord[]>;
   createSwarm(input: import('./swarm').SwarmCreateInput): Promise<import('./swarm').SwarmRecord>;
-  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string; engine?: import('./swarm').SwarmInferenceEngine; model?: string }): Promise<void>;
+  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string; models?: import('./swarm').SwarmModelSelection[]; engine?: import('./swarm').SwarmInferenceEngine; model?: string }): Promise<void>;
   startSwarm(id: string): Promise<void>;
   pauseSwarm(id: string): Promise<void>;
   resumeSwarm(id: string): Promise<void>;
   killSwarm(id: string): Promise<void>;
   deleteSwarm(id: string): Promise<void>;
   steerSwarm(id: string, steer: import('./swarm').SwarmSteerInput): Promise<void>;
+  respondToAgentNetworkRequest(id: string, requestId: string, allowed: boolean): Promise<void>;
   openSwarmFolder(id: string): Promise<void>;
   getSwarmVeloHistory(id: string): Promise<string>;
   onSwarmUpdate(callback: (swarm: import('./swarm').SwarmRecord) => void): () => void;

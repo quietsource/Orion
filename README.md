@@ -27,4 +27,10 @@ Distribute the setup EXE, portable EXE, or complete portable ZIP; never distribu
 
 This edition uses the existing orion-local-ai per-user application data directory, including its conversations, models, engines, voices, settings and OFS database. Existing Electron encryption keys are unlocked in place without replacing them. Conversations, settings, API keys and OFS payloads remain encrypted with AES-256-GCM and an OS-protected root key. Models and generated media are unencrypted. Existing network and local inference behavior is retained.
 
+## MCP servers
+
+Orion can connect regular chat to Model Context Protocol servers over local stdio processes or Streamable HTTP. Add and manage servers in **Settings → MCP servers**; servers start disabled, and only tools explicitly enabled for a server are sent to the model. The **MCP** control in the composer lets you enable or disable configured servers and their discovered tools immediately. Those choices are saved in Orion's encrypted settings, including custom headers and environment values.
+
+Local stdio MCP processes run as the current operating-system user and inherit the access of that process; connect only servers you trust. Remote endpoints require HTTPS, while plain HTTP is limited to loopback. MCP tools can have side effects, so enable only the tools you intend to expose. Belt Agents do not receive MCP tools: their private workspace and narrowly brokered, individually approved public-page fetch remain separate from general MCP capabilities.
+
 Run `bun run verify:source` to verify the recorded original source hashes. All conversion files and test fixtures remain in this child folder. See MIGRATION.md for validation details.

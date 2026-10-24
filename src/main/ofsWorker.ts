@@ -1,3 +1,4 @@
+// Copyright (c) 2026 quietsource. Licensed under the MIT License; see LICENSE.
 import { parentPort, workerData } from 'node:worker_threads';
 import { OrionFS, type OFSConfig } from '../../ofs';
 

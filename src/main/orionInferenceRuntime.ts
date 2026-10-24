@@ -17,6 +17,28 @@ function freePort() {
   });
 }
 
+/** Use larger prompt chunks only when the GPU has enough free memory to absorb the extra workspace. */
+async function tunedPrefillChunkTokens() {
+  try {
+    const child = spawn('nvidia-smi', ['--query-gpu=memory.free', '--format=csv,noheader,nounits'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let output = '';
+    const result = await new Promise<number | undefined>(resolve => {
+      const timeout = setTimeout(() => { child.kill(); resolve(undefined); }, 1500);
+      child.stdout?.on('data', chunk => { output = (output + String(chunk)).slice(-256); });
+      child.once('error', () => { clearTimeout(timeout); resolve(undefined); });
+      child.once('close', code => {
+        clearTimeout(timeout);
+        const free = Number.parseInt(output.trim().split(/\s+/)[0] ?? '', 10);
+        resolve(code === 0 && Number.isFinite(free) ? free : undefined);
+      });
+    });
+    // Leave at least a few GiB for model weights, KV cache growth, and the desktop.
+    if (result !== undefined && result >= 14_000) return 2048;
+    if (result !== undefined && result >= 8_000) return 1024;
+  } catch { /* Non-NVIDIA hosts use the conservative runtime default. */ }
+  return 512;
+}
+
 /** Orion's locally managed inference runtime for supported model formats. */
 export class OrionInferenceRuntime {
   private child: ChildProcess | null = null;
@@ -69,10 +91,12 @@ export class OrionInferenceRuntime {
     this.port = await freePort();
     const modelDirectory = path.dirname(modelPath);
     const modelFile = path.basename(modelPath);
+    const prefillChunk = await tunedPrefillChunkTokens();
+    check();
     const args = ['serve', '-m', modelDirectory];
     if (format === 'gguf') args.push('-f', modelFile);
     else args.push('--format', 'plain');
-    args.push('--max-model-len', String(context), '--max-seqs', '1', '--host', '127.0.0.1', '--port', String(this.port), '--no-ui');
+    args.push('--max-model-len', String(context), '--max-seqs', '1', '--max-prefill-chunk-tokens', String(prefillChunk), '--host', '127.0.0.1', '--port', String(this.port), '--no-ui');
     this.log = '';
     const child = spawn(this.executable(), args, { cwd: path.dirname(this.executable()), windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, CUDA_MODULE_LOADING: 'LAZY' } });
     child.stderr?.on('data', chunk => { this.log = (this.log + String(chunk)).slice(-12000); });

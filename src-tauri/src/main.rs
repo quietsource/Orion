@@ -244,16 +244,16 @@ async fn native_operation(app: AppHandle, method: String, args: Value) -> Result
         let quit=MenuItem::with_id(&app,"quit","Quit Orion",true,None::<&str>).map_err(|error|error.to_string())?;
         let separator=PredefinedMenuItem::separator(&app).map_err(|error|error.to_string())?;
         let menu=if running {
-          let name=args["name"].as_str().unwrap_or("Private swarm");
+          let name=args["name"].as_str().unwrap_or("Private agent");
           let iteration=args["iteration"].as_u64().unwrap_or(0);
           let idle=args["idleMinutes"].as_u64().unwrap_or(10);
           let cadence=args["cycleMinutes"].as_u64().unwrap_or(5);
           let status=MenuItem::with_id(&app,"swarm-status",format!("Running · {name}"),false,None::<&str>).map_err(|error|error.to_string())?;
-          let progress=MenuItem::with_id(&app,"swarm-iteration",format!("Iteration {iteration}"),false,None::<&str>).map_err(|error|error.to_string())?;
-          let schedule=MenuItem::with_id(&app,"swarm-idle",format!("Runs after {idle} min idle"),false,None::<&str>).map_err(|error|error.to_string())?;
-          let cadence=MenuItem::with_id(&app,"swarm-cadence",format!("Work cycle every {cadence} min"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let progress=MenuItem::with_id(&app,"agent-iteration",format!("Iteration {iteration}"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let schedule=MenuItem::with_id(&app,"agent-idle",format!("Runs after {idle} min idle"),false,None::<&str>).map_err(|error|error.to_string())?;
+          let cadence=MenuItem::with_id(&app,"agent-cadence",format!("Belt step every {cadence} min"),false,None::<&str>).map_err(|error|error.to_string())?;
           let pause=MenuItem::with_id(&app,"swarm-pause","Pause now",true,None::<&str>).map_err(|error|error.to_string())?;
-          let swarm=Submenu::with_items(&app,"Pause Swarm",true,&[&status,&progress,&schedule,&cadence,&pause]).map_err(|error|error.to_string())?;
+          let swarm=Submenu::with_items(&app,"Pause Agents",true,&[&status,&progress,&schedule,&cadence,&pause]).map_err(|error|error.to_string())?;
           let second_separator=PredefinedMenuItem::separator(&app).map_err(|error|error.to_string())?;
           Menu::with_items(&app,&[&show,&separator,&swarm,&second_separator,&quit]).map_err(|error|error.to_string())?
         }else{Menu::with_items(&app,&[&show,&separator,&quit]).map_err(|error|error.to_string())?};
