@@ -12,6 +12,12 @@ The nightly is published in place on the `nightly` line while the Tauri edition 
 
 ### Interface and model selection
 
+- Restore the soft blur and fade at the sides of the chat composer, keeping the active conversation readable as it recedes behind the dock.
+- Keep Settings content isolated to its selected tab, and redesign the MCP server controls for clearer setup and management.
+- Collapse the large Belt creation form after a Belt is created; reopen it with a small chevron when another Belt needs to be configured.
+- Add an optional local-model warmup setting. When enabled, Orion begins loading the selected local model after typing starts, so it can be ready when the user sends. Draft text is not sent to hosted providers.
+- Give each Belt card a restrained orbital mesh motif that fits Orion's dark visual style.
+- Choose a host folder and disk for a Belt workspace, set its storage cap during creation, and adjust the cap when editing. Belt-mediated writes enforce the configured cap.
 - Use Orion-styled right-click menus throughout the app, including text selection, editable fields, links, media, code, and the embedded browser. Native WebView context menus are suppressed.
 - Replace native select popups and browser validation bubbles with rounded Orion menus and validation messages, including in Settings dialogs.
 - Keep Chat, Create, Orion's Belt, and Model Browser inside the continuous application frame. Model browsing starts at its heading and clips result cards within the frame.

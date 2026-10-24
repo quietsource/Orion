@@ -66,8 +66,6 @@ export interface OrionAPI {
   listTools(): Promise<Array<{ name: string; description: string; enabled: boolean }>>;
   streamChat(input: { conversationId: string; model: string; engine?: InferenceEngine; messages: Message[]; agent: boolean; mode?: ToolMode; webSearch?: boolean }): Promise<{ tokensPerSecond?: number }>;
   cancelStream(): Promise<void>; onStream(callback: (event: { conversationId: string; memories?: Array<{id:string;conversationId:string;messageId:string;text:string;sourceName?:string;sourcePart?:number;sourcePage?:number;reason?:string;score?:number}>; sourceFiles?: Array<{id:string;name:string;conversationId:string;messageId:string}>; type: 'memory_context'|'token'|'replace'|'reasoning'|'done'|'cancelled'|'error'|'tool'|'context'|'workspace'|'web'|'canvas'; content?: string; tokensPerSecond?: number; usedContextTokens?: number; maxContextTokens?: number; finishReason?: string; tool?: ToolRequest; phase?: 'started'|'updated'|'finished'; result?: { output: string; success: boolean; imagePath?: string; mediaType?: 'image'|'video' }; workspaceReview?: WorkspaceReview; web?: WebResearchEvent; canvas?: CanvasDocument }) => void): () => void;
-  prepareDraft(conversationId: string, model: string, engine: InferenceEngine, draft: string): Promise<{ ready: boolean; memories: number }>;
-  cancelDraftPreparation(conversationId: string): Promise<void>;
   reportActivity(): Promise<void>;
   previewMemoryCare(): Promise<MemoryCarePreview>;
   runMemoryCare(): Promise<MemoryCareReport>;
@@ -76,8 +74,10 @@ export interface OrionAPI {
   listEvolvedTools(): Promise<EvolvedToolSummary[]>;
   setEvolvedToolEnabled(id: string, enabled: boolean): Promise<void>;
   listSwarms(): Promise<import('./swarm').SwarmRecord[]>;
+  selectBeltStorageLocation(): Promise<string|null>;
   createSwarm(input: import('./swarm').SwarmCreateInput): Promise<import('./swarm').SwarmRecord>;
-  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string; models?: import('./swarm').SwarmModelSelection[]; engine?: import('./swarm').SwarmInferenceEngine; model?: string }): Promise<void>;
+  editSwarm(id: string, changes: { name?: string; objective?: string; completionRules?: string; storageLimitBytes?: number; models?: import('./swarm').SwarmModelSelection[]; engine?: import('./swarm').SwarmInferenceEngine; model?: string }): Promise<void>;
+  warmModel(model: string, engine: InferenceEngine): Promise<{ready:boolean;detail?:string}>;
   startSwarm(id: string): Promise<void>;
   pauseSwarm(id: string): Promise<void>;
   resumeSwarm(id: string): Promise<void>;

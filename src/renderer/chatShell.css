@@ -12,6 +12,11 @@
 :root[data-theme] .system-card { background:transparent;border-color:transparent; }
 :root[data-theme] .canvas-header,:root[data-theme] .canvas-toolbar,:root[data-theme] .canvas-feedback { background:var(--chrome-bg); }
 .composer-wrap { background:none; }
+/* Recreate the soft glass dock: the chat beneath the composer diffuses into the chrome instead of ending at a hard horizontal edge. */
+.composer-wrap { isolation:isolate; }
+.composer-wrap::before { content:"";position:absolute;z-index:0;inset:0;pointer-events:none;background:linear-gradient(to bottom,transparent 0%,color-mix(in srgb,var(--chrome-bg) 30%,transparent) 34%,color-mix(in srgb,var(--chrome-bg) 78%,transparent) 72%,var(--chrome-bg) 100%);-webkit-backdrop-filter:blur(9px);backdrop-filter:blur(9px);mask-image:linear-gradient(to bottom,transparent 0%,#000 30%,#000 100%); }
+.composer-wrap>.composer { position:relative;z-index:1; }
+.composer-wrap>.command-palette,.composer-wrap>.workspace-review { z-index:1; }
 :root[data-theme] .composer { --composer-dock:var(--chrome-bg); }
 .composer-frame-fill { fill:var(--chrome-bg); }
 .composer-frame-outline { opacity:0;stroke-linecap:butt;filter:drop-shadow(0 -1px 3px rgba(197,195,220,.28));transition:opacity .16s ease; }
@@ -77,6 +82,52 @@ body.sidebar-collapsed .app { --layout-sidebar:0px; }
 :root[data-theme] .canvas-sidebar { width:calc(var(--canvas-width) - 8px);max-width:none;justify-self:start;opacity:1;transform:translateX(0);visibility:visible;transition:transform .24s cubic-bezier(.2,.7,.2,1),opacity .18s ease,visibility 0s; }
 :root[data-theme] .canvas-sidebar[hidden] { display:flex;opacity:0;transform:translateX(12px);visibility:hidden;pointer-events:none;transition:transform .24s cubic-bezier(.2,.7,.2,1),opacity .18s ease,visibility 0s linear .24s; }
 @media(prefers-reduced-motion:reduce) { .app,:root[data-theme] .canvas-sidebar,:root[data-theme] .canvas-sidebar[hidden],.composer-frame-outline { transition:none; } }
+
+/* Belt card constellation and compact post-create composer handle. */
+.swarm-view .swarm-card { position:relative;isolation:isolate;overflow:hidden; }
+.swarm-view .swarm-card-mesh,.swarm-view .belt-card-mesh { position:absolute;z-index:0;top:0;right:0;width:min(46%,420px);height:150px;pointer-events:none;opacity:.43;mask-image:linear-gradient(to right,transparent,#000 36%,#000); }
+.swarm-view .belt-card-mesh svg { width:100%;height:100%;overflow:visible; }
+.swarm-view .belt-card-mesh g { fill:none;stroke:color-mix(in srgb,var(--accent) 55%,transparent);stroke-width:.8; }
+.swarm-view .belt-card-mesh circle { fill:var(--accent);stroke:none; }
+.swarm-view .swarm-card>*:not(.belt-card-mesh) { position:relative;z-index:1; }
+.swarm-view .belt-storage-controls { display:grid;grid-template-columns:minmax(0,1fr) minmax(180px,.34fr);gap:10px;min-width:0; }
+.swarm-view .belt-storage-controls>label { display:block;min-width:0;color:var(--secondary);font-size:11px; }
+.swarm-view .belt-storage-row { display:flex;gap:7px;min-width:0;margin-top:6px; }
+.swarm-view .belt-storage-row input { min-width:0;flex:1; }
+.swarm-view .belt-storage-row button { flex:0 0 auto; }
+.swarm-view .belt-storage-controls>label>select { margin-top:6px; }
+.swarm-view .create-composer-wrap.belt-composer-collapsed { display:flex;align-items:flex-end;justify-content:center;padding-top:0;pointer-events:none; }
+.swarm-view .swarm-composer { transition:max-height .28s cubic-bezier(.2,.7,.2,1),opacity .18s ease,transform .28s cubic-bezier(.2,.7,.2,1); }
+.swarm-view .belt-composer-collapsed .swarm-composer { max-height:0!important;min-height:0!important;overflow:hidden!important;opacity:0;transform:translateY(18px);visibility:hidden;pointer-events:none; }
+.swarm-view .belt-composer-reveal { display:grid;width:38px;height:24px;place-items:center;margin:0 auto -1px;padding:0;border:0;border-radius:12px 12px 0 0;background:var(--composer-dock,var(--chrome-bg));color:var(--secondary);pointer-events:auto;cursor:pointer; }
+.swarm-view .belt-composer-reveal[hidden] { display:none; }
+.swarm-view .belt-composer-reveal svg { width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round; }
+@media(max-width:760px) { .swarm-view .belt-storage-controls { grid-template-columns:minmax(0,1fr); } }
+
+/* Quiet MCP settings: one compact overview, clear connection states, and grouped configuration fields. */
+.settings-section:has(.mcp-settings-list)>.muted:first-of-type { max-width:680px; }
+.mcp-settings-list { gap:16px; }
+.mcp-server-list { gap:10px; }
+.mcp-server-card { grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px 16px;padding:15px 16px;border-color:var(--border-soft);border-radius:14px;background:linear-gradient(135deg,color-mix(in srgb,var(--surface-raised) 76%,transparent),var(--surface)); }
+.mcp-server-head { grid-column:1/-1;align-items:center; }
+.mcp-server-head .job-check { display:flex;align-items:center;gap:9px;min-width:0;padding:0;border:0;background:transparent; }
+.mcp-server-head .job-check strong { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:13px; }
+.mcp-server-state { flex:0 0 auto;padding:4px 8px;border:1px solid var(--border-soft);border-radius:999px;background:var(--bg);font-size:10px; }
+.mcp-server-state.connected { border-color:color-mix(in srgb,var(--success) 35%,var(--border));color:var(--success); }
+.mcp-server-state.error { border-color:color-mix(in srgb,var(--danger) 35%,var(--border)); }
+.mcp-server-card>.mcp-tool-list { grid-column:1/-1; }
+.mcp-server-actions { grid-column:2;grid-row:2;align-self:center; }
+.mcp-server-add { gap:12px;padding:16px;border-color:var(--border);border-radius:14px;background:var(--surface); }
+.mcp-server-add h4 { font-size:13px; }
+.mcp-server-add>label { display:grid;gap:6px;color:var(--muted);font-size:10px; }
+.mcp-server-add input,.mcp-server-add textarea,.mcp-server-add select { box-sizing:border-box;min-height:38px;border-radius:9px!important;background:var(--bg)!important; }
+.mcp-server-add textarea { min-height:56px;resize:vertical; }
+.mcp-fields { grid-template-columns:repeat(2,minmax(0,1fr));gap:9px; }
+.mcp-tool-list { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.mcp-tool-list>strong { grid-column:1/-1; }
+.mcp-tool-row { min-height:34px;align-items:center;padding:5px 8px;border:1px solid var(--border-soft);border-radius:8px;background:color-mix(in srgb,var(--bg) 70%,transparent); }
+.mcp-settings-list>.muted { padding:12px 14px;border:1px solid var(--border-soft);border-radius:11px;background:var(--bg); }
+@media(max-width:640px) { .mcp-fields,.mcp-tool-list { grid-template-columns:minmax(0,1fr); }.mcp-server-actions { grid-column:1/-1;grid-row:auto; } }
 
 .titlebar > .canvas-open-button { height:28px;margin:0 4px 0 0;flex:0 0 30px;-webkit-app-region:no-drag; }
 .app > .main > .header > .expand { position:absolute;top:2px;left:8px;z-index:2;-webkit-app-region:no-drag; }

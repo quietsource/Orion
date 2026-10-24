@@ -79,10 +79,6 @@ const memoryCareLatestFile = () => path.join(memoryCareDir(), 'latest.json');
 const memoryCareReportFile = () => path.join(memoryCareDir(), 'report.json');
 function veloBinaryPath(){return path.join(app.getAppPath(),'build','velo',process.platform==='win32'?'velo.exe':`velo-${process.platform}-${process.arch}`);}
 async function runManagedVelo(args:string[],cwd:string){const binary=veloBinaryPath();await fs.access(binary);const child=Bun.spawn([binary,...args],{cwd,stdout:'pipe',stderr:'pipe',windowsHide:true});const[stdout,stderr,status]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);const output=`${stdout}\n${stderr}`.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g,'').trim();if(status!==0)throw Error(output.slice(-1500)||`Velo ${args[0]} failed.`);return output;}
-const draftDreamCache = new Map<string, { preparedAt: number; conversationId: string; model: string; engine: InferenceEngine; query: string; memories: MemoryChunk[] }>();
-function draftDreamKey(conversationId: string, model: string, engine: InferenceEngine, query: string) {
-  return createHash('sha256').update(`${conversationId}\0${model}\0${engine}\0${query.trim().slice(0, 6000)}`).digest('hex');
-}
 function getMemoryHistory() {
   return memoryHistory ??= new MemoryHistory({
     directory: path.join(dataDir(), 'memory-history'),
@@ -1796,8 +1792,9 @@ ipcMain.handle('background:activity', event => {
   lastUserActivityAt = Date.now(); return true;
 });
 ipcMain.handle('swarm:list', () => swarmManager?.list() ?? []);
+ipcMain.handle('swarm:select-storage', async () => {if(!win) return null;const result=await dialog.showOpenDialog(win,{properties:['openDirectory','createDirectory']});return result.canceled?null:result.filePaths[0]??null;});
 ipcMain.handle('swarm:create', async (_event,input: import('../shared/swarm').SwarmCreateInput) => {if(!swarmManager)throw Error('Swarm is still starting.');return swarmManager.create(input);});
-ipcMain.handle('swarm:edit', async (_event,id:string,changes:{name?:string;objective?:string;completionRules?:string;engine?:import('../shared/swarm').SwarmInferenceEngine;model?:string}) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.edit(id,changes);});
+ipcMain.handle('swarm:edit', async (_event,id:string,changes:{name?:string;objective?:string;completionRules?:string;storageLimitBytes?:number;engine?:import('../shared/swarm').SwarmInferenceEngine;model?:string}) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.edit(id,changes);});
 ipcMain.handle('swarm:start', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.start(id);});
 ipcMain.handle('swarm:pause', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.pause(id);});
 ipcMain.handle('swarm:resume', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.resume(id);});
@@ -1807,23 +1804,23 @@ ipcMain.handle('swarm:steer', async (_event,id:string,value:SwarmSteerInput) => 
 ipcMain.handle('swarm:network-decision', async (_event,id:string,requestId:string,allowed:boolean) => {if(!swarmManager)throw Error('Agents are unavailable.');return swarmManager.respondToNetworkRequest(id,requestId,allowed===true);});
 ipcMain.handle('swarm:open-folder', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return shell.openPath(await swarmManager.openFolder(id));});
 ipcMain.handle('swarm:velo-history', async (_event,id:string) => {if(!swarmManager)throw Error('Swarm is unavailable.');return swarmManager.veloHistory(id);});
-ipcMain.handle('dream:prepare', async (event, conversationId: string, model: string, engine: InferenceEngine, draft: string) => {
-  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Draft preparation is only available in Orion chat.');
-  const settings = await getSettings();
-  if (!settings.composerDreaming || !conversationId || !/^[a-f0-9-]{36}$/i.test(conversationId) || !['orion','llama.cpp','ollama'].includes(engine) || model.startsWith('api:')) return { ready: false, memories: 0 };
-  const query = String(draft ?? '').trim().slice(0, 6000);
-  if (query.length < 12) return { ready: false, memories: 0 };
-  const conversation = (await readConversations()).find(item => item.id === conversationId);
-  const key = draftDreamKey(conversationId, model, engine, query);
-  const matches = await retrieveConversationMemory(query, settings, Math.min(3600, Math.floor(settings.contextWindow * 0.24)), new Set(), chunk => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, model) + 1, conversationId, Boolean(conversation?.localOnly || conversation?.privateVoice));
-  draftDreamCache.set(key, { preparedAt: Date.now(), conversationId, model, engine, query, memories: matches });
-  while (draftDreamCache.size > 24) draftDreamCache.delete(draftDreamCache.keys().next().value!);
-  return { ready: true, memories: matches.length };
-});
-ipcMain.handle('dream:cancel', async (event, conversationId: string) => {
-  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Draft preparation is only available in Orion chat.');
-  for (const [key, item] of draftDreamCache) if (item.conversationId === conversationId) draftDreamCache.delete(key);
-  return true;
+ipcMain.handle('model:warm', async (event, modelName: string, engine: InferenceEngine) => {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw Error('Model warming is only available in Orion chat.');
+  const settings = await getSettings(), model = String(modelName ?? '').trim().slice(0,256);
+  if (!settings.composerDreaming || !model || model.startsWith('api:') || !['orion','llama.cpp','ollama'].includes(engine)) return { ready:false };
+  if (activeAbort || chatPreparing || appQuitting) return { ready:false, detail:'Chat is busy' };
+  if (engine === 'ollama') {
+    const response = await fetch(`${validateOllamaUrl(settings.ollamaUrl)}/api/generate`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model,prompt:'',stream:false,keep_alive:'5m'}),signal:AbortSignal.timeout(120_000)});
+    if (!response.ok) throw Error(`Ollama could not warm ${model} (${response.status}).`);
+    await response.arrayBuffer(); return {ready:true};
+  }
+  const installed = (await readInstalledModels()).find(item => item.category === 'conversational' && (item.id === model || item.repo === model || `orion-gguf:${item.id}` === model));
+  if (!installed) return {ready:false,detail:'Select a downloaded local model'};
+  const root=path.resolve(modelsRoot()), modelPath=path.resolve(root,installed.path);
+  if(!modelPath.startsWith(`${root}${path.sep}`)) throw Error('The selected local model path is invalid.');
+  if(engine==='orion') await orionInferenceRuntime.ensureServer(modelPath,Math.min(settings.contextWindow,8192),installed.format??'gguf');
+  else await llamaManager.ensureServer(modelPath,Math.min(settings.contextWindow,8192),modelMmprojPath(installed,root));
+  return {ready:true};
 });
 ipcMain.handle('settings:get', getSettings);
 ipcMain.handle('settings:save', async (_, value: Partial<AppSettings>) => {
@@ -2508,13 +2505,7 @@ ipcMain.handle('ollama:chat', async (event, input: { conversationId: string; mod
   const retrievalQuestion = (attachmentStart >= 0 ? latestUserRequest.slice(0, attachmentStart) : latestUserRequest).trim();
   const memoryPromptTokens = (chunk: { title: string; role: string; text: string; createdAt: number }) => estimateModelChatTokens(memoryPromptText(chunk), settings.ollamaUrl, input.model) + 1;
   const memoryScope = input.conversationId;
-  const dreamEngine = input.engine ?? conversation?.engine ?? settings.selectedEngine ?? 'orion';
-  const dreamKey = draftDreamKey(input.conversationId, input.model, dreamEngine, retrievalQuestion);
-  const prewarmedDraft = settings.composerDreaming ? draftDreamCache.get(dreamKey) : undefined;
-  if (prewarmedDraft) draftDreamCache.delete(dreamKey);
-  const currentRequestMemory = prewarmedDraft && Date.now() - prewarmedDraft.preparedAt < 45_000
-    ? Promise.resolve(prewarmedDraft.memories.filter(chunk => !recentMessageIds.has(chunk.messageId)).slice(0, 48))
-    : retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice));
+  const currentRequestMemory = retrieveConversationMemory(retrievalQuestion.slice(0, 6000), settings, primaryMemoryBudget, recentMessageIds, memoryPromptTokens, memoryScope, Boolean(privateVoice));
   const recentContextQuery = [
     `Current request: ${latestUserRequest.slice(0, 2400)}`,
     ...priorDialogueContext.map(message => `Recent ${message.role} context: ${message.content.slice(0, 800)}`)

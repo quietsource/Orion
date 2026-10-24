@@ -1,6 +1,8 @@
-# Orion Tauri 0.2.5 Nightly
+# Orion
 
-Nightly Tauri v2 conversion of Orion, based on the 0.2.0 application. The original source in the parent directory is unchanged.
+Orion is a private, local-first AI desktop application. This repository contains Orion's primary Tauri v2 application, with local model inference, image and video creation, document-aware memory, and Orion's Belt multi-model agent harness.
+
+This edition is the main Orion application. Its per-user data directory is shared with the earlier Electron edition so existing conversations, models, engines, voices, settings, and OrionFS memories remain available when moving between editions. The Electron source is maintained separately.
 
 ## Architecture
 
@@ -25,7 +27,7 @@ Distribute the setup EXE, portable EXE, or complete portable ZIP; never distribu
 
 ## Existing Orion data
 
-This edition uses the existing orion-local-ai per-user application data directory, including its conversations, models, engines, voices, settings and OFS database. Existing Electron encryption keys are unlocked in place without replacing them. Conversations, settings, API keys and OFS payloads remain encrypted with AES-256-GCM and an OS-protected root key. Models and generated media are unencrypted. Existing network and local inference behavior is retained.
+Orion uses the existing `orion-local-ai` per-user application data directory, including conversations, models, engines, voices, settings, and the OFS database. Existing Electron encryption keys are unlocked in place without replacing them. Conversations, settings, API keys, and OFS payloads remain encrypted with AES-256-GCM and an OS-protected root key. Model files and generated media are unencrypted. Local inference runs on the computer; hosted providers receive prompts and relevant memory when selected. Web search, model downloads, and initial engine setup use the network.
 
 ## MCP servers
 
@@ -33,4 +35,4 @@ Orion can connect regular chat to Model Context Protocol servers over local stdi
 
 Local stdio MCP processes run as the current operating-system user and inherit the access of that process; connect only servers you trust. Remote endpoints require HTTPS, while plain HTTP is limited to loopback. MCP tools can have side effects, so enable only the tools you intend to expose. Belt Agents do not receive MCP tools: their private workspace and narrowly brokered, individually approved public-page fetch remain separate from general MCP capabilities.
 
-Run `bun run verify:source` to verify the recorded original source hashes. All conversion files and test fixtures remain in this child folder. See MIGRATION.md for validation details.
+Run `bun run verify:source` to verify the recorded original source hashes. See [MIGRATION.md](MIGRATION.md) for conversion and data compatibility details.
