@@ -293,7 +293,7 @@ function scheduleRender(structureChanged = false) {
   }, streaming ? Math.max(0, 100 - (performance.now() - lastStreamPaint)) : 0);
 }
 const now = () => Date.now(); const id = () => crypto.randomUUID();
-const versionLabel = document.querySelector<HTMLElement>('.version'); if (versionLabel) versionLabel.textContent = `Orion · ${__ORION_VERSION__}-nightly`;
+const versionLabel = document.querySelector<HTMLElement>('.version'); if (versionLabel) versionLabel.textContent = `Orion · ${__ORION_VERSION__}`;
 function setComposerStreaming(active: boolean) {
   if (active && !streaming) generationIdle = new Promise(resolve => { resolveGenerationIdle = resolve; });
   if (!active) { resolveGenerationIdle?.(); resolveGenerationIdle = undefined; }

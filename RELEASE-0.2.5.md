@@ -1,8 +1,8 @@
-# Orion 0.2.5 Nightly
+# Orion 0.2.5
 
-This nightly is Orion's Tauri v2 edition, developed alongside the stable Electron release. It carries forward stable 0.2.0 features including conversation history, checkpoints and branches, source receipts, local voice, OrionFS memory, Canvas, and image and video creation. Tauri uses Orion's existing per-user data directory, so conversations, encrypted settings and API keys, memories, installed models, engines, and voice setup remain available.
+Orion 0.2.5 is the primary Tauri v2 edition. It carries forward the stable 0.2.0 features, including conversation history, checkpoints and branches, source receipts, local voice, OrionFS memory, Canvas, and image and video creation. It uses Orion's existing per-user data directory, so conversations, encrypted settings and API keys, memories, installed models, engines, and voice setup remain available.
 
-The nightly is published in place on the `nightly` line while the Tauri edition is tested and brought toward feature parity. The sidebar keeps the concise **Agents** label; the feature and workspace are presented as **Orion's Belt**.
+The sidebar keeps the concise **Agents** label; the multi-model harness and its workspaces are presented as **Orion's Belt**.
 
 ### Orion's Belt
 
@@ -49,7 +49,7 @@ The nightly is published in place on the `nightly` line while the Tauri edition 
 - Normalize Windows resource paths in the bundled service so native Canvas modules load correctly in installed and portable packages.
 - Resolve older model indexes from each model's `config.json`, and keep model loads from starting automatically on app launch.
 
-All stable 0.2.0 conversation history, memory checkpoints, branching and comparison, source receipts, local handoff, voice, Canvas, chat tools, web search, and image and video creation remain part of this nightly.
+Stable 0.2.0 conversation history, memory checkpoints, branching and comparison, source receipts, local handoff, voice, Canvas, chat tools, web search, and image and video creation are included in this release.
 
 ### Downloads and support
 
@@ -57,4 +57,4 @@ All stable 0.2.0 conversation history, memory checkpoints, branching and compari
 - Linux x64: AppImage, DEB, and RPM.
 - macOS is not currently supported.
 
-This is a prerelease for testing. Linux desktop and legacy Linux keyring migration need further runtime validation, and full Wan video generation may vary with model and hardware. Orion Inference uses CUDA on Windows and a CPU backend on other supported builds. The original Electron source and stable release remain unchanged.
+Orion Inference uses CUDA on Windows and a CPU backend on Linux. Image and video generation capability depends on the selected model and available hardware.

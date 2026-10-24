@@ -1,28 +1,19 @@
-# Orion Tauri 0.2.5 — Nightly
+# Orion 0.2.5 — Tauri edition
 
-## Fixes and improvements
+Orion's Tauri v2 edition becomes the primary Orion application. This release combines the stable 0.2.0 conversation and voice features with the Tauri desktop shell, Orion's Belt, document-aware OrionFS, and the latest model and interface improvements. See [RELEASE-0.2.5.md](RELEASE-0.2.5.md) for the full release notes.
 
-- Remove the engine installation card from the model browser's Manage page.
-- Add RAM and VRAM fit estimates for conversational model variants, filters for models that fit this PC, GPU fits, CPU or partial GPU fits, and models that may exceed available memory, plus best-fit sorting.
-- Preserve the visible model card when quantization files are opened or model results refresh.
-- Anchor populated chat messages to the bottom so new conversations flow upward from the latest exchange.
-- Recover OrionFS after an unexpected worker failure and allow its regular status refresh to reconnect.
-- Resolve Tauri's Windows extended resource paths before loading native Bun addons, fixing packaged backend startup in both installed and portable builds.
-- Import documents and folders into a conversation's OrionFS context from Canvas, extract supported document and PDF text, OCR supported scanned PDFs and images locally, and retain source details for citations. Index supported chat attachments into the active conversation automatically.
-- Compact encrypted OrionFS snapshots into a versioned `.ofs` container using Orion's existing encryption. Reclaim unused SQLite pages, prune obsolete chunks and versions, retain only the current snapshot, and keep warmed retrieval free of per-query console logging unless `ORION_OFS_PROFILE=1` is set.
-- Improve the Create page layout and make the creations panel independently scrollable.
-- Clarify that the Tauri nightly carries forward stable 0.2.0 conversation history, checkpoints, branches, source receipts, local voice, Canvas tools and media creation while using a separate Tauri v2 shell and bundled Bun service.
-- Suppress native WebView context menus and provide Orion-styled right-click menus for editable text, links, selected text, code and media, including in the embedded browser.
-- Replace native select popups and browser validation bubbles with keyboard-accessible Orion-styled popups, including controls inside Settings dialogs.
-- Use the shared application frame across Chat, Create, Swarm and the Model Browser. Correct Model Browser top spacing and keep results behind the lower frame edge.
-- Match Create and Swarm composer framing and focus treatment to Chat; refine Swarm layout and progress activity.
-- Track creative iteration runs in a browsable local history.
+- Keep existing conversations, installed models and engines, settings, voice setup, and encrypted OrionFS data in Orion's existing per-user data directory.
+- Run the backend as a bundled Bun service with native Tauri windows, tray integration, dialogs, process supervision, and an embedded browser in Canvas.
+- Coordinate persistent private Belt workspaces across selected local models, with user-visible files, OrionFS memory, activity history, steering, pausing, and network approval.
+- Import supported documents, folders, PDFs, and images into conversation memory; extract text and perform OCR locally, and retain source information for answers.
+- Store compact encrypted OrionFS snapshots in the versioned `.ofs` container using Orion's existing at-rest encryption.
+- Include Orion Inference for local GGUF, GPTQ, and AWQ chat models, with CUDA support on Windows, while keeping llama.cpp, Ollama, and configured hosted providers available.
+- Bring forward conversation checkpoints, branches, assumptions, source receipts, local voice, Canvas tools, image and video generation, and native OGS graphs.
+- Include Windows setup and portable packages plus Linux AppImage, DEB, and RPM packages. macOS is not currently supported.
 
-- Replace Electron with Tauri v2 and a standalone Bun backend while retaining the Orion interface and application features.
-- Reuse the existing Orion data directory, installed engines, models and encrypted data. Unlock the original Windows encryption key without replacing it.
-- Embed the full browser UI and native browser tabs in the right Canvas sidebar, with document/browser switching, resizing, navigation, page extraction and keyboard shortcuts.
-- Use native tray, file dialogs and process supervision; preserve local voice and OFS workers under Bun.
-- Build Tauri-specific Windows installers and portable ZIPs. Keep update packages separate from Electron assets.
+## Orion 0.2.5 details
+
+See [RELEASE-0.2.5.md](RELEASE-0.2.5.md) for the Tauri edition, Orion's Belt, model support, OrionFS, and interface improvements.
 
 # Orion 0.2.0 — Conversation memory, alternate paths and local voice
 
